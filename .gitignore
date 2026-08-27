@@ -58,5 +58,15 @@ release/upx/
 release/drivers/
 release/plugins/
 release/implants/
+
+# ── 前端 tsc 构建产物 / 含内部凭据的测试脚本（勿提交） ──
+web/vite.config.js
+web/vite.config.d.ts
+web/tsconfig.node.d.ts
+web/tsconfig.node.js
+web/ws_test.cjs
+# 前端构建产物（CI 构建后生成，勿提交）
+web/dist/
+cmd/server/webdist/
 # release 发布包 USAGE 说明含真实默认凭据示例，开源不提交（release 内容保留不动）
 release/USAGE.md

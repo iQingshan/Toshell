@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+
+jobs:
+  # ── 前端构建 → 同步 webdist（供 server 嵌入） ──
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+        working-directory: web
+
+      - name: Build web
+        run: npm run build
+        working-directory: web
+
+      - name: Sync webdist (embed target)
+        run: |
+          rm -rf cmd/server/webdist
+          mkdir -p cmd/server/webdist
+          cp -r web/dist/. cmd/server/webdist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webdist
+          path: cmd/server/webdist
+
+  # ── Go 服务端构建（-tags webui，嵌入前端）+ vet ──
+  server:
+    runs-on: ubuntu-latest
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: webdist
+          path: cmd/server/webdist
+
+      - name: Build server (tags webui)
+        run: go build -tags webui -ldflags "-s -w" -o toserver ./cmd/server
+
+      - name: Vet
+        run: go vet ./internal/server/...
+
+      - name: Run unit tests (non-embedded)
+        run: go test ./internal/common/... ./internal/server/config/...
