@@ -40,15 +40,15 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 
 | 仪表盘 | 会话管理 |
 |---|---|
-| ![仪表盘](docs/screenshots/仪表盘.png) | ![会话管理](docs/screenshots/会话管理.png) |
+| <img src="docs/screenshots/dashboard.png" width="880" alt="仪表盘"> | <img src="docs/screenshots/sessions.png" width="880" alt="会话管理"> |
 
 | AI 副驾驶 | 文件管理 |
 |---|---|
-| ![AI 副驾驶](docs/screenshots/AI副驾驶.png) | ![文件管理](docs/screenshots/文件管理.png) |
+| <img src="docs/screenshots/copilot.png" width="880" alt="AI 副驾驶"> | <img src="docs/screenshots/files.png" width="880" alt="文件管理"> |
 
 | 内存执行 |
 |---|
-| ![内存执行](docs/screenshots/内存执行.png) |
+| <img src="docs/screenshots/memexec.png" width="880" alt="内存执行"> |
 
 ## 快速开始
 
