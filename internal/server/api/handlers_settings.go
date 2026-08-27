@@ -109,11 +109,13 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"mimicry_site":    cfg.Listener.MimicrySite,
 		},
 		Implant: map[string]interface{}{
-			"interval":      cfg.Implant.Interval,
-			"jitter":        cfg.Implant.Jitter,
-			"retry_wait":    cfg.Implant.RetryWait,
-			"kill_date":     cfg.Implant.KillDate,
-			"working_hours": cfg.Implant.WorkingHours,
+			"interval":          cfg.Implant.Interval,
+			"jitter":            cfg.Implant.Jitter,
+			"retry_wait":        cfg.Implant.RetryWait,
+			"kill_date":         cfg.Implant.KillDate,
+			"working_hours":     cfg.Implant.WorkingHours,
+			"startup_delay_min": cfg.Implant.StartupDelayMin,
+			"startup_delay_max": cfg.Implant.StartupDelayMax,
 		},
 		Notifications: map[string]interface{}{
 			"enabled":     cfg.Webhook.Enabled,

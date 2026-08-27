@@ -238,6 +238,8 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("implant.retry_count", 3)
 	viper.SetDefault("implant.retry_wait", 5)
 	viper.SetDefault("implant.output_dir", "./implants")
+	viper.SetDefault("implant.startup_delay_min", 5)
+	viper.SetDefault("implant.startup_delay_max", 30)
 
 	viper.SetDefault("database.type", "sqlite")
 	viper.SetDefault("database.path", "./data/toshell.db")

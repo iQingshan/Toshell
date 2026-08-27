@@ -231,9 +231,9 @@ export function Settings() {
                       <span className="setting-desc">植入端启动后随机休眠 [min, max] 秒再连接，打乱「启动即行为」检测（0 关闭）</span>
                     </div>
                     <div className="setting-inputs">
-                      <input type="number" min={0} max={600} value={num(draft.implant.startup_delay_min) || 5} onChange={(e) => setField('implant', 'startup_delay_min', Number(e.target.value))} className="setting-input" placeholder="min" />
+                      <input type="number" min={0} max={600} value={draft.implant.startup_delay_min !== undefined ? num(draft.implant.startup_delay_min) : ''} onChange={(e) => setField('implant', 'startup_delay_min', Number(e.target.value))} className="setting-input" placeholder="min" />
                       <span>~</span>
-                      <input type="number" min={0} max={600} value={num(draft.implant.startup_delay_max) || 30} onChange={(e) => setField('implant', 'startup_delay_max', Number(e.target.value))} className="setting-input" placeholder="max" />
+                      <input type="number" min={0} max={600} value={draft.implant.startup_delay_max !== undefined ? num(draft.implant.startup_delay_max) : ''} onChange={(e) => setField('implant', 'startup_delay_max', Number(e.target.value))} className="setting-input" placeholder="max" />
                     </div>
                   </div>
                 </div>
