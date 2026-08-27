@@ -36,6 +36,9 @@ implant:
     retry_count: 3
     retry_wait: 5
     working_hours: ""
+    # 启动随机延迟（秒）：植入端启动后随机休眠 [min,max] 秒，打乱"启动即行为"检测（0 关闭）
+    startup_delay_min: 5
+    startup_delay_max: 30
 
 listener:
     cert_file: ""

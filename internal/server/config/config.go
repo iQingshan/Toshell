@@ -99,6 +99,9 @@ type ImplantConfig struct {
 	// TOSHELL_IMPLANT_TEMPLATE_DIR 环境变量、exe 同目录的 implant/、
 	// 当前目录的 internal/server/builder/implant，方便正式版部署。
 	TemplateDir string `mapstructure:"template_dir" json:"template_dir"`
+	// 启动随机延迟（秒）：植入端启动后随机休眠 [min,max] 秒，打乱"启动即行为"检测节奏。
+	StartupDelayMin int `mapstructure:"startup_delay_min" json:"startup_delay_min"`
+	StartupDelayMax int `mapstructure:"startup_delay_max" json:"startup_delay_max"`
 }
 
 type DatabaseConfig struct {

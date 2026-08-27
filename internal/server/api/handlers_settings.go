@@ -56,11 +56,13 @@ type settingsListenerUpdate struct {
 }
 
 type settingsImplantUpdate struct {
-	Interval     *uint32 `json:"interval"`
-	Jitter       *uint32 `json:"jitter"`
-	RetryWait    *uint32 `json:"retry_wait"`
-	KillDate     *string `json:"kill_date"`
-	WorkingHours *string `json:"working_hours"`
+	Interval        *uint32 `json:"interval"`
+	Jitter          *uint32 `json:"jitter"`
+	RetryWait       *uint32 `json:"retry_wait"`
+	KillDate        *string `json:"kill_date"`
+	WorkingHours    *string `json:"working_hours"`
+	StartupDelayMin *int    `json:"startup_delay_min"`
+	StartupDelayMax *int    `json:"startup_delay_max"`
 }
 
 type settingsWebhookUpdate struct {
@@ -240,6 +242,20 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if im.WorkingHours != nil {
 			updates["implant.working_hours"] = *im.WorkingHours
+		}
+		if im.StartupDelayMin != nil {
+			if *im.StartupDelayMin < 0 {
+				http.Error(w, `{"error":"startup_delay_min 不能为负"}`, http.StatusBadRequest)
+				return
+			}
+			updates["implant.startup_delay_min"] = *im.StartupDelayMin
+		}
+		if im.StartupDelayMax != nil {
+			if *im.StartupDelayMax < 0 {
+				http.Error(w, `{"error":"startup_delay_max 不能为负"}`, http.StatusBadRequest)
+				return
+			}
+			updates["implant.startup_delay_max"] = *im.StartupDelayMax
 		}
 	}
 

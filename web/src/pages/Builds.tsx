@@ -1040,32 +1040,6 @@ export function Builds() {
                         : 'UPX 需要安装 (https://upx.github.io)'}
                     </p>
                   </div>
-                  <div className="options-row">
-                    <label className="options-label">启动随机延迟</label>
-                    <div className="options-inputs">
-                      <input
-                        type="number"
-                        min={0}
-                        max={600}
-                        value={formData.startup_delay_min ?? 5}
-                        onChange={(e) => setFormData((p) => ({ ...p, startup_delay_min: parseInt(e.target.value) || 0 }))}
-                        placeholder="min"
-                      />
-                      <span>~</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={600}
-                        value={formData.startup_delay_max ?? 30}
-                        onChange={(e) => setFormData((p) => ({ ...p, startup_delay_max: parseInt(e.target.value) || 0 }))}
-                        placeholder="max"
-                      />
-                      <span className="unit">秒</span>
-                    </div>
-                    <p className="form-hint">
-                      植入端启动后随机休眠 [min, max] 秒再连接，打乱"启动即行为"的检测节奏（默认 5~30s，可设 0 关闭）
-                    </p>
-                  </div>
                 </div>
               </div>
             </div>

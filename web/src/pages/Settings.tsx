@@ -225,6 +225,17 @@ export function Settings() {
                     </div>
                     <input type="text" value={draft.implant.kill_date || ''} onChange={(e) => setField('implant', 'kill_date', e.target.value)} className="setting-input" placeholder="如 2026-12-31" />
                   </div>
+                  <div className="setting-item">
+                    <div className="setting-info">
+                      <label>启动随机延迟(秒)</label>
+                      <span className="setting-desc">植入端启动后随机休眠 [min, max] 秒再连接，打乱「启动即行为」检测（0 关闭）</span>
+                    </div>
+                    <div className="setting-inputs">
+                      <input type="number" min={0} max={600} value={num(draft.implant.startup_delay_min) || 5} onChange={(e) => setField('implant', 'startup_delay_min', Number(e.target.value))} className="setting-input" placeholder="min" />
+                      <span>~</span>
+                      <input type="number" min={0} max={600} value={num(draft.implant.startup_delay_max) || 30} onChange={(e) => setField('implant', 'startup_delay_max', Number(e.target.value))} className="setting-input" placeholder="max" />
+                    </div>
+                  </div>
                 </div>
 
                 <div className="settings-actions">
