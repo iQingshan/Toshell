@@ -272,6 +272,8 @@ export interface BuildRequest {
   xor_key_size?: number
   garble_enabled?: boolean
   upx_enabled?: boolean
+  startup_delay_min?: number
+  startup_delay_max?: number
 }
 
 export interface BuildResponse {

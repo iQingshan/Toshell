@@ -63,6 +63,9 @@ type BuildOptions struct {
 	// apihash FNV 种子/乘子（P1-4 随机化，使 API 哈希跨样本不同）
 	ApiHashSeed uint32 `json:"-"`
 	ApiHashMul  uint32 `json:"-"`
+	// 启动随机延迟（秒）：植入端启动后随机休眠 [min,max] 秒，打乱"启动即行为"的检测节奏。
+	StartDelayMin int `json:"startup_delay_min"`
+	StartDelayMax int `json:"startup_delay_max"`
 }
 
 type BuildResult struct {
@@ -280,6 +283,18 @@ func (b *Builder) Build(opts BuildOptions) (*BuildResult, error) {
 	opts.XfBase = randomXfBase()
 	opts.ApiHashSeed = randomUint32(0x7FFFFFFF) | 1 // 奇数种子，且非 0
 	opts.ApiHashMul = randomUint32(0x7FFFFFFF) | 1  // 奇数乘子（FNV 通常用奇数）
+
+	// 启动随机延迟默认值：前端未配时默认 5~30 秒随机
+	if opts.StartDelayMax < opts.StartDelayMin {
+		opts.StartDelayMax = opts.StartDelayMin
+	}
+	if opts.StartDelayMax <= 0 {
+		opts.StartDelayMin = 5
+		opts.StartDelayMax = 30
+	}
+	if opts.StartDelayMin <= 0 {
+		opts.StartDelayMin = 5
+	}
 
 	targetOS := opts.OS
 	if targetOS == "" {
@@ -665,6 +680,10 @@ func (b *Builder) processTemplates(tmpDir string, opts BuildOptions) error {
 	} else {
 		content = strings.ReplaceAll(content, "{{ENCRYPTION_KEY}}", "")
 	}
+
+	// 启动随机延迟（min~max 秒）：植入端启动后休眠随机时长，打乱"启动即行为"检测
+	content = strings.ReplaceAll(content, "{{STARTUP_DELAY_MIN}}", fmt.Sprintf("%d", opts.StartDelayMin))
+	content = strings.ReplaceAll(content, "{{STARTUP_DELAY_MAX}}", fmt.Sprintf("%d", opts.StartDelayMax))
 
 	return os.WriteFile(mainFile, []byte(content), 0644)
 }
