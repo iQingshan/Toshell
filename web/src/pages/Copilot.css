@@ -1,0 +1,645 @@
+.copilot-page {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 140px);
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.copilot-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  flex-wrap: wrap;
+}
+
+.copilot-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.copilot-badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.copilot-badge.ok { background: rgba(46, 160, 67, 0.15); color: var(--color-success); }
+.copilot-badge.off { background: color-mix(in srgb, var(--color-text-muted) 15%, transparent); color: var(--color-text-muted); }
+.copilot-badge.guard { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+
+.copilot-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.copilot-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.copilot-clear:hover {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.copilot-chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+}
+
+.copilot-empty {
+  margin: auto;
+  text-align: center;
+  color: var(--color-text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.copilot-empty p { margin: 0; max-width: 420px; }
+
+.copilot-suggests {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.copilot-suggests button {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  transition: all 0.15s;
+}
+
+.copilot-suggests button:hover { border-color: var(--color-primary); color: var(--color-primary); }
+
+.copilot-msg {
+  display: flex;
+  gap: 10px;
+  max-width: 88%;
+}
+
+.copilot-msg.user { align-self: flex-end; flex-direction: row-reverse; }
+.copilot-msg.assistant { align-self: flex-start; }
+
+.copilot-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-muted);
+}
+
+.copilot-msg.user .copilot-avatar { background: color-mix(in srgb, var(--color-primary) 20%, transparent); color: var(--color-primary); }
+.copilot-msg.assistant .copilot-avatar { background: color-mix(in srgb, #9a7bff 20%, transparent); color: #9a7bff; }
+
+.copilot-bubble {
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text);
+}
+
+.copilot-msg.user .copilot-bubble { background: color-mix(in srgb, var(--color-primary) 12%, var(--color-bg-secondary)); }
+.copilot-msg.error .copilot-bubble { background: color-mix(in srgb, var(--color-danger) 12%, var(--color-bg-secondary)); color: var(--color-danger); }
+
+.copilot-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-muted);
+}
+
+.copilot-traces { margin-top: 10px; border-top: 1px dashed var(--color-border); padding-top: 8px; }
+
+.trace-toggle {
+  background: none;
+  border: none;
+  color: var(--color-primary);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 0;
+}
+
+.trace-list { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+
+.trace-item {
+  background: color-mix(in srgb, var(--color-text-muted) 8%, var(--color-bg-secondary));
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.trace-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #9a7bff;
+  font-weight: 600;
+  flex-wrap: wrap;
+}
+
+.trace-name code {
+  background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.trace-error { color: var(--color-danger); margin-top: 4px; }
+
+.trace-result {
+  margin: 6px 0 0;
+  max-height: 160px;
+  overflow-y: auto;
+  background: var(--color-bg);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--color-success);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.copilot-inputbar {
+  display: flex;
+  gap: 10px;
+  padding: 12px 4px 4px;
+}
+
+/* 任务化面板 */
+.playbook-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 4px 0;
+  max-height: 250px;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.playbook-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.playbook-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.playbook-select {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text);
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  min-width: 120px;
+}
+
+.playbook-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: none;
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.playbook-run:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.playbook-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.playbook-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playbook-run-card {
+  padding: 10px 12px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playbook-run-card.st-completed { border-color: color-mix(in srgb, var(--color-success) 40%, var(--color-border)); }
+.playbook-run-card.st-running { border-color: color-mix(in srgb, var(--color-primary) 40%, var(--color-border)); }
+.playbook-run-card.st-failed { border-color: color-mix(in srgb, var(--color-danger) 40%, var(--color-border)); }
+
+.playbook-run-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.playbook-run-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.playbook-run-status {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: capitalize;
+}
+
+.playbook-run-status.st-running { background: color-mix(in srgb, var(--color-primary) 15%, transparent); color: var(--color-primary); }
+.playbook-run-status.st-completed { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
+.playbook-run-status.st-failed { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
+
+.playbook-run-progress {
+  display: flex;
+  gap: 6px;
+}
+
+.pb-step {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-muted);
+}
+
+.pb-step.st-completed { background: color-mix(in srgb, var(--color-success) 20%, transparent); color: var(--color-success); }
+.pb-step.st-running { background: color-mix(in srgb, var(--color-primary) 20%, transparent); color: var(--color-primary); animation: pulse 1.5s infinite; }
+.pb-step.st-failed { background: color-mix(in srgb, var(--color-danger) 20%, transparent); color: var(--color-danger); }
+
+.playbook-run-session {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+/* 每步结果行 */
+.playbook-run-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px dashed var(--color-border);
+  padding-top: 6px;
+}
+
+.pb-step-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.pb-step-dot { flex-shrink: 0; font-size: 11px; }
+.pb-step-row.st-running .pb-step-dot { animation: pulse 1.5s infinite; }
+
+.pb-step-name {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.pb-step-out {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.pb-step-row.st-failed .pb-step-out { color: var(--color-danger); }
+.pb-step-row.st-completed .pb-step-out { color: var(--color-success); }
+
+/* AI 分析块（<details> 可展开，完整显示） */
+.playbook-run-analysis {
+  border-top: 1px dashed var(--color-border);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pb-analysis-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9a7bff;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.pb-analysis-label::-webkit-details-marker { display: none; }
+
+.pb-analysis-text {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.copilot-inputbar input {
+  flex: 1;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: var(--color-text);
+  font-size: 14px;
+  outline: none;
+}
+
+.copilot-inputbar input:focus { border-color: var(--color-primary); }
+.copilot-inputbar input::placeholder { color: var(--color-text-muted); }
+
+.copilot-inputbar button {
+  width: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+  color: var(--color-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.copilot-inputbar button:hover:not(:disabled) { background: var(--color-primary); color: #fff; }
+.copilot-inputbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── 三栏布局：左面板 + 中间对话 + 右面板 ── */
+.copilot-body {
+  display: flex;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.copilot-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 两侧信息面板 */
+.side-panel {
+  width: 168px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 10px;
+  overflow-y: auto;
+  max-height: calc(100vh - 200px);
+}
+
+.side-panel.side-right { width: 190px; }
+
+.side-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.side-list { display: flex; flex-direction: column; gap: 3px; }
+
+.side-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s;
+  min-width: 0;
+}
+
+.side-item:hover { background: var(--color-bg-tertiary); }
+
+.side-item-col { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+
+.side-item-main {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-item-sub {
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.side-dot.on { background: var(--color-success); box-shadow: 0 0 6px rgba(34,197,94,.5); }
+.side-dot.off { background: var(--color-text-muted); }
+
+.side-item-status {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.side-empty { font-size: 12px; color: var(--color-text-muted); padding: 16px 4px; text-align: center; }
+
+/* 审批弹窗 */
+.consent-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.consent-card {
+  width: 440px;
+  max-width: 90vw;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.consent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #fbbf24;
+}
+
+.consent-desc { font-size: 12px; color: var(--color-text-secondary); }
+
+.consent-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; }
+
+.consent-item {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.consent-tool { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--color-primary); flex-wrap: wrap; }
+.consent-desc-sm { font-size: 11px; font-weight: 400; color: var(--color-text-muted); }
+.consent-args {
+  font-size: 11px;
+  background: var(--color-bg-tertiary);
+  padding: 4px 8px;
+  border-radius: 5px;
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
+.consent-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+.consent-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+.consent-btn.allow { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
+.consent-btn.allow:hover:not(:disabled) { background: var(--color-success); color: #fff; }
+.consent-btn.deny { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
+.consent-btn.deny:hover:not(:disabled) { background: var(--color-danger); color: #fff; }
+.consent-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── AI 消息 Markdown 渲染样式 ── */
+.copilot-content { line-height: 1.6; word-break: break-word; }
+.copilot-content p { margin: 0 0 6px; }
+.copilot-content h1, .copilot-content h2, .copilot-content h3, .copilot-content h4 { margin: 10px 0 6px; font-size: 14px; font-weight: 700; color: var(--color-text); }
+.copilot-content ul, .copilot-content ol { margin: 4px 0; padding-left: 20px; }
+.copilot-content li { margin: 2px 0; }
+.copilot-content code { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 4px; padding: 1px 5px; font-size: 12px; color: var(--color-success); font-family: var(--font-mono); }
+.copilot-content pre { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 6px; padding: 8px 10px; overflow-x: auto; white-space: pre; font-size: 12px; }
+.copilot-content pre code { border: none; background: transparent; padding: 0; white-space: pre; }
+.copilot-content table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 12.5px; }
+.copilot-content th, .copilot-content td { border: 1px solid var(--color-border); padding: 5px 8px; text-align: left; vertical-align: top; white-space: normal; }
+.copilot-content strong { font-weight: 600; }
+.copilot-content a { color: var(--color-primary); text-decoration: none; }
+.copilot-content a:hover { text-decoration: underline; }

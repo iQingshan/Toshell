@@ -1,0 +1,385 @@
+/* ===== ShellFileBrowser (左侧文件目录面板) ===== */
+.sfb-panel {
+  /* 固定暗黑主题，与 xterm 终端配色保持一致，不跟随全局亮色 */
+  /* 高亮优化：提升背景/文字/边框亮度，保证按钮、标题等对比度足够清晰 */
+  --color-bg: #1e1e30;
+  --color-bg-secondary: #282844;
+  --color-bg-tertiary: #35355a;
+  --color-border: #4d4d72;
+  --color-border-hover: #6e6ea0;
+  --color-text: #ffffff;
+  --color-text-secondary: #d6d6e4;
+  --color-text-muted: #a6a6c0;
+  --color-primary: #8b8ff8;
+  --color-primary-hover: #a8abff;
+  --color-warning: #f5c844;
+  --color-danger: #ff6b81;
+  --color-success: #2ecc71;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 264px;
+  min-width: 200px;
+  background: var(--color-bg-secondary);
+  border-right: 1px solid var(--color-border);
+  font-size: 12px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+/* 拖拽调宽手柄 */
+.sfb-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+.sfb-resize-handle:hover,
+.sfb-resize-handle:active {
+  background: rgba(139, 143, 248, 0.35);
+}
+
+.sfb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+}
+
+.sfb-title {
+  font-weight: 600;
+  color: var(--color-text);
+  font-size: 13px;
+  letter-spacing: 0.3px;
+}
+
+.sfb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--color-border-hover);
+  border-radius: 5px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s;
+}
+
+.sfb-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-text);
+  background: var(--color-bg-tertiary);
+}
+
+.sfb-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sfb-btn-upload {
+  color: var(--color-primary-hover);
+  border-color: rgba(139, 143, 248, 0.55);
+  font-weight: 600;
+}
+
+.sfb-btn-upload:hover:not(:disabled) {
+  border-color: var(--color-primary-hover);
+  background: rgba(139, 143, 248, 0.16);
+  color: #ffffff;
+}
+
+.sfb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sfb-breadcrumb {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+  gap: 0;
+}
+
+.sfb-home {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sfb-home:hover { color: var(--color-primary-hover); }
+
+.sfb-crumb {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.sfb-crumb-sep {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  margin: 0 1px;
+}
+
+.sfb-crumb-item {
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 1px 2px;
+  border-radius: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 90px;
+}
+
+.sfb-crumb-item:hover { color: var(--color-primary-hover); background: var(--color-bg-tertiary); }
+
+.sfb-crumb-item--active {
+  color: var(--color-text);
+  font-weight: 600;
+  cursor: default;
+}
+
+.sfb-crumb-item--active:hover { color: var(--color-text); background: none; }
+
+/* upload progress */
+.sfb-upload-progress {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: rgba(245, 200, 68, 0.12);
+}
+
+.sfb-upload-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-bg-tertiary);
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.sfb-upload-fill {
+  height: 100%;
+  background: var(--color-primary-hover);
+  transition: width 0.2s;
+}
+
+.sfb-upload-text {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+/* file list */
+.sfb-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.sfb-list::-webkit-scrollbar { width: 8px; }
+.sfb-list::-webkit-scrollbar-thumb { background: var(--color-border-hover); border-radius: 4px; }
+.sfb-list::-webkit-scrollbar-track { background: transparent; }
+
+.sfb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px 8px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.sfb-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--color-text);
+  transition: background 0.12s;
+}
+
+.sfb-item:hover {
+  background: rgba(139, 143, 248, 0.14);
+}
+
+.sfb-icon { flex-shrink: 0; }
+.sfb-icon-dir { color: var(--color-warning); }
+.sfb-icon-file { color: var(--color-text-muted); }
+
+.sfb-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfb-item-size {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.sfb-item-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sfb-item:hover .sfb-item-actions { display: inline-flex; }
+
+.sfb-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--color-border-hover);
+  border-radius: 4px;
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 0;
+}
+
+.sfb-btn-icon:hover { color: #ffffff; background: var(--color-bg-tertiary); border-color: var(--color-primary); }
+.sfb-btn-icon.danger:hover { color: var(--color-danger); border-color: var(--color-danger); }
+
+/* preview modal (reuse global modal styles, scoped additions) */
+.sfb-panel .modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.sfb-panel .modal-preview {
+  width: min(720px, 92vw);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-hover);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.7);
+}
+
+.sfb-panel .modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border-hover);
+  background: var(--color-bg-tertiary);
+}
+
+.sfb-panel .modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--color-text);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfb-panel .modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sfb-panel .truncated-badge,
+.sfb-panel .size-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  color: var(--color-warning);
+  border: 1px solid rgba(245, 200, 68, 0.5);
+}
+
+.sfb-panel .size-badge { color: var(--color-text-secondary); }
+
+.sfb-panel .btn-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #a5b4fc;
+  border-radius: 6px;
+  background: #6366f1;
+  color: #ffffff;
+  cursor: pointer;
+  box-shadow: 0 0 8px rgba(139, 143, 248, 0.45);
+  flex-shrink: 0;
+}
+
+.sfb-panel .btn-small .sfb-close-x {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  color: #ffffff;
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.35);
+  font-family: Arial, 'Segoe UI Symbol', 'Microsoft YaHei', sans-serif;
+}
+
+.sfb-panel .btn-small:hover {
+  color: #ffffff;
+  border-color: #ffffff;
+  background: #818cf8;
+}
+
+.sfb-panel .modal-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 14px;
+}
+
+.sfb-panel .preview-content-scroll {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  color: #f0f0f6;
+}
+
+.sfb-panel .loading-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 0;
+  color: var(--color-text-secondary);
+}
+
+.spin { animation: sfb-spin 0.9s linear infinite; }
+
+@keyframes sfb-spin {
+  to { transform: rotate(360deg); }
+}

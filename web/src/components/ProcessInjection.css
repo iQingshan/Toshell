@@ -1,0 +1,486 @@
+/* ─── Root ──────────────────────────────────────────────────────────────────── */
+.pi-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+/* ─── 模式切换 Bar ─────────────────────────────────────────────────────────── */
+.pi-mode-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  flex-shrink: 0;
+}
+
+.pi-mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 24px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.pi-mode-btn:hover {
+  color: var(--color-text);
+  background: var(--color-bg-tertiary);
+}
+
+.pi-mode-active {
+  color: var(--color-primary) !important;
+  border-bottom-color: var(--color-primary) !important;
+  background: transparent !important;
+}
+
+/* ─── Body ──────────────────────────────────────────────────────────────────── */
+.pi-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ─── Section ───────────────────────────────────────────────────────────────── */
+.pi-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pi-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--color-text-muted);
+}
+
+/* ─── 方法卡片网格 ─────────────────────────────────────────────────────────── */
+.pi-method-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.pi-method-card {
+  padding: 11px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.18s;
+  background: var(--color-bg-secondary);
+}
+
+.pi-method-card:hover {
+  border-color: var(--color-primary);
+  background: var(--color-bg-tertiary);
+}
+
+.pi-method-selected {
+  border-color: var(--color-primary) !important;
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-secondary)) !important;
+  box-shadow: 0 0 0 1px var(--color-primary);
+}
+
+.pi-method-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.pi-method-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.pi-method-sub {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+/* ─── Badge ─────────────────────────────────────────────────────────────────── */
+.pi-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 99px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.badge-standard    { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
+.badge-stealth     { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.badge-advanced    { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+.badge-expert      { background: rgba(239, 68, 68, 0.15);  color: #f87171; }
+.badge-recommend   { background: rgba(20, 184, 166, 0.15); color: #2dd4bf; }
+
+/* ─── 方法说明卡片 ─────────────────────────────────────────────────────────── */
+.method-info-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 8px;
+}
+
+.method-info-icon {
+  color: #818cf8;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.method-info-text {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ─── 进程选择器 ─────────────────────────────────────────────────────────────── */
+.proc-selector {
+  position: relative;
+}
+
+.proc-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.proc-input-wrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.proc-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+.proc-input {
+  width: 100%;
+  padding: 9px 32px 9px 34px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.18s;
+}
+
+.proc-input:focus {
+  border-color: var(--color-primary);
+}
+
+.proc-clear {
+  position: absolute;
+  right: 8px;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+}
+
+.proc-clear:hover { color: var(--color-text); }
+
+.proc-refresh {
+  padding: 8px 10px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: all 0.18s;
+  flex-shrink: 0;
+}
+
+.proc-refresh:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.proc-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ─── 进程下拉 ──────────────────────────────────────────────────────────────── */
+.proc-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 40px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  z-index: 200;
+  overflow: hidden;
+}
+
+.proc-list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.proc-item {
+  padding: 9px 14px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.12s;
+}
+
+.proc-item:last-child { border-bottom: none; }
+.proc-item:hover      { background: var(--color-bg-tertiary); }
+
+.proc-item-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.proc-arch-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.arch-x64 { background: rgba(99, 102, 241, 0.2); color: #818cf8; }
+.arch-x86 { background: rgba(245, 158, 11, 0.2);  color: #fbbf24; }
+
+.proc-pid   { color: var(--color-text-muted); font-size: 12px; }
+.proc-name  { color: var(--color-text); font-weight: 500; }
+
+.proc-item-path {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  padding-left: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proc-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.proc-hint {
+  padding: 7px 14px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+/* ─── 路径提示 ──────────────────────────────────────────────────────────────── */
+.pi-hollow-hint {
+  font-size: 11px;
+  color: #fbbf24;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 6px;
+}
+
+.pi-path-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  padding: 8px 12px;
+  background: rgba(245, 158, 11, 0.06);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 7px;
+}
+
+.pi-path-note code {
+  font-family: monospace;
+  font-size: 11px;
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.1);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* ─── 载荷区域 ──────────────────────────────────────────────────────────────── */
+.auto-payload-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(74, 222, 128, 0.06);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--color-text);
+}
+
+.auto-tip {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* ─── DLL 上传区 ────────────────────────────────────────────────────────────── */
+.dll-zone {
+  border: 2px dashed var(--color-border);
+  border-radius: 10px;
+  transition: all 0.18s;
+}
+
+.dll-zone-over {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+}
+
+.dll-zone-ready {
+  border-color: #4ade80;
+  border-style: solid;
+}
+
+.dll-file-input {
+  display: none;
+}
+
+.dll-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 24px;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.dll-label:hover { color: var(--color-text); }
+
+.dll-name  { color: #4ade80; font-weight: 600; font-size: 14px; }
+.dll-size  { font-size: 12px; color: var(--color-text-muted); }
+.dll-change { font-size: 11px; color: var(--color-primary); }
+.dll-hint  { font-size: 11px; color: var(--color-text-muted); margin-top: 4px; }
+
+/* ─── 状态条 ────────────────────────────────────────────────────────────────── */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.status-running {
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  color: #818cf8;
+}
+
+.status-success {
+  background: rgba(74, 222, 128, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.25);
+  color: #4ade80;
+}
+
+.status-error {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: #f87171;
+}
+
+/* ─── Footer ────────────────────────────────────────────────────────────────── */
+.pi-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.pi-exec-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 24px;
+  background: var(--color-primary);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+
+.pi-exec-btn:hover:not(:disabled) {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+}
+
+.pi-exec-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.pi-migrate-btn {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+}
+
+.pi-reset-btn {
+  padding: 9px 16px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+
+.pi-reset-btn:hover {
+  border-color: var(--color-text-muted);
+  color: var(--color-text);
+}
+
+/* ─── Spin ──────────────────────────────────────────────────────────────────── */
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

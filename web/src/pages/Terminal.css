@@ -1,0 +1,327 @@
+.terminal-page {
+  display: flex;
+  height: calc(100vh - 100px);
+  gap: 0;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.terminal-sidebar {
+  width: 280px;
+  background: var(--color-bg-secondary);
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.refresh-btn-small {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.refresh-btn-small:hover:not(:disabled) {
+  background: var(--color-bg-tertiary);
+  color: var(--color-primary);
+}
+
+.refresh-btn-small:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.session-item:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.session-item.active {
+  background: var(--color-primary-muted);
+}
+
+.session-status {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.session-status[data-status="active"] {
+  background: var(--color-success);
+  box-shadow: 0 0 8px var(--color-success);
+}
+
+.session-status[data-status="sleep"] {
+  background: var(--color-warning);
+}
+
+.session-status[data-status="dead"] {
+  background: var(--color-danger);
+}
+
+.session-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.session-hostname {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-user {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.no-sessions {
+  padding: 24px;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 14px;
+}
+
+.terminal-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg);
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.terminal-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.session-info-badge {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--color-text-muted);
+  padding: 4px 10px;
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-sm);
+}
+
+.terminal-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.toolbar-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-tertiary);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  transition: all 0.2s;
+}
+
+.toolbar-btn:hover {
+  background: var(--color-primary-muted);
+  color: var(--color-primary);
+}
+
+.terminal-content {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.7;
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+}
+
+.terminal-message {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.terminal-message.input {
+  color: var(--color-success);
+}
+
+.terminal-message.input::before {
+  content: '$ ';
+  color: var(--color-text-muted);
+}
+
+.terminal-message.output {
+  color: var(--color-text);
+}
+
+.terminal-message.error {
+  color: var(--color-danger);
+}
+
+.terminal-message.system {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.terminal-input-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  background: var(--color-bg-secondary);
+  border-top: 1px solid var(--color-border);
+}
+
+.input-prompt {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-success);
+}
+
+.terminal-input {
+  flex: 1;
+  padding: 10px 14px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+
+.terminal-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.terminal-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.terminal-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.send-btn {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-primary);
+  border: none;
+  border-radius: var(--radius-md);
+  color: white;
+  transition: all 0.2s;
+}
+
+.send-btn:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.system-info-panel {
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+  padding: 12px 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.system-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.system-info-label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.system-info-value {
+  font-size: 13px;
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.system-description {
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin: 10px 18px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  border-left: 3px solid var(--color-primary);
+}
+
+.system-description-title {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}

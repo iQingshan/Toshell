@@ -1,0 +1,285 @@
+.plugins-page {
+  padding: 24px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.plugins-page .page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.plugins-page h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.plugins-page .header-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.plugins-page .refresh-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 14px;
+}
+
+.plugins-page .refresh-btn:hover:not(:disabled) {
+  background: var(--color-primary);
+  color: white;
+  border-color: var(--color-primary);
+}
+
+.plugins-page .refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.plugins-page .refresh-btn .spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.plugins-page .upload-section {
+  margin-bottom: 24px;
+  padding: 20px;
+  background: var(--color-bg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.plugins-page .upload-box {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.plugins-page .file-input-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--color-primary);
+  color: white;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 14px;
+}
+
+.plugins-page .file-input-label:hover {
+  background: var(--color-primary-hover);
+}
+
+.plugins-page .description-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 14px;
+  outline: none;
+}
+
+.plugins-page .description-input:focus {
+  border-color: var(--color-primary);
+}
+
+.plugins-page .description-input::placeholder {
+  color: var(--color-text-secondary);
+}
+
+.plugins-page .btn-primary {
+  padding: 10px 20px;
+  background: var(--color-primary);
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.plugins-page .btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.plugins-page .btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.plugins-page .supported-types {
+  margin-top: 16px;
+  padding: 8px 12px;
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.plugins-page .plugins-list {
+  flex: 1;
+  min-height: 400px;
+  overflow-y: auto;
+  background: var(--color-bg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.plugins-page .loading-state,
+.plugins-page .empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: var(--color-text-secondary);
+  gap: 12px;
+}
+
+.plugins-page .empty-state p {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.plugins-page .empty-state span {
+  font-size: 14px;
+}
+
+.plugins-page .plugins-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.plugins-page .plugins-table th {
+  position: sticky;
+  top: 0;
+  background: var(--color-bg-tertiary);
+  padding: 14px 16px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.plugins-page .plugins-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+
+.plugins-page .plugins-table tr:hover {
+  background: var(--color-bg-secondary);
+}
+
+.plugins-page .type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.plugins-page .type-badge.type-exe {
+  color: #3b82f6;
+  background: #dbeafe;
+}
+
+.plugins-page .type-badge.type-dll {
+  color: #7c3aed;
+  background: #ede9fe;
+}
+
+.plugins-page .type-badge.type-shellcode {
+  color: #d97706;
+  background: #fef3c7;
+}
+
+.plugins-page .type-badge.type-bof {
+  color: #4f46e5;
+  background: #e0e7ff;
+}
+
+.plugins-page .plugin-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plugins-page .plugin-name svg {
+  color: var(--color-text-secondary);
+}
+
+.plugins-page .plugin-name span {
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.plugins-page .description {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.plugins-page .size {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.plugins-page .date {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.plugins-page .actions {
+  display: flex;
+  gap: 8px;
+}
+
+.plugins-page .action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all 0.2s;
+}
+
+.plugins-page .action-btn:hover {
+  background: #fee2e2;
+  color: #dc2626;
+}

@@ -1,0 +1,62 @@
+# ── 依赖 ──
+node_modules/
+web/node_modules/
+
+# ── 前端构建产物 ──
+web/dist/
+dist/
+
+# ── 服务端/植入端构建产物（二进制，不提交） ──
+release/toserver.exe
+release/toserver
+release/implants/
+release/data/
+release/plugins/
+implants/
+*.exe
+*.dll
+*.so
+*.o
+*.obj
+
+# ── 敏感配置：含真实密钥/口令，开源请勿提交 ──
+# 开源模板见 configs/server.yaml.example
+configs/server.yaml
+release/configs/server.yaml
+configs/local.yaml
+
+# ── 测试 / 回归残留 ──
+.regress_hm/
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.err.log
+*.out.log
+
+# ── 临时/调试 ──
+tmp/
+*.tmp
+debug_*.mjs
+verify_*.mjs
+measure_*.mjs
+copilot_*.png
+dashboard*.png
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── 情报/下载的运行时数据 ──
+data/
+
+# ── 构建/缓存/打包/临时 ──
+.gocache/
+.check64.c
+*.zip
+*.html
+release/upx/
+release/drivers/
+release/plugins/
+release/implants/
+# release 发布包 USAGE 说明含真实默认凭据示例，开源不提交（release 内容保留不动）
+release/USAGE.md
