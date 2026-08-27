@@ -71,11 +71,16 @@ jobs:
         run: |
           mkdir -p pkg
           cp "toserver${{ matrix.ext }}" "pkg/toserver${{ matrix.ext }}"
+          # 完整可运行包：植入端模板 + 配置样例 + 依赖目录
+          cp -r release/implant pkg/implant
+          cp -r release/implant_c pkg/implant_c
           cp configs/server.yaml.example pkg/server.yaml.example
           cp README.md pkg/README.md
           cp "${{ matrix.deploy }}" pkg/
+          # upx/drivers/plugins 若存在于仓库则一并打包（可选依赖）
+          for d in upx drivers plugins; do if [ -d "release/$d" ]; then cp -r "release/$d" "pkg/$d"; fi; done
           if [ "${{ matrix.goos }}" != "windows" ]; then chmod +x pkg/deploy.sh; fi
-          (cd pkg && zip -q "../${{ matrix.zip }}" .)
+          (cd pkg && zip -q -r "../${{ matrix.zip }}" .)
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
