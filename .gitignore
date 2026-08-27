@@ -11,7 +11,6 @@ release/toserver.exe
 release/toserver
 release/implants/
 release/data/
-release/plugins/
 implants/
 *.exe
 *.dll
@@ -54,7 +53,6 @@ data/
 .check64.c
 *.zip
 *.html
-release/plugins/
 release/implants/
 
 # ── 前端 tsc 构建产物 / 含内部凭据的测试脚本（勿提交） ──
