@@ -38,17 +38,29 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 
 > 截图位于 `docs/screenshots/`。
 
-| 仪表盘 | 会话管理 |
-|---|---|
-| <img src="docs/screenshots/dashboard.png" width="880" alt="仪表盘"> | <img src="docs/screenshots/sessions.png" width="880" alt="会话管理"> |
+**仪表盘**：会话/任务概览、图表与实时状态。
 
-| AI 副驾驶 | 文件管理 |
-|---|---|
-| <img src="docs/screenshots/copilot.png" width="880" alt="AI 副驾驶"> | <img src="docs/screenshots/files.png" width="880" alt="文件管理"> |
+<img src="docs/screenshots/dashboard.png" width="100%" alt="仪表盘">
 
-| 内存执行 |
-|---|
-| <img src="docs/screenshots/memexec.png" width="880" alt="内存执行"> |
+**会话管理**：多平台会话、任务下发与状态跟踪。
+
+<img src="docs/screenshots/sessions.png" width="100%" alt="会话管理">
+
+**AI 副驾驶**：联网分析、工具调用与权限审批。
+
+<img src="docs/screenshots/copilot.png" width="100%" alt="AI 副驾驶">
+
+**文件管理**：上传 / 下载 / 在线预览，断点续传。
+
+<img src="docs/screenshots/files.png" width="100%" alt="文件管理">
+
+**内存执行**：免落地加载 DLL / EXE / BOF 与内存操作。
+
+<img src="docs/screenshots/memexec.png" width="100%" alt="内存执行">
+
+**杀软识别**：检测目标环境杀软 / 安全监控进程，辅助规避。
+
+<img src="docs/screenshots/avidentify.png" width="100%" alt="杀软识别">
 
 ## 快速开始
 
