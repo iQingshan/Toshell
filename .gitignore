@@ -68,5 +68,7 @@ web/ws_test.cjs
 # 前端构建产物（CI 构建后生成，勿提交）
 web/dist/
 cmd/server/webdist/
+# 多系统发布二进制（仅作为 GitHub Release 资产，不提交）
+release/bin/
 # release 发布包 USAGE 说明含真实默认凭据示例，开源不提交（release 内容保留不动）
 release/USAGE.md
