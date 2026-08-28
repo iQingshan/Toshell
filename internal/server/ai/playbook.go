@@ -407,8 +407,24 @@ func (r *PlaybookRunner) waitTask(run *PlaybookRun, sr *StepResult, result inter
 		sr.Error = fmt.Sprintf("task %s", st)
 		return fmt.Errorf("task %s", st)
 	}
-	sr.Output = summarizeToolResult("task_wait", string(wr))
+	sr.Output = taskWaitOutputForAnalysis(string(wr))
 	return nil
+}
+
+// taskWaitOutputForAnalysis 从 task_wait 结果中提取用于 AI 分析/回显的完整输出。
+// 关键：信息收集类任务（systeminfo/netstat/tasklist/whoami 等）结果较长，必须保留
+// 完整内容供 AI 分析，否则 AI 会因数据残缺反向要数据。除非过长，否则保留 8000 字符。
+func taskWaitOutputForAnalysis(raw string) string {
+	var wm map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &wm); err != nil {
+		return truncate(raw, 8000)
+	}
+	// 优先用完整 output 字段
+	if out, ok := wm["output"].(string); ok && out != "" {
+		return truncate(out, 8000)
+	}
+	// 兜底：用 summarizeToolResult 生成一行可读摘要
+	return summarizeToolResult("task_wait", raw)
 }
 
 func (r *PlaybookRunner) updateResult(run *PlaybookRun, sr StepResult) {

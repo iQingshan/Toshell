@@ -6,7 +6,7 @@ rem  首次运行会自动从 configs\server.yaml.example 生成配置(需先修
 rem  之后在前台启动服务端, 日志显示在控制台。
 rem =====================================================================
 setlocal
-set VERSION=v1.2.0
+set VERSION=v1.2.1
 set CFG_FILE=configs\server.yaml
 set EXAMPLE=configs\server.yaml.example
 

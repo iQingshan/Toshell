@@ -182,7 +182,7 @@ export function About() {
         <div className="about-logo">
           <Shell size={56} />
           <h1>ToShell</h1>
-          <p className="about-version">v1.2.0</p>
+          <p className="about-version">v1.2.1</p>
         </div>
         <h2>自托管的 C2（命令与控制）远程管理平台</h2>
         <p className="about-slogan">

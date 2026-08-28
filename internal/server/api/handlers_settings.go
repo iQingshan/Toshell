@@ -34,13 +34,15 @@ type SettingsUpdate struct {
 }
 
 type settingsAIUpdate struct {
-	Enabled     *bool   `json:"enabled"`
-	BaseURL     *string `json:"base_url"`
-	APIKey      *string `json:"api_key"`
-	Model       *string `json:"model"`
-	Timeout     *int    `json:"timeout"`
-	MaxTurns    *int    `json:"max_turns"`
-	ConsentMode *string `json:"consent_mode"` // auto=全自动(默认) / normal=影响会话操作需用户同意(任务流除外)
+	Enabled            *bool    `json:"enabled"`
+	BaseURL            *string  `json:"base_url"`
+	APIKey             *string  `json:"api_key"`
+	Model              *string  `json:"model"`
+	Timeout            *int     `json:"timeout"`
+	MaxTurns           *int     `json:"max_turns"`
+	ConsentMode        *string  `json:"consent_mode"` // auto=全自动(默认) / normal=影响会话操作需用户同意(任务流除外)
+	AgentConcurrency   *int     `json:"agent_concurrency"`
+	DownloadAllowlist  *[]string `json:"download_allowlist"`
 }
 
 type settingsListenerUpdate struct {
@@ -132,12 +134,15 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"admin_username":  cfg.Auth.AdminUsername,
 		},
 		AI: map[string]interface{}{
-			"enabled":   cfg.AI.Enabled,
-			"base_url":  cfg.AI.BaseURL,
-			"api_key":   maskSecret(cfg.AI.APIKey),
-			"model":     cfg.AI.Model,
-			"timeout":   cfg.AI.Timeout,
-			"max_turns": cfg.AI.MaxTurns,
+			"enabled":      cfg.AI.Enabled,
+			"base_url":     cfg.AI.BaseURL,
+			"api_key":      maskSecret(cfg.AI.APIKey),
+			"model":        cfg.AI.Model,
+			"timeout":      cfg.AI.Timeout,
+			"max_turns":    cfg.AI.MaxTurns,
+			"consent_mode": cfg.AI.ConsentMode,
+			"agent_concurrency": cfg.AI.AgentConcurrency,
+			"download_allowlist": cfg.AI.DownloadAllowlist,
 		},
 	}
 	json.NewEncoder(w).Encode(resp)
@@ -350,6 +355,24 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates["ai.consent_mode"] = cm
+		}
+		if a.AgentConcurrency != nil {
+			if *a.AgentConcurrency < 1 || *a.AgentConcurrency > 8 {
+				http.Error(w, `{"error":"ai.agent_concurrency 范围 1-8"}`, http.StatusBadRequest)
+				return
+			}
+			updates["ai.agent_concurrency"] = *a.AgentConcurrency
+		}
+		if a.DownloadAllowlist != nil {
+			// 域名白名单：清洗空项、去空格、小写
+			cleaned := []string{}
+			for _, h := range *a.DownloadAllowlist {
+				h = strings.ToLower(strings.TrimSpace(h))
+				if h != "" {
+					cleaned = append(cleaned, h)
+				}
+			}
+			updates["ai.download_allowlist"] = cleaned
 		}
 	}
 

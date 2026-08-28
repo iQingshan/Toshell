@@ -37,8 +37,8 @@ implant:
     retry_wait: 5
     working_hours: ""
     # 启动随机延迟（秒）：植入端启动后随机休眠 [min,max] 秒，打乱"启动即行为"检测（0 关闭）
-    startup_delay_min: 5
-    startup_delay_max: 30
+    startup_delay_min: 2
+    startup_delay_max: 10
 
 listener:
     cert_file: ""
@@ -99,6 +99,10 @@ ai:
     model: deepseek-chat
     timeout: 60
     max_turns: 20
+    # 异步自主 Agent 并发上限（同时进行的任务数，默认 2；1-8）。每个任务后台 goroutine，超出则排队。
+    agent_concurrency: 2
+    # 工具下载域名白名单（远程下载 remote_download 只能从这些域名拉取；空=允许任意公网域名，但始终拒绝内网/回环地址防 SSRF）
+    download_allowlist: []
     # 权限模式：auto=全自动(默认,工具直接执行)；normal=影响会话的操作(下发/文件/进程/凭据/截屏/隧道/插件等)
     # 执行前需用户同意(副驾驶会拦截并请求确认)；任务流(delegate/剧本)除外。
     consent_mode: auto

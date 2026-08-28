@@ -643,3 +643,10 @@
 .copilot-content strong { font-weight: 600; }
 .copilot-content a { color: var(--color-primary); text-decoration: none; }
 .copilot-content a:hover { text-decoration: underline; }
+
+/* ── 异步 Agent：思考中/流式光标/取消按钮 ── */
+.copilot-thinking-label { display: flex; align-items: center; gap: 5px; color: var(--color-text-2); font-size: 12.5px; padding: 2px 0; }
+.copilot-content .cursor { color: var(--color-primary); animation: blink 1s step-end infinite; margin-left: 1px; }
+@keyframes blink { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+.copilot-inputbar button.cancel { background: color-mix(in srgb, var(--color-danger, #e5484d) 15%, transparent); color: var(--color-danger, #e5484d); }
+.copilot-inputbar button.cancel:hover:not(:disabled) { background: var(--color-danger, #e5484d); color: #fff; }

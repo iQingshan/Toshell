@@ -100,6 +100,7 @@ type Server struct {
 	webFS         http.FileSystem // 嵌入式前端文件系统（nil = 未嵌入）
 	copilot       *ai.Copilot     // AI 副驾驶（LLM 聊天 + 工具调用；nil = 未配置）
 	playbookR     *ai.PlaybookRunner // 剧本化执行引擎（确定性攻击链）
+	agentMgr      *ai.AgentManager  // 异步自主 Agent 运行时（run 生命周期 + 并发上限）
 	// onConfigApplied 配置保存并热应用后的回调（由服务器主循环注册，
 	// 用于通知各组件如 HTTP listener 拟态模板切换）。
 	onConfigApplied func(cfg *config.Config)
@@ -129,6 +130,8 @@ func New(cfg *config.Config, sessMgr *session.Manager, taskMgr *task.Manager) *S
 	}
 	// AI 副驾驶：executor 为 Server 自身（复用 MCP 工具实现）
 	server.copilot = ai.New(cfg.AI, server)
+	// 异步自主 Agent 运行时：并发上限由 config.AI.AgentConcurrency 决定（默认 2）
+	server.agentMgr = ai.NewAgentManager(cfg.AI.AgentConcurrency)
 	// 剧本化执行引擎：executor 同样复用 Server 的 invokeTool（MCP 工具面）
 	server.playbookR = ai.NewPlaybookRunner(server)
 	// 剧本完成后自动生成 AI 总结建议（复用副驾驶 LLM，未配置则跳过）
@@ -331,6 +334,12 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/copilot/status", s.copilotStatusHandler).Methods("GET")
 	api.HandleFunc("/copilot/chat", s.copilotChatHandler).Methods("POST")
 	api.HandleFunc("/copilot/consent", s.copilotConsentHandler).Methods("POST")
+	// 异步自主 Agent 端点（非阻塞：创建即返回 run_id，事件走 SSE）
+	api.HandleFunc("/agent/chat", s.agentChatHandler).Methods("POST")
+	api.HandleFunc("/agent/runs/{id}", s.agentRunHandler).Methods("GET")
+	api.HandleFunc("/agent/runs/{id}/events", s.agentEventsHandler).Methods("GET")
+	api.HandleFunc("/agent/runs/{id}/cancel", s.agentCancelHandler).Methods("POST")
+	api.HandleFunc("/agent/runs/{id}/consent", s.agentConsentHandler).Methods("POST")
 	// 副驾驶剧本化端点
 	api.HandleFunc("/copilot/playbooks", s.listPlaybooksHandler).Methods("GET")
 	api.HandleFunc("/copilot/playbook/run", s.runPlaybookHandler).Methods("POST")

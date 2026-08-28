@@ -414,6 +414,91 @@ export const copilotApi = {
   playbookRun: (id: string) => api.get<PlaybookRun>(`/copilot/playbook/runs/${id}`),
 }
 
+// ─── 异步自主 Agent ─────────────────────────────────────────────────
+// 非阻塞：agentChat 立即返回 run_id，事件经 SSE 流式推送，可实时渲染思考与工具步骤。
+export const agentApi = {
+  /** 创建/续接异步 agent run（立即返回 run_id+session_id，不卡对话）。session_id 用于续接同一自主记忆上下文。 */
+  chat: (messages: { role: string; content: string }[], sessionId?: string) =>
+    api.post<{ run_id: string; session_id: string; status: string }>('/agent/chat', sessionId ? { messages, session_id: sessionId } : { messages }),
+  /** 查询 run 状态/轨迹/最终答复 */
+  status: (runId: string) => api.get<{ run_id: string; status: string; traces: CopilotTrace[]; reply: string }>(`/agent/runs/${runId}`),
+  /** 取消 run */
+  cancel: (runId: string) => api.post<{ run_id: string; status: string }>(`/agent/runs/${runId}/cancel`),
+  /** 处理审批：allow/deny */
+  consent: (runId: string, decision: 'allow' | 'deny') =>
+    api.post<{ run_id: string; status: string }>(`/agent/runs/${runId}/consent`, { decision }),
+  /** SSE 事件流：thinking / message / tool_start / tool_result / final / done / status */
+  events: (runId: string, onEvent: (ev: AgentStreamEvent) => void, onDone: () => void) =>
+    streamAgent(runId, onEvent, onDone),
+}
+
+export interface AgentStreamEvent {
+  event: string
+  data: any
+}
+
+// streamAgent 用 fetch + ReadableStream 消费 SSE（axios 无法流式，故用原生 fetch）。
+async function streamAgent(runId: string, onEvent: (ev: AgentStreamEvent) => void, onDone: () => void) {
+  const url = `/api/v1/agent/runs/${runId}/events`
+  try {
+    const resp = await fetch(url, {
+      headers: authHeaders(),
+      signal: undefined,
+    })
+    if (!resp.body) throw new Error('no stream body')
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let done = false
+    while (!done) {
+      const { value, done: d } = await reader.read()
+      done = d
+      buf += decoder.decode(value || new Uint8Array(), { stream: !done })
+      // 解析 SSE：按 \n\n 切分事件块
+      let idx: number
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx)
+        buf = buf.slice(idx + 2)
+        const ev = parseSSEBlock(block)
+        if (ev) {
+          onEvent(ev)
+          if (ev.event === 'done' || ev.event === 'error' || (ev.event === 'state' && ev.data?.done)) {
+            onDone()
+            return
+          }
+        }
+      }
+    }
+    onDone()
+  } catch (e) {
+    onEvent({ event: 'error', data: { error: (e as Error).message } })
+    onDone()
+  }
+}
+
+function parseSSEBlock(block: string): AgentStreamEvent | null {
+  let event = 'message'
+  let data = ''
+  for (const line of block.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim()
+    else if (line.startsWith('data:')) data += line.slice(5).trim()
+  }
+  if (!data) return null
+  try {
+    return { event, data: JSON.parse(data) }
+  } catch {
+    return { event, data }
+  }
+}
+
+// authHeaders 复用与 axios 相同的认证头（从 localStorage 取 token）。
+function authHeaders(): Record<string, string> {
+  const h: Record<string, string> = { 'Content-Type': 'text/event-stream' }
+  const token = localStorage.getItem('toshell-token')
+  if (token) h['Authorization'] = `Bearer ${token}`
+  return h
+}
+
 export interface Playbook {
   id: string
   name: string

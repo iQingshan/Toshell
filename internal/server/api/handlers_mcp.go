@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,9 +15,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"toshell/internal/common/types"
+	"toshell/internal/server/config"
 	"toshell/internal/server/intel"
 	"toshell/internal/server/logging"
 	"toshell/internal/server/plugin"
@@ -146,8 +150,13 @@ var mcpToolList = []mcpTool{
 	},
 	{
 		Name:        "remote_download",
-		Description: "从 URL 下载工具到服务端本地 data/tools/ 持久保存（可重复使用）。参数: url",
+		Description: "从 URL 下载工具到服务端本地 data/tools/ 持久保存（可重复使用）。异步：立即返回 dl_id，用 tool_download_status 查询进度。参数: url",
 		Parameters:  []string{"url"},
+	},
+	{
+		Name:        "tool_download_status",
+		Description: "查询一次远程下载的进度/结果（remote_download 返回 dl_id 后调用）。参数: dl_id",
+		Parameters:  []string{"dl_id"},
 	},
 	{
 		Name:        "tool_list",
@@ -340,14 +349,24 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
 			t, gerr := s.taskMgr.Get(tid)
-			if gerr == nil && t != nil {
-				if t.Status == "completed" || t.Status == "failed" || t.Status == "timeout" {
-					return map[string]interface{}{
-						"task_id": t.ID, "task_type": t.TaskType, "command": t.Command,
-						"session_id": t.SessionID, "status": t.Status,
-						"output": truncateStr(t.Output, 4000), "error": t.Error,
-						"exit_code": t.ExitCode, "completed_at": t.CompletedAt,
-					}, nil
+			if gerr != nil || t == nil {
+				// 任务不存在：立即返回错误，绝不空转到 timeout。
+				// 否则 agent 等一个编造/已删除的 task_id 会卡满 timeout（前端 fetch 超时报 network error）。
+				return nil, fmt.Errorf("task not found: %d", tid)
+			}
+			if t.Status == "completed" || t.Status == "failed" || t.Status == "timeout" {
+				return map[string]interface{}{
+					"task_id": t.ID, "task_type": t.TaskType, "command": t.Command,
+					"session_id": t.SessionID, "status": t.Status,
+					"output": truncateStr(t.Output, 4000), "error": t.Error,
+					"exit_code": t.ExitCode, "completed_at": t.CompletedAt,
+				}, nil
+			}
+			// 会话离线检测：任务仍没终态但所属会话已断开（asleep 或不存在），
+			// 立即返回错误，避免 agent 干等 300s 导致卡死（network error 无后续）。
+			if t.SessionID != "" {
+				if st, serr := s.sessionMgr.GetStatus(t.SessionID); serr != nil || st == "asleep" {
+					return nil, fmt.Errorf("session %s offline (任务 #%d 未完成): 会话已断开", t.SessionID, tid)
 				}
 			}
 			time.Sleep(500 * time.Millisecond)
@@ -568,6 +587,8 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		return webSearch(params["query"])
 	case "remote_download":
 		return remoteToolDownload(params["url"])
+	case "tool_download_status":
+		return toolDownloadStatus(params["dl_id"])
 	case "tool_list":
 		return listServerTools(), nil
 	case "plugin_upload":
@@ -674,52 +695,187 @@ func webSearch(q string) (interface{}, error) {
 	return map[string]interface{}{"query": q, "results": items, "count": len(items)}, nil
 }
 
-// remoteToolDownload 从 URL 下载工具到服务端本地 data/tools/ 持久保存（可重复使用）。
-func remoteToolDownload(rawURL string) (map[string]interface{}, error) {
-	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
-		return nil, fmt.Errorf("url must be http(s)://")
-	}
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Get(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("download failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download status %d", resp.StatusCode)
-	}
-	// 限 256MB，防误下超大文件（下载超时 120s，见上方 client）
-	limited := io.LimitReader(resp.Body, 256<<20)
+// ─── 异步工具下载 ───────────────────────────────────────────────────
+// 下载到服务端 data/tools/ 不再阻塞 ReAct 循环：remote_tool_download 立即
+// 返回 dl_id，后台 goroutine 拉取，前端/Agent 用 tool_download_status 轮询。
+// 内置内网/回环 IP 拒绝（SSRF 防护）与可选域名白名单。
 
-	name := pathBase(filepath.Base(uPath(rawURL)))
-	if name == "" || name == "." || name == "/" {
-		name = fmt.Sprintf("tool-%d", time.Now().Unix())
+var (
+	downloadsMu sync.Mutex
+	downloads   = map[string]*downloadJob{}
+)
+
+type downloadJob struct {
+	ID     string `json:"id"`
+	URL    string `json:"url"`
+	Status string `json:"status"` // running / done / failed
+	Name   string `json:"name,omitempty"`
+	Path   string `json:"path,omitempty"`
+	Size   int64  `json:"size,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// downloadAllowed 校验下载目标：仅 http(s)，且拒绝内网/回环/保留地址（SSRF 防护）。
+// allowlist 非空时仅允许在列表内的主机名。
+func downloadAllowed(rawURL string, allowlist []string) error {
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		return fmt.Errorf("url must be http(s)://")
 	}
-	dir := filepath.Join("data", "tools")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return fmt.Errorf("invalid url")
+	}
+
+	// 域名白名单（若有）
+	if len(allowlist) > 0 {
+		ok := false
+		for _, h := range allowlist {
+			if strings.EqualFold(h, u.Hostname()) || strings.HasSuffix(strings.ToLower(u.Hostname()), "."+strings.ToLower(h)) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return fmt.Errorf("host %s not in download allowlist", u.Hostname())
+		}
+	}
+
+	// 解析并拒绝内网/回环/保留地址（SSRF）
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil {
+		return fmt.Errorf("resolve failed: %w", err)
+	}
+	for _, ip := range ips {
+		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+			return fmt.Errorf("refusing to download from non-public address: %s", ip.String())
+		}
+	}
+	return nil
+}
+
+// remoteToolDownload 启动异步下载：立即返回 dl_id，下载在后台进行。
+func remoteToolDownload(rawURL string) (map[string]interface{}, error) {
+	cfg := config.Get()
+	var allowlist []string
+	if cfg != nil {
+		allowlist = cfg.AI.DownloadAllowlist
+	}
+	if err := downloadAllowed(rawURL, allowlist); err != nil {
 		return nil, err
 	}
-	dst := filepath.Join(dir, name)
-	f, err := os.Create(dst)
-	if err != nil {
-		return nil, err
-	}
-	n, err := io.Copy(f, limited)
-	f.Close()
-	if err != nil {
-		os.Remove(dst)
-		return nil, fmt.Errorf("save failed: %w", err)
-	}
-	// sha256
-	h := sha256.Sum256(mustReadFile(dst))
+
+	job := &downloadJob{ID: newDownloadID(), URL: rawURL, Status: "running"}
+	downloadsMu.Lock()
+	downloads[job.ID] = job
+	downloadsMu.Unlock()
+
+	go func() {
+		client := &http.Client{Timeout: 120 * time.Second}
+		resp, err := client.Get(rawURL)
+		if err != nil {
+			job.fail("download failed: " + err.Error())
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			job.fail(fmt.Sprintf("download status %d", resp.StatusCode))
+			return
+		}
+		limited := io.LimitReader(resp.Body, 256<<20)
+
+		name := pathBase(filepath.Base(uPath(rawURL)))
+		if name == "" || name == "." || name == "/" {
+			name = fmt.Sprintf("tool-%d", time.Now().Unix())
+		}
+		dir := filepath.Join("data", "tools")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			job.fail(err.Error())
+			return
+		}
+		dst := filepath.Join(dir, name)
+		f, err := os.Create(dst)
+		if err != nil {
+			job.fail(err.Error())
+			return
+		}
+		n, err := io.Copy(f, limited)
+		f.Close()
+		if err != nil {
+			os.Remove(dst)
+			job.fail("save failed: " + err.Error())
+			return
+		}
+		h := sha256.Sum256(mustReadFile(dst))
+		job.Name = name
+		job.Path = dst
+		job.Size = n
+		job.SHA256 = hex.EncodeToString(h[:])
+		job.Status = "done"
+		// 更新工具索引
+		reindexTools()
+	}()
+
 	return map[string]interface{}{
-		"path":   dst,
-		"name":   name,
-		"size":   n,
-		"sha256": hex.EncodeToString(h[:]),
-		"message": "已下载到服务端 data/tools/，可重复使用（上传/推送会话、加载插件、执行）",
+		"dl_id":   job.ID,
+		"status":  "running",
+		"message": "已在后台下载，用 tool_download_status(dl_id) 查询进度；完成后用 tool_list 查看。",
 	}, nil
 }
+
+// toolDownloadStatus 查询一次异步下载的状态。
+func toolDownloadStatus(dlID string) (interface{}, error) {
+	downloadsMu.Lock()
+	job, ok := downloads[dlID]
+	downloadsMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("download not found: %s", dlID)
+	}
+	return job, nil
+}
+
+func (j *downloadJob) fail(msg string) {
+	downloadsMu.Lock()
+	j.Status = "failed"
+	j.Error = msg
+	downloadsMu.Unlock()
+}
+
+func newDownloadID() string {
+	return fmt.Sprintf("dl-%d-%d", time.Now().UnixNano(), atomic.AddUint64(&downloadSeq, 1))
+}
+
+var downloadSeq uint64
+
+// reindexTools 重建 data/tools/index.json（元数据索引：名称/大小/hash/平台/架构/用途）。
+func reindexTools() {
+	dir := filepath.Join("data", "tools")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	idx := []map[string]interface{}{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		info, _ := e.Info()
+		sum := sha256.Sum256(mustReadFile(p))
+		idx = append(idx, map[string]interface{}{
+			"name": e.Name(), "size": info.Size(), "path": p,
+			"sha256": hex.EncodeToString(sum[:]),
+			"kind": guessToolKind(e.Name()), "platform": guessToolPlatform(e.Name()),
+			"arch": guessToolArch(e.Name()), "usage": guessToolUsage(e.Name()),
+		})
+	}
+	if b, err := json.Marshal(map[string]interface{}{"tools": idx, "count": len(idx)}); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, "index.json"), b, 0o644)
+	}
+}
+
+
 
 func uPath(s string) string {
 	if u, err := url.Parse(s); err == nil {

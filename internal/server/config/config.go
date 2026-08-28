@@ -34,6 +34,12 @@ type AIConfig struct {
 	// normal=影响会话的操作（命令下发/文件/进程/凭据/截屏/隧道/插件等）执行前需用户同意，
 	// 任务流(delegate/剧本)除外。读取/查询类工具不拦截。
 	ConsentMode string `mapstructure:"consent_mode" json:"consent_mode"`
+	// AgentConcurrency 异步自主 Agent 的并发上限（同时进行的 run 数），默认 2。
+	// 每个 run 独立后台 goroutine，超过上限的任务排队等待。
+	AgentConcurrency int `mapstructure:"agent_concurrency" json:"agent_concurrency"`
+	// DownloadAllowlist 工具下载域名白名单（空=允许任意公网域名，但仍拒绝内网/回环地址）。
+	// 用于限制 remote_download 只能从可信域名拉取，防止被诱导下载到恶意源头。
+	DownloadAllowlist []string `mapstructure:"download_allowlist" json:"download_allowlist"`
 }
 
 type ServerConfig struct {
@@ -238,8 +244,8 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("implant.retry_count", 3)
 	viper.SetDefault("implant.retry_wait", 5)
 	viper.SetDefault("implant.output_dir", "./implants")
-	viper.SetDefault("implant.startup_delay_min", 5)
-	viper.SetDefault("implant.startup_delay_max", 30)
+	viper.SetDefault("implant.startup_delay_min", 2)
+	viper.SetDefault("implant.startup_delay_max", 10)
 
 	viper.SetDefault("database.type", "sqlite")
 	viper.SetDefault("database.path", "./data/toshell.db")
@@ -265,6 +271,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("ai.model", "deepseek-chat")
 	viper.SetDefault("ai.timeout", 60)
 	viper.SetDefault("ai.max_turns", 20)
+	viper.SetDefault("ai.agent_concurrency", 2)
 
 	viper.SetEnvPrefix("TOSHELL")
 	viper.AutomaticEnv()

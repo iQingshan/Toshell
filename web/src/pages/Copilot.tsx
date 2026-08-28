@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { Send, Sparkles, Bot, User, Wrench, RefreshCw, AlertTriangle, Trash2, ListOrdered, Play, Users, ShieldCheck, ShieldX, Timer } from 'lucide-react'
-import { copilotApi, sessionApi, taskApi } from '../api'
+import { Send, Sparkles, Bot, User, Wrench, RefreshCw, AlertTriangle, Trash2, ListOrdered, Play, Users, ShieldCheck, ShieldX, Timer, CircleStop } from 'lucide-react'
+import { copilotApi, sessionApi, taskApi, agentApi } from '../api'
 import type { Playbook, PlaybookRun, ConsentReq } from '../api'
+import type { AgentStreamEvent } from '../api'
 import type { Session } from '../types'
 import { useCopilotStore } from '../stores/copilotStore'
 import type { CopilotMsg } from '../stores/copilotStore'
@@ -12,6 +13,7 @@ import './Copilot.css'
 export function Copilot() {
   const messages = useCopilotStore((s) => s.messages)
   const addMessage = useCopilotStore((s) => s.addMessage)
+  const replaceLast = useCopilotStore((s) => s.replaceLast)
   const clearMessages = useCopilotStore((s) => s.clearMessages)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -176,48 +178,180 @@ export function Copilot() {
     const userMsg: CopilotMsg = { role: 'user', content: text }
     addMessage(userMsg)
     setBusy(true)
+    // 流式占位：思考中（无正文）
+    addMessage({ role: 'assistant', content: '', streaming: true, thinking: true })
     try {
-      // 用 store 最新消息构造历史（避免闭包捕获过期 state）。
-      // 上下文压缩：只保留最近 14 条、每条截断到 1600 字符，控制 token 避免无限膨胀与超时。
+      // 用 store 最新消息构造历史（排除最后一条空的流式占位）
       const latest = useCopilotStore.getState().messages
       const trunc = (s: string, n = 1600) => (s && s.length > n ? s.slice(0, n) + '…' : (s || ''))
-      let history = latest.map((m) => ({ role: m.role, content: trunc(m.content) }))
+      let history = latest
+        .filter((m) => !(m.streaming))
+        .map((m) => ({ role: m.role, content: trunc(m.content) }))
       if (history.length > 14) history = history.slice(-14)
-      const res = await copilotApi.chat(history)
-      const data = res.data
-      if (data.pending_consents && data.pending_consents.length > 0) {
-        // normal 权限模式：影响会话的操作需用户确认 → 追加提示并弹出审批
-        addMessage({ role: 'assistant', content: data.reply || '✋ 需要你确认后才继续执行下列操作。', traces: data.traces })
-        setPendingConsents(data.pending_consents)
-      } else {
-        addMessage({ role: 'assistant', content: data.reply || '(空回复)', traces: data.traces })
-      }
+
+      // 异步创建/续接 run，立即拿到 run_id（不阻塞）。带 session_id 以保持自主记忆上下文。
+      const res = await agentApi.chat(history, agentSessionRef.current || undefined)
+      const runId = res.data.run_id
+      // 首次创建时记录 session_id（= run_id），后续指令续接到同一记忆
+      if (!agentSessionRef.current) agentSessionRef.current = res.data.session_id || runId
+      activeRunIdRef.current = runId
+
+      // 主路径：轮询 status() 直到终态（绝对可靠，不依赖长连接）。
+      // SSE 作为实时增量增强——SSE 断开/失败不影响结论，轮询兜底一定渲染最终结果。
+      pollRun(runId)
+      agentApi.events(runId, (ev) => handleAgentEvent(ev), () => { /* SSE 断开时轮询仍在 */ })
     } catch (e: any) {
       const errText = e?.response?.data?.error || (e instanceof Error ? e.message : String(e))
-      addMessage({ role: 'assistant', content: '调用失败: ' + errText, error: true })
-    } finally {
+      // 结束占位，替换为错误
+      const latest = useCopilotStore.getState().messages
+      let content = '调用失败: ' + errText
+      const last = latest[latest.length - 1]
+      content = (last?.content || '') + (last?.streaming ? '\n\n' : '') + content
+      replaceLast({ role: 'assistant', content, error: true, streaming: false, thinking: false })
       setBusy(false)
     }
   }
 
-  // 处理一次审批决定：allow→执行，deny→跳过；然后追加助手最终回复（可能又有待确认项）
-  const handleConsent = async (token: string, decision: 'allow' | 'deny') => {
+  // 当前活跃 run（用于取消/审批）
+  const activeRunIdRef = useRef<string | null>(null)
+  // 自主记忆会话 ID：首次创建后记录，后续指令续接同一上下文（保持 agent 完整记忆）
+  const agentSessionRef = useRef<string | null>(null)
+
+  // 轮询主路径：稳定拉取 run 状态，直到终态，渲染最终结果。SSE 断连时的可靠兜底。
+  const pollRun = async (runId: string) => {
+    let attempts = 0
+    const maxAttempts = 180 // 180 * 2s = 最长 6 分钟
+    const iv = setInterval(async () => {
+      attempts++
+      if (attempts > maxAttempts || activeRunIdRef.current !== runId) {
+        clearInterval(iv)
+        setBusy(false)
+        return
+      }
+      try {
+        const st = await agentApi.status(runId)
+        const data = st.data
+        // 用最新状态增量更新最后一条 assistant 消息：轨迹 + 内容
+        if (data.traces && data.traces.length > 0) {
+          useCopilotStore.getState().appendToLast({ role: 'assistant', traces: data.traces, thinking: false, streaming: true })
+        }
+        if (data.reply) {
+          useCopilotStore.getState().appendToLast({ role: 'assistant', content: data.reply.replace(/\n{3,}/g, '\n\n'), thinking: false, streaming: true })
+        }
+        if (data.status === 'done' || data.status === 'error' || data.status === 'awaiting_consent') {
+          clearInterval(iv)
+          finalizeRun(runId)
+        }
+      } catch { /* 下次重试 */ }
+    }, 2000)
+  }
+
+  // 处理一条 SSE 事件：增量渲染到最后一条 assistant 消息
+  const handleAgentEvent = (ev: AgentStreamEvent) => {
+    const s = useCopilotStore.getState()
+    switch (ev.event) {
+      case 'thinking':
+        // 思考阶段：显示为 thinking 标记 + 可选预览
+        s.appendToLast({ role: 'assistant', thinking: true, streaming: true })
+        break
+      case 'message':
+        // 正文增量：追加（过滤纯空白增量，避免 LLM 流式输出产生大量空行）
+        if (typeof ev.data === 'string') {
+          // 跳过纯空白（仅空格/换行）的增量，减少冗余空行
+          if (ev.data.length > 0 && ev.data.replace(/\s/g, '') === '') {
+            break
+          }
+          const cur = s.messages[s.messages.length - 1]?.content || ''
+          // 折叠连续换行：把 3+ 个连续 \n 压成 2 个（markdown 段落分隔）
+          const merged = (cur + ev.data).replace(/\n{3,}/g, '\n\n')
+          s.appendToLast({ role: 'assistant', content: merged, thinking: false, streaming: true })
+        }
+        break
+      case 'tool_start':
+        // 追加一条工具开始轨迹
+        const ts = s.messages[s.messages.length - 1]
+        const tr = ts?.traces || []
+        s.appendToLast({ role: 'assistant', traces: [...tr, { name: ev.data?.name, args: ev.data?.args }], thinking: false, streaming: true })
+        break
+      case 'tool_result':
+        // 更新最后一条工具轨迹的结果
+        const t2 = s.messages[s.messages.length - 1]
+        const tr2 = [...(t2?.traces || [])]
+        if (tr2.length > 0) {
+          const last = tr2[tr2.length - 1]
+          tr2[tr2.length - 1] = { ...last, result: ev.data?.result, error: ev.data?.error }
+        }
+        s.appendToLast({ role: 'assistant', traces: tr2, thinking: false, streaming: true })
+        break
+      case 'final':
+        // 最终答复：整体替换（折叠连续空行）
+        s.appendToLast({ role: 'assistant', content: (ev.data || '').replace(/\n{3,}/g, '\n\n'), thinking: false, streaming: true })
+        break
+      case 'consent':
+        // 弹出审批
+        setPendingConsents([ev.data])
+        break
+      case 'state':
+        // 终态回放：run 已 done/error（尤其连接晚于执行结束），把 reply 渲染出来。
+        // 错误静默：轮询 pollRun 才是最终结果来源，SSE 的错误不污染 UI。
+        if (ev.data?.done && ev.data?.reply) {
+          s.appendToLast({ role: 'assistant', content: ev.data.reply, thinking: false, streaming: false })
+        }
+        // 无 reply 的 error 不渲染，交给轮询兜底
+        break
+      case 'error':
+        // SSE 错误（如事件通道满/连接断）静默，绝不显示为 network error。
+        // 轮询 pollRun 会渲染真正的最终结果/建议。
+        break
+      default:
+        break
+    }
+  }
+
+  // 结束最后一条流式消息：主动拉取最终答复作为兜底，确保建议一定显示在会话框
+  const finalizeRun = async (runId?: string) => {
+    const rid = runId || activeRunIdRef.current
+    if (rid) {
+      try {
+        // 拉最终状态（若 SSE 中途断开/丢失 final，这里兜底渲染建议）
+        const st = await agentApi.status(rid)
+        const reply = st?.data?.reply
+        if (reply) {
+          useCopilotStore.getState().appendToLast({ role: 'assistant', content: reply, thinking: false, streaming: false })
+        }
+      } catch { /* 静默：拉取失败不影响已有渲染 */ }
+    }
+    useCopilotStore.getState().finalizeLast()
+    setBusy(false)
+    setPendingConsents(null)
+    activeRunIdRef.current = null
+  }
+
+  // 取消当前 run
+  const cancelRun = async () => {
+    if (activeRunIdRef.current) {
+      try {
+        await agentApi.cancel(activeRunIdRef.current)
+      } catch { /* 静默 */ }
+      finalizeRun()
+    }
+  }
+
+  // 处理一次审批决定：allow→执行，deny→跳过；然后恢复自主循环（agent run 继续）
+  const handleConsent = async (runId: string | null, decision: 'allow' | 'deny') => {
     setConsentBusy(true)
     try {
-      const res = await copilotApi.consent(token, decision)
-      const data = res.data
-      if (data.pending_consents && data.pending_consents.length > 0) {
-        addMessage({ role: 'assistant', content: data.reply || '✋ 还有操作需要你确认。', traces: data.traces })
-        setPendingConsents(data.pending_consents)
-      } else {
-        addMessage({ role: 'assistant', content: data.reply || '(已完成)', traces: data.traces })
-        setPendingConsents(null)
-      }
+      const rid = runId || activeRunIdRef.current
+      if (!rid) throw new Error('无运行中的 run')
+      // 标记当前已在思考/执行中（恢复循环后 SSE 会继续增量）
+      useCopilotStore.getState().appendToLast({ role: 'assistant', streaming: true })
+      await agentApi.consent(rid, decision)
+      setPendingConsents(null)
+      setConsentBusy(false)
     } catch (e: any) {
       const errText = e?.response?.data?.error || (e instanceof Error ? e.message : String(e))
-      addMessage({ role: 'assistant', content: '审批处理失败: ' + errText, error: true })
+      useCopilotStore.getState().appendToLast({ role: 'assistant', content: '\n审批处理失败: ' + errText, error: true, streaming: false })
       setPendingConsents(null)
-    } finally {
       setConsentBusy(false)
     }
   }
@@ -300,7 +434,14 @@ export function Copilot() {
               {m.role === 'user' ? (
                 <div className="copilot-content">{m.content}</div>
               ) : (
-                <div className="copilot-content" dangerouslySetInnerHTML={{ __html: markdown(m.content) }} />
+                <>
+                  {m.thinking && !m.content && (
+                    <div className="copilot-thinking-label"><RefreshCw size={13} className="spin" /> 思考中…</div>
+                  )}
+                  {m.content ? (
+                    <div className="copilot-content" dangerouslySetInnerHTML={{ __html: markdown(m.content) + (m.streaming ? '<span class="cursor">▍</span>' : '') }} />
+                  ) : null}
+                </>
               )}
               {m.traces && m.traces.length > 0 && (
                 <div className="copilot-traces">
@@ -332,14 +473,6 @@ export function Copilot() {
           </div>
         ))}
 
-        {busy && (
-          <div className="copilot-msg assistant">
-            <div className="copilot-avatar"><Bot size={16} /></div>
-            <div className="copilot-bubble copilot-thinking">
-              <RefreshCw size={14} className="spin" /> 思考中...
-            </div>
-          </div>
-        )}
         <div ref={bottomRef} />
       </div>
 
@@ -409,12 +542,16 @@ export function Copilot() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-          placeholder="询问会话状态、查询情报、下发任务…"
-          disabled={busy || !status?.enabled}
+          placeholder={busy ? 'Agent 正在运行…可继续输入新指令，或点击取消' : '询问会话状态、查询情报、下发任务…'}
+          disabled={!status?.enabled}
         />
-        <button onClick={send} disabled={busy || !input.trim() || !status?.enabled} title="发送">
-          <Send size={18} />
-        </button>
+        {busy ? (
+          <button onClick={cancelRun} className="send-btn cancel" disabled={!activeRunIdRef.current} title="取消当前 Agent"><CircleStop size={18} /></button>
+        ) : (
+          <button onClick={send} disabled={!input.trim() || !status?.enabled} title="发送">
+            <Send size={18} />
+          </button>
+        )}
       </div>
 
         </div>
@@ -451,8 +588,8 @@ export function Copilot() {
               ))}
             </div>
             <div className="consent-actions">
-              <button className="consent-btn deny" disabled={consentBusy} onClick={() => handleConsent(pendingConsents[0].token, 'deny')}><ShieldX size={14} /> 拒绝</button>
-              <button className="consent-btn allow" disabled={consentBusy} onClick={() => handleConsent(pendingConsents[0].token, 'allow')}><ShieldCheck size={14} /> 允许</button>
+              <button className="consent-btn deny" disabled={consentBusy} onClick={() => handleConsent(null, 'deny')}><ShieldX size={14} /> 拒绝</button>
+              <button className="consent-btn allow" disabled={consentBusy} onClick={() => handleConsent(null, 'allow')}><ShieldCheck size={14} /> 允许</button>
             </div>
           </div>
         </div>

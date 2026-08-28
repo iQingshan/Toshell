@@ -284,7 +284,7 @@ func (b *Builder) Build(opts BuildOptions) (*BuildResult, error) {
 	opts.ApiHashSeed = randomUint32(0x7FFFFFFF) | 1 // 奇数种子，且非 0
 	opts.ApiHashMul = randomUint32(0x7FFFFFFF) | 1  // 奇数乘子（FNV 通常用奇数）
 
-	// 启动随机延迟默认值：优先取设置页「植入端」配置（implant.startup_delay_min/max），未配则回退 5~30 秒随机
+	// 启动随机延迟默认值：优先取设置页「植入端」配置（implant.startup_delay_min/max），未配则回退 2~10 秒随机
 	if cfg := config.Get(); cfg != nil {
 		if opts.StartDelayMin <= 0 {
 			opts.StartDelayMin = cfg.Implant.StartupDelayMin
@@ -297,11 +297,11 @@ func (b *Builder) Build(opts BuildOptions) (*BuildResult, error) {
 		opts.StartDelayMax = opts.StartDelayMin
 	}
 	if opts.StartDelayMax <= 0 {
-		opts.StartDelayMin = 5
-		opts.StartDelayMax = 30
+		opts.StartDelayMin = 2
+		opts.StartDelayMax = 10
 	}
 	if opts.StartDelayMin <= 0 {
-		opts.StartDelayMin = 5
+		opts.StartDelayMin = 2
 	}
 
 	targetOS := opts.OS

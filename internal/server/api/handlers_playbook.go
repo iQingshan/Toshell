@@ -147,8 +147,9 @@ func (s *Server) analyzePlaybook(sessionID string, results []ai.StepResult) stri
 			b.WriteString("；错误: " + r.Error)
 		}
 		b.WriteString("\n")
+		// 关键侦察类步骤不截断或放宽，避免 AI 因信息残缺反向要数据。
 		if r.Output != "" {
-			b.WriteString("    结果: " + truncatePlaybookString(r.Output, 300) + "\n")
+			b.WriteString("    结果: " + truncatePlaybookString(r.Output, 8000) + "\n")
 		}
 	}
 	b.WriteString("\n成功 " + strconv.Itoa(success) + " / 共 " + strconv.Itoa(len(results)) + " 步。")
@@ -158,7 +159,9 @@ func (s *Server) analyzePlaybook(sessionID string, results []ai.StepResult) stri
 		"1. 【结果综述】这次剧本完成了哪些动作、拿到了哪些关键信息、有哪些步骤失败或异常。\n" +
 		"2. 【攻击判断】根据拿到的主机/用户/域/网络/杀软/凭据信息，判断目标画像与所处阶段（如：是否域环境、有无域控/域管线索、杀软与 EDR 强度、已获取的可利用凭据、主机在攻击路径中的角色）。\n" +
 		"3. 【下一步建议】给出具体可执行的下一步操作，按优先级排序并覆盖典型攻击路径：横向移动、权限维持、提权、凭据利用、域渗透/内网探测、规避杀软等。每条要给出本平台可用的工具方向（如 credentials/process_list/process_kill/screenshot/session_list 等工具名或对应命令思路）。\n" +
-		"直接输出内容即可，不要调用任何工具，不要输出无关对话。"
+		"直接输出内容即可，不要调用任何工具，不要输出无关对话。\n" +
+		"【重要】提供的各步骤结果是**可能被截断/摘要化的**，你必须**基于现有结果**给出综述、判断与建议——" +
+		"**绝不要向用户索要数据、完整输出或让用户粘贴原始文本**。信息不足时，直接在「下一步建议」里给出本平台能拉取该数据的工具/命令方向，并在「攻击判断」里基于已知信息合理推断、明确标注不确定处。"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
