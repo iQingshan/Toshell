@@ -174,6 +174,11 @@ var mcpToolList = []mcpTool{
 		Parameters:  []string{"session_id", "source", "kind", "args"},
 	},
 	{
+		Name:        "exec",
+		Description: "【原子执行】在会话下发命令并直接返回最终结果（服务端自动等待完成，无需 task_wait）。比 task_submit+task_wait 更可靠，避免任务 id 引用错误。参数: session_id, command 或 kind(user_info/system_info/check_av/process_list 等), timeout_sec(可选)",
+		Parameters:  []string{"session_id", "command", "kind", "timeout_sec"},
+	},
+	{
 		Name:        "run_command",
 		Description: "向会话下发任意命令并返回待轮询任务（task_wait 取结果）。参数: session_id, command",
 		Parameters:  []string{"session_id", "command"},
@@ -636,6 +641,22 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 			"task_id": taskInfo.ID, "kind": kind, "source": src, "size": len(data),
 			"hint":     "用 task_wait 等内存加载任务完成并获取结果",
 		}, nil
+	case "exec":
+		// TaskOrchestrator 原子执行：下发一次性命令并等待最终结果（Agent 一次调用拿结果）
+		sid := params["session_id"]
+		cmd := params["command"]
+		if cmd == "" {
+			// 允许用内置语义命令（如 exec 带 user_info/system_info/check_av）
+			cmd = builtinCommand(params["kind"], params["command"])
+		}
+		if sid == "" || cmd == "" {
+			return nil, fmt.Errorf("exec: session_id and command (or kind) required")
+		}
+		timeout := 60
+		if sec, perr := strconv.Atoi(params["timeout_sec"]); perr == nil && sec > 0 {
+			timeout = sec
+		}
+		return s.execAndAwait(sid, cmd, timeout)
 	case "run_command", "user_info", "system_info", "service_list",
 		"check_av", "net_info", "net_connections", "env_vars", "scheduled_tasks":
 		sid := params["session_id"]
@@ -1053,4 +1074,75 @@ func (s *Server) mcpPushResult(sid string, taskInfo *types.TaskInfo) map[string]
 		"status":    "pushed",
 		"hint":      "用 task_wait 工具等待任务完成并获取结果",
 	}
+}
+
+// execAndAwait TaskOrchestrator 核心：在指定会话下发一次性命令并原子等待结果。
+// 服务端统一完成 创建→推送→轮询→归位，返回最终输出/退出码。
+// Agent 只需调用一次（无需自己拼 task_id / task_wait，杜绝编造 task_id 与乱序）。
+// 熔断语义：会话离线立即返回明确错误；任务超时返回 timeout 标记。
+func (s *Server) execAndAwait(sid, cmd string, timeoutSec int) (map[string]interface{}, error) {
+	if sid == "" || cmd == "" {
+		return nil, fmt.Errorf("session_id and command required")
+	}
+	// 会话必须存在且活跃，否则直接失败（不等轮询）
+	if st, serr := s.sessionMgr.GetStatus(sid); serr != nil || st != "active" {
+		return nil, fmt.Errorf("session %s not active (offline): 无法下发命令", sid)
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = 60
+	}
+	if timeoutSec > 300 {
+		timeoutSec = 300
+	}
+	taskInfo, err := s.taskMgr.CreateCommand(sid, cmd, nil, uint32(timeoutSec))
+	if err != nil {
+		return nil, err
+	}
+	if s.listener != nil {
+		if err := s.listener.PushTask(sid, taskInfo); err != nil {
+			logging.Warn("api", "execAndAwait push to %s failed: %v", sid, err)
+		}
+	}
+	// 原子等待终态（同 task_wait 语义：终态即返回；会话离线即时报错；超时返回）
+	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	for time.Now().Before(deadline) {
+		t, gerr := s.taskMgr.Get(taskInfo.ID)
+		if gerr != nil || t == nil {
+			return nil, fmt.Errorf("task %d vanished", taskInfo.ID)
+		}
+		switch t.Status {
+		case "completed":
+			return map[string]interface{}{
+				"session_id": sid, "task_id": t.ID, "task_type": t.TaskType,
+				"command": t.Command, "status": "completed",
+				"output": truncateStr(t.Output, 8000), "error": t.Error,
+				"exit_code": t.ExitCode, "completed_at": t.CompletedAt,
+			}, nil
+		case "failed", "timeout":
+			return map[string]interface{}{
+				"session_id": sid, "task_id": t.ID, "task_type": t.TaskType,
+				"command": t.Command, "status": t.Status,
+				"output": truncateStr(t.Output, 8000), "error": t.Error,
+				"exit_code": t.ExitCode,
+			}, nil
+		}
+		// 会话离线：立即失败，不等满超时
+		if t.SessionID != "" {
+			if st, serr := s.sessionMgr.GetStatus(t.SessionID); serr != nil || st == "asleep" {
+				return nil, fmt.Errorf("session %s went offline while task #%d running", t.SessionID, taskInfo.ID)
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// 超时：返回当前状态 + timeout 标记
+	t, _ := s.taskMgr.Get(taskInfo.ID)
+	if t == nil {
+		return nil, fmt.Errorf("task %d vanished", taskInfo.ID)
+	}
+	return map[string]interface{}{
+		"session_id": sid, "task_id": t.ID, "command": t.Command,
+		"status": t.Status, "output": truncateStr(t.Output, 8000),
+		"error": t.Error, "exit_code": t.ExitCode, "timeout": true,
+		"message": "任务超时仍在执行",
+	}, nil
 }

@@ -185,8 +185,8 @@ func (c *Copilot) systemPrompt() string {
 		"（tool_list 看已下载工具；plugin_upload 把工具上传为插件→plugin_load 加载；fileless_exec 内存加载执行，不落盘）。\n" +
 		"工作方式（ReAct 闭环）：\n" +
 		"1. 先侦察：基于给定【当前在线会话】选合适会话，再用 session_list/session_context 了解目标，不臆造数据。\n" +
-		"2. 再行动：基于上下文选定思路后，用 task_submit/file_list/process_list/screenshot/credentials 等下任务，拿到 task_id。\n" +
-		"3. 必等结果：用 task_wait 轮询任务直到完成，读取真实输出；不要下发后立即汇报（那是未执行的结果）。\n" +
+		"2. 再行动：需要执行命令/内置侦察时，**首选 exec 工具**（原子执行并直接返回最终结果，无需再拼 task_wait，杜绝 task_id 编造与错位）；文件/进程/凭据等专项用对应工具。\n" +
+		"3. 必等结果：用 exec（或 task_wait 轮询）等到真实输出后再继续；不要下发后立即汇报（那是未执行的结果）。\n" +
 		"4. 分析汇报：基于真实输出用简洁中文总结（关键信息、异常、下一步建议）。\n" +
 		"若某任务需要多步（列目录→看文件→读凭据→横向），按顺序连续调用工具完成完整链路。\n" +
 		"收敛原则（**严格执行，避免冗余/重复**）：\n" +
@@ -1169,6 +1169,7 @@ func toolSchemas() []ToolSchema {
 		{"plugin_upload", "把 data/tools/ 下的工具上传为插件（BOF/DLL/EXE/shellcode），之后用 plugin_load 加载到会话。参数: source, name(可选), description(可选)", []string{"source", "name", "description"}},
 		{"fileless_exec", "把 data/tools/ 下的工具按 kind(bof/shellcode/dll/exe) 内存加载执行（不落盘）。参数: session_id, source, kind(可选), args(可选)", []string{"session_id", "source", "kind", "args"}},
 		{"run_command", "向会话下发任意命令并返回待轮询任务（task_wait 取结果）。参数: session_id, command", []string{"session_id", "command"}},
+		{"exec", "【首选】在会话原子执行命令并直接返回最终结果（服务端自动等任务完成，无需再调 task_wait；比 task_submit+task_wait 更可靠）。参数: session_id, command 或 kind(user_info/system_info/check_av/process_list 等内置命令), timeout_sec(可选)", []string{"session_id", "command", "kind", "timeout_sec"}},
 		{"user_info", "获取会话当前用户/权限/本机用户", []string{"session_id"}},
 		{"system_info", "获取会话系统信息（systeminfo）", []string{"session_id"}},
 		{"service_list", "枚举会话上的 Windows 服务", []string{"session_id"}},
