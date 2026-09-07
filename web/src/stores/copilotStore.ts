@@ -8,10 +8,19 @@ export interface CopilotTrace {
   error?: string
 }
 
+/** Agent 执行过程中的一行日志（在会话气泡内联展示） */
+export interface AgentAct {
+  /** 行首小 icon（🔧/✅/❌/🎯/⚠️…），tool_result 文本自带状态图标时可留空 */
+  i: string
+  t: string
+}
+
 export interface CopilotMsg {
   role: 'user' | 'assistant'
   content: string
   traces?: CopilotTrace[]
+  /** agent 执行日志行：目标/工具调用/结果/错误，按序渲染在正文上方 */
+  acts?: AgentAct[]
   error?: boolean
   /** 是否仍在流式输出中（显示光标/进行中状态） */
   streaming?: boolean
@@ -26,6 +35,8 @@ interface CopilotState {
   replaceLast: (m: CopilotMsg) => void
   /** 在最后一条 assistant 消息上追加流式增量（不存在则新建一条） */
   appendToLast: (m: Partial<CopilotMsg>) => void
+  /** 覆盖最后一条 assistant 消息的 agent 执行日志行 */
+  setLastActs: (acts: AgentAct[]) => void
   /** 结束最后一条流式消息（去掉 streaming 标记） */
   finalizeLast: () => void
   clearMessages: () => void
@@ -50,6 +61,14 @@ export const useCopilotStore = create<CopilotState>()(
           } else {
             const last = { ...arr[arr.length - 1], ...m }
             arr[arr.length - 1] = last
+          }
+          return { messages: arr }
+        }),
+      setLastActs: (acts) =>
+        set((s) => {
+          const arr = [...s.messages]
+          if (arr.length > 0) {
+            arr[arr.length - 1] = { ...arr[arr.length - 1], acts }
           }
           return { messages: arr }
         }),

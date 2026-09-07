@@ -650,31 +650,26 @@
 @keyframes blink { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
 .copilot-inputbar button.cancel { background: color-mix(in srgb, var(--color-danger, #e5484d) 15%, transparent); color: var(--color-danger, #e5484d); }
 .copilot-inputbar button.cancel:hover:not(:disabled) { background: var(--color-danger, #e5484d); color: #fff; }
-/* ── Agent 状态条（紧凑单行，点击展开计划/轨迹，避免挤占聊天区）── */
-.agent-bar {
-  margin: 0 0 8px; border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg); background: var(--color-bg-secondary);
-  overflow: hidden;
+/* ── Agent 执行过程：会话内联日志行（🎯目标/🔧执行/✅结果，带 icon）── */
+.agent-acts {
+  display: flex; flex-direction: column; gap: 2px;
+  margin: 0 0 6px; padding: 6px 8px;
+  border-left: 2px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-bg) 45%, transparent);
+  border-radius: 6px;
 }
-.agent-bar-toggle {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 7px 12px; border: none; background: transparent; cursor: pointer;
-  text-align: left; font: inherit; color: var(--color-text);
+.agent-act {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 12px; line-height: 1.5;
+  color: var(--color-text-secondary);
+  word-break: break-all;
 }
-.agent-bar-toggle:hover { background: color-mix(in srgb, var(--color-border) 18%, transparent); }
-.agent-bar-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-muted); }
-.agent-bar-dot.st-running { background: var(--color-info); animation: blink 1.2s ease-in-out infinite; }
-.agent-bar-dot.st-done { background: var(--color-success); }
-.agent-bar-dot.st-error { background: var(--color-danger); }
-.agent-bar-dot.st-awaiting_consent { background: var(--color-warning); }
-.agent-bar-title { flex: 0 0 auto; font-size: 12px; font-weight: 600; white-space: nowrap; }
-.agent-bar-objective {
-  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12px; color: var(--color-text-secondary);
-}
-.agent-bar-chev { flex: 0 0 auto; font-size: 10px; color: var(--color-text-muted); }
-.agent-bar-body { border-top: 1px dashed var(--color-border); padding: 8px 12px 10px; max-height: 260px; overflow-y: auto; }
-.agent-bar-body .agent-timeline { margin-top: 8px; border-top: 1px dashed var(--color-border); padding-top: 6px; }
+.agent-act-icon { flex: 0 0 auto; font-size: 12px; }
+.agent-act-text { min-width: 0; }
+.agent-act.act-goal { color: var(--color-text); font-weight: 600; }
+.agent-act.act-tool { color: var(--color-info, #4a9eff); }
+.agent-act.act-fail { color: var(--color-danger, #e5484d); }
+.agent-act.act-ok { color: var(--color-text-secondary); }
 .agent-plan { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 .plan-step { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-text-secondary); }
 .plan-step.st-done { color: var(--color-success); }

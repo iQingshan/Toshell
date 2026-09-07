@@ -5,7 +5,7 @@ import type { Playbook, PlaybookRun, ConsentReq } from '../api'
 import type { AgentStreamEvent } from '../api'
 import type { Session } from '../types'
 import { useCopilotStore } from '../stores/copilotStore'
-import type { CopilotMsg } from '../stores/copilotStore'
+import type { CopilotMsg, AgentAct } from '../stores/copilotStore'
 import { markdown } from '../utils/markdown'
 import './Copilot.css'
 
@@ -19,10 +19,6 @@ export function Copilot() {
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<{ enabled: boolean; model: string; consent_mode?: string } | null>(null)
   const [showTraces, setShowTraces] = useState<Record<number, boolean>>({})
-  // Agent 控制台视图：当前 run 的目标/执行计划/时间线/状态（来自轮询 status()）
-  const [agentView, setAgentView] = useState<{ objective?: string; plan?: { index: number; desc: string; status: string }[]; timeline?: { ts: number; kind: string; text: string }[]; status?: string; runId?: string } | null>(null)
-  // Agent 状态条是否展开（默认折叠，仅显示一行状态，避免挤占聊天区）
-  const [agentPanelOpen, setAgentPanelOpen] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const busyRef = useRef(false)
   busyRef.current = busy
@@ -205,9 +201,8 @@ export function Copilot() {
     const userMsg: CopilotMsg = { role: 'user', content: text }
     addMessage(userMsg)
     setBusy(true)
-    setAgentView(null) // 新任务重置 Agent 控制台视图
     // 流式占位：思考中（无正文）
-    addMessage({ role: 'assistant', content: '', streaming: true, thinking: true })
+    addMessage({ role: 'assistant', content: '', streaming: true, thinking: true, acts: [] })
     try {
       // 用 store 最新消息构造历史（排除最后一条空的流式占位）
       const latest = useCopilotStore.getState().messages
@@ -259,18 +254,13 @@ export function Copilot() {
       try {
         const st = await agentApi.status(runId)
         const data = st.data
-        // Agent 控制台视图：目标 + 执行计划 + 时间线 + 状态
-        setAgentView({
-          objective: data.objective || undefined,
-          plan: data.plan || [],
-          timeline: data.timeline || [],
-          status: data.status,
-          runId,
-        })
-        // 用最新状态增量更新最后一条 assistant 消息：轨迹 + 内容
-        if (data.traces && data.traces.length > 0) {
-          useCopilotStore.getState().appendToLast({ role: 'assistant', traces: data.traces, thinking: false, streaming: true })
+        // 执行过程以「日志行」写入会话气泡：🎯 目标 → 🔧 工具调用 → ✅/❌ 结果
+        // （不再用独立的计划/时间线面板，一切都在对话流里）
+        const acts = buildActs(data)
+        if (acts.length > 0) {
+          useCopilotStore.getState().setLastActs(acts)
         }
+        // 用最新状态增量更新最后一条 assistant 消息：内容
         if (data.reply) {
           useCopilotStore.getState().appendToLast({ role: 'assistant', content: data.reply.replace(/\n{3,}/g, '\n\n'), thinking: false, streaming: true })
         }
@@ -281,6 +271,35 @@ export function Copilot() {
       } catch { /* 下次重试 */ }
     }, 2000)
   }
+
+  // buildActs 把 run 状态（目标 + 时间线）整理成会话内联的日志行。
+  // 行格式：icon + 文本；tool_start=🔧，tool_result 依内容 ✅/❌/⏭，错误=⚠️。
+  const buildActs = (data: any): AgentAct[] => {
+    const acts: AgentAct[] = []
+    if (data?.objective) {
+      acts.push({ i: '🎯', t: String(data.objective) })
+    }
+    const tl: { kind: string; text: string }[] = data?.timeline || []
+    // 只保留过程行：跳过 final（回复正文单独渲染），thinking 无时间线条目
+    for (const ev of tl.slice(-80)) {
+      if (ev.kind === 'final') continue
+      if (ev.kind === 'tool_start') {
+        acts.push({ i: '🔧', t: truncateLine(ev.text, 160) })
+      } else if (ev.kind === 'tool_result') {
+        const txt = ev.text || ''
+        if (txt.startsWith('❌')) acts.push({ i: '❌', t: truncateLine(txt.replace(/^❌\s*/, ''), 200) })
+        else if (txt.startsWith('⏭')) acts.push({ i: '⏭', t: truncateLine(txt.replace(/^⏭\s*/, ''), 200) })
+        else acts.push({ i: '✅', t: truncateLine(txt.replace(/^✅\s*/, ''), 200) })
+      } else if (ev.kind === 'error') {
+        acts.push({ i: '⚠️', t: truncateLine(ev.text, 200) })
+      } else {
+        acts.push({ i: '·', t: truncateLine(ev.text, 200) })
+      }
+    }
+    return acts
+  }
+
+  const truncateLine = (s: string, n: number) => (s && s.length > n ? s.slice(0, n) + '…' : (s || ''))
 
   // 处理一条 SSE 事件：增量渲染到最后一条 assistant 消息
   const handleAgentEvent = (ev: AgentStreamEvent) => {
@@ -304,20 +323,10 @@ export function Copilot() {
         }
         break
       case 'tool_start':
-        // 追加一条工具开始轨迹
-        const ts = s.messages[s.messages.length - 1]
-        const tr = ts?.traces || []
-        s.appendToLast({ role: 'assistant', traces: [...tr, { name: ev.data?.name, args: ev.data?.args }], thinking: false, streaming: true })
-        break
       case 'tool_result':
-        // 更新最后一条工具轨迹的结果
-        const t2 = s.messages[s.messages.length - 1]
-        const tr2 = [...(t2?.traces || [])]
-        if (tr2.length > 0) {
-          const last = tr2[tr2.length - 1]
-          tr2[tr2.length - 1] = { ...last, result: ev.data?.result, error: ev.data?.error }
-        }
-        s.appendToLast({ role: 'assistant', traces: tr2, thinking: false, streaming: true })
+        // 工具开始/结果：由 pollRun 的 buildActs() 从服务端 timeline 统一生成内联日志行
+        // （2s 轮询即权威且稳定，避免 SSE 与轮询重复/竞争）；这里不再单独维护 traces。
+        s.appendToLast({ role: 'assistant', thinking: false, streaming: true })
         break
       case 'final':
         // 最终答复：整体替换（折叠连续空行）
@@ -399,7 +408,6 @@ export function Copilot() {
     '查询情报库中的账号信息',
     '给我一个 Windows 会话的攻击建议',
   ]
-
   return (
     <div className="copilot-page">
       <div className="copilot-header">
@@ -428,55 +436,7 @@ export function Copilot() {
         )}
       </div>
 
-      {/* ── Agent 状态条（紧凑单行，点击展开计划/轨迹）──
-          仅真正的执行任务展示（有目标/计划/轨迹）；短消息纯聊回复不显示此条 */}
-      {agentView && (agentView.objective || (agentView.plan && agentView.plan.length > 0) || (agentView.timeline && agentView.timeline.length > 0)) && (
-        <div className={`agent-bar ${agentPanelOpen ? 'open' : ''}`}>
-          <button className="agent-bar-toggle" onClick={() => setAgentPanelOpen(!agentPanelOpen)}>
-            <span className={`agent-bar-dot st-${agentView.status || 'queued'}`} />
-            <span className="agent-bar-title">
-              {agentView.status === 'done' ? '✅ Agent 完成'
-                : agentView.status === 'error' ? '⚠️ Agent 出错'
-                : agentView.status === 'awaiting_consent' ? '🛡 等待确认'
-                : '🤖 Agent 执行中'}
-            </span>
-            {agentView.objective && <span className="agent-bar-objective">{agentView.objective}</span>}
-            <span className="agent-bar-chev">{agentPanelOpen ? '▾' : '▸'}</span>
-          </button>
-          {agentPanelOpen && (
-            <div className="agent-bar-body">
-              {agentView.plan && agentView.plan.length > 0 && (
-                <ol className="agent-plan">
-                  {agentView.plan.map((p) => (
-                    <li key={p.index} className={`plan-step st-${p.status}`}>
-                      <span className="plan-step-icon">
-                        {p.status === 'done' ? '✅' : p.status === 'failed' ? '❌' : p.status === 'running' ? '⏳' : '⬜'}
-                      </span>
-                      <span className="plan-step-desc">{p.desc}</span>
-                    </li>
-                  ))}
-                </ol>
-              )}
-              {agentView.timeline && agentView.timeline.length > 0 && (
-                <div className="agent-timeline">
-                  <div className="agent-timeline-list">
-                    {agentView.timeline.slice(-25).map((ev, i) => (
-                      <div key={i} className={`tl-item tl-${ev.kind}`}>
-                        <span className="tl-icon">
-                          {ev.kind === 'tool_result' && ev.text.startsWith('❌') ? '❌'
-                            : ev.kind === 'tool_result' ? '✅' : ev.kind === 'tool_start' ? '🔧'
-                            : ev.kind === 'final' ? '💬' : ev.kind === 'error' ? '⚠️' : '·'}
-                        </span>
-                        <span className="tl-text">{ev.text}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+      {/* Agent 执行过程已内联到会话气泡里（🎯/🔧/✅/❌ 日志行），不再有独立面板 */}
 
       <div className="copilot-body">
         <aside className="side-panel side-left">
@@ -524,36 +484,48 @@ export function Copilot() {
                   {m.thinking && !m.content && (
                     <div className="copilot-thinking-label"><RefreshCw size={13} className="spin" /> 思考中…</div>
                   )}
+                  {/* Agent 执行过程：内联日志行（一行目标/执行/结果，带小 icon） */}
+                  {m.acts && m.acts.length > 0 && (
+                    <div className="agent-acts">
+                      {m.acts.map((a, j) => (
+                        <div key={j} className={`agent-act ${a.i === '🎯' ? 'act-goal' : a.i === '🔧' ? 'act-tool' : a.i === '❌' ? 'act-fail' : 'act-ok'}`}>
+                          <span className="agent-act-icon">{a.i}</span>
+                          <span className="agent-act-text">{a.t}</span>
+                        </div>
+                      ))}
+                      {m.streaming && <div className="agent-act act-tool"><span className="agent-act-icon">⏳</span><span className="agent-act-text">执行中…</span></div>}
+                    </div>
+                  )}
                   {m.content ? (
                     <div className="copilot-content" dangerouslySetInnerHTML={{ __html: markdown(m.content) + (m.streaming ? '<span class="cursor">▍</span>' : '') }} />
                   ) : null}
-                </>
-              )}
-              {m.traces && m.traces.length > 0 && (
-                <div className="copilot-traces">
-                  <button className="trace-toggle" onClick={() => toggleTrace(i)}>
-                    <Wrench size={13} /> 工具调用 ({m.traces.length})
-                    {showTraces[i] ? ' ▾' : ' ▸'}
-                  </button>
-                  {showTraces[i] && (
-                    <div className="trace-list">
-                      {m.traces.map((t, j) => (
-                        <div key={j} className="trace-item">
-                          <div className="trace-name">
-                            <Wrench size={12} /> {t.name}
-                            {t.args && Object.keys(t.args).length > 0 && (
-                              <code>{JSON.stringify(t.args)}</code>
-                            )}
-                          </div>
-                          {t.error && <div className="trace-error">error: {t.error}</div>}
-                          {t.result && (
-                            <pre className="trace-result">{t.result.length > 800 ? t.result.slice(0, 800) + '...' : t.result}</pre>
-                          )}
+                  {(!m.acts || m.acts.length === 0) && m.traces && m.traces.length > 0 && (
+                    <div className="copilot-traces">
+                      <button className="trace-toggle" onClick={() => toggleTrace(i)}>
+                        <Wrench size={13} /> 工具调用 ({m.traces.length})
+                        {showTraces[i] ? ' ▾' : ' ▸'}
+                      </button>
+                      {showTraces[i] && (
+                        <div className="trace-list">
+                          {m.traces.map((t, j) => (
+                            <div key={j} className="trace-item">
+                              <div className="trace-name">
+                                <Wrench size={12} /> {t.name}
+                                {t.args && Object.keys(t.args).length > 0 && (
+                                  <code>{JSON.stringify(t.args)}</code>
+                                )}
+                              </div>
+                              {t.error && <div className="trace-error">error: {t.error}</div>}
+                              {t.result && (
+                                <pre className="trace-result">{t.result.length > 800 ? t.result.slice(0, 800) + '...' : t.result}</pre>
+                              )}
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      )}
                     </div>
                   )}
-                </div>
+                </>
               )}
             </div>
           </div>
