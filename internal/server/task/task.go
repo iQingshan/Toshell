@@ -454,6 +454,13 @@ func (m *Manager) Complete(id uint64, exitCode int32, output, errorMsg string) e
 		return fmt.Errorf("task not found: %d", id)
 	}
 
+	// 幂等去重：任务已进入终态（completed/failed/timeout）时忽略重复结果帧，
+	// 防止重连补发/重复上报导致重复副作用（重复 intel 提取、重复 completed 记录）。
+	if task.Status == StatusCompleted || task.Status == StatusFailed || task.Status == StatusTimeout {
+		logging.Debug("task", "Task %d already in terminal state %q, ignoring duplicate result", id, task.Status)
+		return nil
+	}
+
 	task.Status = StatusCompleted
 	task.ExitCode = exitCode
 	// av_detect 的指纹匹配与结果组装在服务端完成（指纹库可热更新）
@@ -494,6 +501,12 @@ func (m *Manager) Fail(id uint64, errorMsg string) error {
 	task, ok := m.tasks[id]
 	if !ok {
 		return fmt.Errorf("task not found: %d", id)
+	}
+
+	// 幂等去重：终态任务忽略重复失败帧
+	if task.Status == StatusCompleted || task.Status == StatusFailed || task.Status == StatusTimeout {
+		logging.Debug("task", "Task %d already in terminal state %q, ignoring duplicate fail", id, task.Status)
+		return nil
 	}
 
 	task.Status = StatusFailed
