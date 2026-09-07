@@ -88,6 +88,17 @@ var BuiltinPlaybooks = []Playbook{
 		},
 		Fallback: "report",
 	},
+	{
+		ID: "capability-assess", Name: "权限/能力评估", Desc: "原子执行链：身份+组+特权+监听+账户 → 评估当前权限与可用下一步",
+		Steps: []PlaybookStep{
+			{Name: "当前身份", Tool: "exec", Args: map[string]string{"session_id": "${session_id}", "command": "whoami"}, Wait: true, Timeout: 40, ExpectOK: true},
+			{Name: "组成员", Tool: "exec", Args: map[string]string{"session_id": "${session_id}", "command": "whoami /groups"}, Wait: true, Timeout: 40, ExpectOK: true},
+			{Name: "特权列表", Tool: "exec", Args: map[string]string{"session_id": "${session_id}", "command": "whoami /priv"}, Wait: true, Timeout: 40, ExpectOK: true},
+			{Name: "本机账户", Tool: "exec", Args: map[string]string{"session_id": "${session_id}", "command": "net user"}, Wait: true, Timeout: 40, ExpectOK: true},
+			{Name: "网络监听", Tool: "exec", Args: map[string]string{"session_id": "${session_id}", "command": "netstat -ano"}, Wait: true, Timeout: 40, ExpectOK: true},
+		},
+		Fallback: "report",
+	},
 }
 
 // PlaybookRunner 执行剧本的工具面（复用 MCP 工具执行器）。
@@ -383,6 +394,27 @@ func (r *PlaybookRunner) waitTask(run *PlaybookRun, sr *StepResult, result inter
 	if json.Unmarshal(raw, &m) != nil {
 		return nil
 	}
+
+	// exec（原子执行）已返回最终结果，无需再等待：
+	if step.Tool == "exec" {
+		if out, ok := m["output"].(string); ok {
+			sr.Output = truncate(out, 8000)
+		} else {
+			sr.Output = string(raw)
+		}
+		if st, _ := m["status"].(string); st == "failed" || st == "timeout" {
+			sr.Error = fmt.Sprintf("exec %s", st)
+			return fmt.Errorf("exec %s", st)
+		}
+		if ec, _ := m["exit_code"]; ec != nil {
+			if code, isF := ec.(float64); isF && code != 0 && code != -1 {
+				sr.Error = fmt.Sprintf("exit %v", code)
+				return fmt.Errorf("exit %v", code)
+			}
+		}
+		return nil
+	}
+
 	tid, ok := m["task_id"].(float64)
 	if !ok || tid == 0 {
 		return nil
