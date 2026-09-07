@@ -155,19 +155,48 @@ func (s *Server) loadPluginHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(res)
 }
 
-// loadPlugin 把插件按类型创建任务并下发到会话（HTTP handler 与 MCP 工具共用）。
+// loadPlugin 把插件按类型创建任务并下发到会话（HTTP handler 用；异步推送，返回 task_id）。
 func (s *Server) loadPlugin(sessionID, pluginID, args string) (map[string]interface{}, error) {
+	taskInfo, p, err := s.createPluginTask(sessionID, pluginID, args)
+	if err != nil {
+		return nil, err
+	}
+	if s.listener != nil {
+		if err := s.listener.PushTask(sessionID, taskInfo); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]interface{}{
+		"task_id": taskInfo.ID,
+		"plugin":  p,
+		"status":  "pending",
+		"message": "Plugin load task sent to implant",
+	}, nil
+}
+
+// loadPluginAwait 原子加载插件：创建任务→推送→等待终态，一次性返回结果。
+// Agent 侧用（不再需要 task_wait 二次轮询）。
+func (s *Server) loadPluginAwait(sessionID, pluginID, args string, timeoutSec int) (map[string]interface{}, error) {
+	taskInfo, _, err := s.createPluginTask(sessionID, pluginID, args)
+	if err != nil {
+		return nil, err
+	}
+	return s.pushAndAwait(sessionID, taskInfo, timeoutSec)
+}
+
+// createPluginTask 按插件类型创建任务（不下发，由调用方决定推送/等待）。
+func (s *Server) createPluginTask(sessionID, pluginID, args string) (*types.TaskInfo, *plugin.Plugin, error) {
 	mgr := plugin.GetManager()
 	if mgr == nil {
-		return nil, fmt.Errorf("Plugin manager not initialized")
+		return nil, nil, fmt.Errorf("Plugin manager not initialized")
 	}
 	p, err := mgr.Get(pluginID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	data, err := mgr.ReadPluginData(pluginID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var taskInfo *types.TaskInfo
@@ -191,17 +220,7 @@ func (s *Server) loadPlugin(sessionID, pluginID, args string) (map[string]interf
 		taskInfo, err = s.taskMgr.CreateBOFLoad(sessionID, base64Data, args)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if s.listener != nil {
-		if err := s.listener.PushTask(sessionID, taskInfo); err != nil {
-			return nil, err
-		}
-	}
-	return map[string]interface{}{
-		"task_id": taskInfo.ID,
-		"plugin":  p,
-		"status":  "pending",
-		"message": "Plugin load task sent to implant",
-	}, nil
+	return taskInfo, p, nil
 }

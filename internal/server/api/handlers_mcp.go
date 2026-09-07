@@ -397,7 +397,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if err != nil {
 			return nil, err
 		}
-		return s.mcpPushResult(sid, task), nil
+		return s.pushAndAwait(sid, task, 60)
 	case "file_download":
 		sid := params["session_id"]
 		path := params["path"]
@@ -408,7 +408,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if err != nil {
 			return nil, err
 		}
-		return s.mcpPushResult(sid, task), nil
+		return s.pushAndAwait(sid, task, 300)
 	case "process_list":
 		sid := params["session_id"]
 		if sid == "" {
@@ -418,7 +418,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if err != nil {
 			return nil, err
 		}
-		return s.mcpPushResult(sid, task), nil
+		return s.pushAndAwait(sid, task, 60)
 	case "process_kill":
 		sid := params["session_id"]
 		pid, perr := strconv.ParseUint(params["pid"], 10, 32)
@@ -429,7 +429,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if err != nil {
 			return nil, err
 		}
-		return s.mcpPushResult(sid, task), nil
+		return s.pushAndAwait(sid, task, 60)
 	case "screenshot":
 		sid := params["session_id"]
 		if sid == "" {
@@ -439,7 +439,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if err != nil {
 			return nil, err
 		}
-		return s.mcpPushResult(sid, task), nil
+		return s.pushAndAwait(sid, task, 90)
 	case "credentials":
 		sid := params["session_id"]
 		action := params["action"]
@@ -454,7 +454,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if err != nil {
 			return nil, err
 		}
-		return s.mcpPushResult(sid, task), nil
+		return s.pushAndAwait(sid, task, 180)
 	case "session_kill":
 		sid := params["session_id"]
 		if sid == "" {
@@ -552,12 +552,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if sid == "" || pid == "" {
 			return nil, fmt.Errorf("session_id and plugin_id required")
 		}
-		res, err := s.loadPlugin(sid, pid, params["args"])
-		if err != nil {
-			return nil, err
-		}
-		res["hint"] = "用 task_wait 工具等待任务完成并获取结果"
-		return res, nil
+		return s.loadPluginAwait(sid, pid, params["args"], 180)
 	case "tunnel_start":
 		sid := params["session_id"]
 		if sid == "" {
@@ -637,10 +632,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if cerr != nil {
 			return nil, cerr
 		}
-		return map[string]interface{}{
-			"task_id": taskInfo.ID, "kind": kind, "source": src, "size": len(data),
-			"hint":     "用 task_wait 等内存加载任务完成并获取结果",
-		}, nil
+		return s.pushAndAwait(sid, taskInfo, 180)
 	case "exec":
 		// TaskOrchestrator 原子执行：下发一次性命令并等待最终结果（Agent 一次调用拿结果）
 		sid := params["session_id"]
@@ -652,7 +644,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if sid == "" || cmd == "" {
 			return nil, fmt.Errorf("exec: session_id and command (or kind) required")
 		}
-		timeout := 60
+		timeout := 120
 		if sec, perr := strconv.Atoi(params["timeout_sec"]); perr == nil && sec > 0 {
 			timeout = sec
 		}
@@ -667,11 +659,12 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if cmd == "" {
 			return nil, fmt.Errorf("empty command for %s", name)
 		}
-		taskInfo, err := s.taskMgr.CreateCommand(sid, cmd, nil, 60)
-		if err != nil {
-			return nil, err
+		// 原子执行并返回最终结果（与 exec 同语义）：一次性拿结果，不再走 task_wait
+		timeout := 120
+		if sec, perr := strconv.Atoi(params["timeout_sec"]); perr == nil && sec > 0 {
+			timeout = sec
 		}
-		return s.mcpPushResult(sid, taskInfo), nil
+		return s.execAndAwait(sid, cmd, timeout)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1062,6 +1055,7 @@ func builtinCommand(name, raw string) string {
 
 // mcpPushResult 创建任务后推送，返回标准响应（task_id 供 agent 用 task_wait 取结果）。
 // 推送失败不致命：任务已入队，心跳轮询/重连补发会派发。
+// 仅保留给仍需要异步编排的调用方（如 task_submit / 外部 MCP 客户端）。
 func (s *Server) mcpPushResult(sid string, taskInfo *types.TaskInfo) map[string]interface{} {
 	if s.listener != nil {
 		if err := s.listener.PushTask(sid, taskInfo); err != nil {
@@ -1076,17 +1070,12 @@ func (s *Server) mcpPushResult(sid string, taskInfo *types.TaskInfo) map[string]
 	}
 }
 
-// execAndAwait TaskOrchestrator 核心：在指定会话下发一次性命令并原子等待结果。
-// 服务端统一完成 创建→推送→轮询→归位，返回最终输出/退出码。
-// Agent 只需调用一次（无需自己拼 task_id / task_wait，杜绝编造 task_id 与乱序）。
-// 熔断语义：会话离线立即返回明确错误；任务超时返回 timeout 标记。
-func (s *Server) execAndAwait(sid, cmd string, timeoutSec int) (map[string]interface{}, error) {
-	if sid == "" || cmd == "" {
-		return nil, fmt.Errorf("session_id and command required")
-	}
-	// 会话必须存在且活跃，否则直接失败（不等轮询）
-	if st, serr := s.sessionMgr.GetStatus(sid); serr != nil || st != "active" {
-		return nil, fmt.Errorf("session %s not active (offline): 无法下发命令", sid)
+// pushAndAwait 对「已创建」的任务立即推送并原子等待终态（同 task_wait 语义）。
+// 返回最终结果 map（含 output/status/exit_code），供各类一次性工具原子化：
+// agent 一次调用即拿结果，无需再拼 task_id / 调 task_wait，杜绝编造 task_id。
+func (s *Server) pushAndAwait(sid string, taskInfo *types.TaskInfo, timeoutSec int) (map[string]interface{}, error) {
+	if taskInfo == nil {
+		return nil, fmt.Errorf("empty task")
 	}
 	if timeoutSec <= 0 {
 		timeoutSec = 60
@@ -1094,16 +1083,15 @@ func (s *Server) execAndAwait(sid, cmd string, timeoutSec int) (map[string]inter
 	if timeoutSec > 300 {
 		timeoutSec = 300
 	}
-	taskInfo, err := s.taskMgr.CreateCommand(sid, cmd, nil, uint32(timeoutSec))
-	if err != nil {
-		return nil, err
+	// 会话必须存在且活跃，否则直接失败（不等轮询）
+	if st, serr := s.sessionMgr.GetStatus(sid); serr != nil || st != "active" {
+		return nil, fmt.Errorf("session %s not active (offline): 无法下发任务", sid)
 	}
 	if s.listener != nil {
 		if err := s.listener.PushTask(sid, taskInfo); err != nil {
-			logging.Warn("api", "execAndAwait push to %s failed: %v", sid, err)
+			logging.Warn("api", "pushAndAwait push to %s failed: %v", sid, err)
 		}
 	}
-	// 原子等待终态（同 task_wait 语义：终态即返回；会话离线即时报错；超时返回）
 	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
 	for time.Now().Before(deadline) {
 		t, gerr := s.taskMgr.Get(taskInfo.ID)
@@ -1145,4 +1133,29 @@ func (s *Server) execAndAwait(sid, cmd string, timeoutSec int) (map[string]inter
 		"error": t.Error, "exit_code": t.ExitCode, "timeout": true,
 		"message": "任务超时仍在执行",
 	}, nil
+}
+
+// execAndAwait TaskOrchestrator 核心：在指定会话下发一次性命令并原子等待结果。
+// 服务端统一完成 创建→推送→轮询→归位，返回最终输出/退出码。
+// Agent 只需调用一次（无需自己拼 task_id / task_wait，杜绝编造 task_id 与乱序）。
+// 熔断语义：会话离线立即返回明确错误；任务超时返回 timeout 标记。
+func (s *Server) execAndAwait(sid, cmd string, timeoutSec int) (map[string]interface{}, error) {
+	if sid == "" || cmd == "" {
+		return nil, fmt.Errorf("session_id and command required")
+	}
+	// 会话必须存在且活跃，否则直接失败（不等轮询）
+	if st, serr := s.sessionMgr.GetStatus(sid); serr != nil || st != "active" {
+		return nil, fmt.Errorf("session %s not active (offline): 无法下发命令", sid)
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = 60
+	}
+	if timeoutSec > 300 {
+		timeoutSec = 300
+	}
+	taskInfo, err := s.taskMgr.CreateCommand(sid, cmd, nil, uint32(timeoutSec))
+	if err != nil {
+		return nil, err
+	}
+	return s.pushAndAwait(sid, taskInfo, timeoutSec)
 }

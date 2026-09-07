@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,7 +111,119 @@ type AgentRun struct {
 	// Pending 待审批（awaiting_consent 时的挂起状态）。
 	Pending *pendingState `json:"-"`
 
+	// execSeen 本 run 已执行过的命令缓存（规范键 → 结果），用于命令级去重：
+	// 相同命令只下发一次，重复调用直接回放上次结果，杜绝信息收集反复重跑同一命令。
+	execSeen map[string]cachedExec
+	// execStall 连续命中去重的次数：≥2 说明模型在无新信息地空转，强制收敛出报告。
+	execStall int
+
 	mu sync.Mutex
+}
+
+// cachedExec 一次已执行命令的缓存结果。
+type cachedExec struct {
+	OK    bool   // 上次是否成功（exit 0 / status completed）
+	Brief string // 上次结果摘要（截断），供去重回放
+	Full  string // 上次完整输出（截断），供去重回放
+}
+
+// seenExecKey 返回某次 exec 类调用的规范键；非 exec 类返回 ""。
+// 规范键忽略空白差异与尾部 2>&1（同一条命令的等价写法视为重复）。
+func seenExecKey(tool string, args map[string]string) string {
+	switch tool {
+	case "exec":
+		cmd := args["command"]
+		if cmd == "" {
+			cmd = args["kind"]
+		}
+		if cmd == "" {
+			return ""
+		}
+		return "exec|" + normExecKey(cmd)
+	case "run_command":
+		cmd := args["command"]
+		if cmd == "" {
+			return ""
+		}
+		return "exec|" + normExecKey(cmd)
+	case "user_info", "system_info", "service_list", "check_av",
+		"net_info", "net_connections", "env_vars", "scheduled_tasks":
+		// 语义工具映射为固定内置命令，按工具名去重即可（避免空 command 相互碰撞）
+		return "tool:" + tool
+	default:
+		return ""
+	}
+}
+
+// normExecKey 规范化命令文本用于去重比较（折叠空白/大小写，去掉尾部重定向）。
+func normExecKey(cmd string) string {
+	s := strings.TrimSpace(cmd)
+	s = strings.ReplaceAll(s, "2>&1", "")
+	s = strings.ReplaceAll(s, "2>nul", "")
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.ToLower(s)
+	return s
+}
+
+// isReconRequest 判断当前 run 是否属于「信息收集/侦察」类请求。
+// 只有这类请求启用命令级去重（同一条命令只下发一次）；
+// 提权/横向/利用等需要事后复验状态的任务不去重，避免误挡合法重跑。
+func isReconRequest(run *AgentRun) bool {
+	run.mu.Lock()
+	obj := run.Objective
+	msgs := append([]Message(nil), run.Messages...)
+	run.mu.Unlock()
+	text := obj
+	// 取最近一条用户消息兜底（objective 可能尚未生成）
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" && strings.TrimSpace(msgs[i].Content) != "" {
+			text = msgs[i].Content
+			break
+		}
+	}
+	keys := []string{
+		"信息收集", "信息搜集", "侦察", "枚举", "盘点", "态势", "信息采集",
+		"收集", "recon", "collect", "enumerate", "gather", "informati",
+		"看看", "查看", "了解", "情况", "信息",
+	}
+	t := strings.ToLower(text)
+	for _, k := range keys {
+		if strings.Contains(t, strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
+// reconExecKey 返回信息收集请求下某次 exec 类调用的去重键；非收集任务返回 ""（不去重）。
+func reconExecKey(run *AgentRun, tool string, args map[string]string) string {
+	if !isReconRequest(run) {
+		return ""
+	}
+	return seenExecKey(tool, args)
+}
+
+// getCachedExec 查询本 run 是否执行过该规范键。
+func (r *AgentRun) getCachedExec(key string) (cachedExec, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.execSeen == nil {
+		r.execSeen = map[string]cachedExec{}
+	}
+	c, ok := r.execSeen[key]
+	return c, ok
+}
+
+// rememberExec 记录一次已执行命令；若该键此前已存在则返回 true（本次为重复调用）。
+func (r *AgentRun) rememberExec(key string, c cachedExec) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.execSeen == nil {
+		r.execSeen = map[string]cachedExec{}
+	}
+	_, dup := r.execSeen[key]
+	r.execSeen[key] = c
+	return dup
 }
 
 // SetObjective 记录当前目标（线程安全）。

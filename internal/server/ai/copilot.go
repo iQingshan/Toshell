@@ -177,20 +177,27 @@ func (c *Copilot) ChatWithConsent(ctx context.Context, history []Message) (*Chat
 func (c *Copilot) systemPrompt() string {
 	sysBase := "你是 ToShell C2 平台的 AI 副驾驶（agent），帮助安全测试人员完整执行操作闭环。\n" +
 		"你可以调用工具完成：会话管理（session_list/session_context/session_kill）、" +
-		"命令下发（task_submit/task_result/task_wait）、文件操作（file_list/file_download）、" +
-		"进程操作（process_list/process_kill）、截图（screenshot）、凭据收集（credentials）、" +
-		"隧道/端口转发（tunnel_start/tunnel_list/tunnel_stop）、插件执行（plugin_list/plugin_load）、" +
+		"命令执行（**exec**：原子执行并直接返回最终结果；user_info/system_info/service_list/check_av/net_info/net_connections/env_vars/scheduled_tasks 等语义命令同样原子返回）、" +
+		"文件操作（file_list/file_download）、进程操作（process_list/process_kill）、截图（screenshot）、" +
+		"凭据收集（credentials）、隧道/端口转发（tunnel_start/tunnel_list/tunnel_stop）、插件执行（plugin_list/plugin_load）、" +
 		"情报查询（intel_query）、攻击建议（attack_suggest）、任务流执行（delegate/playbook_status）、" +
 		"联网搜索（web_search）、远程下载工具（remote_download，下载到服务端 data/tools/ 可重复使用）与工具分发" +
 		"（tool_list 看已下载工具；plugin_upload 把工具上传为插件→plugin_load 加载；fileless_exec 内存加载执行，不落盘）。\n" +
+		"**重要：所有命令/文件/进程/凭据类工具都是原子执行——一次调用即返回最终结果，平台不存在 task_wait/task_id 轮询，**" +
+		"不要尝试等待或猜测任何任务编号，也不要对同一命令重复调用。\n" +
 		"工作方式（ReAct 闭环）：\n" +
 		"1. 先侦察：基于给定【当前在线会话】选合适会话，再用 session_list/session_context 了解目标，不臆造数据。\n" +
-		"2. 再行动：需要执行命令/内置侦察时，**首选 exec 工具**（原子执行并直接返回最终结果，无需再拼 task_wait，杜绝 task_id 编造与错位）；文件/进程/凭据等专项用对应工具。\n" +
-		"3. 必等结果：用 exec（或 task_wait 轮询）等到真实输出后再继续；不要下发后立即汇报（那是未执行的结果）。\n" +
+		"2. 再行动：需要执行命令/内置侦察时，用 exec（原子执行，直接拿最终输出）；文件/进程/凭据等专项用对应工具。\n" +
+		"3. 必拿结果：工具返回就是真实执行结果；不要汇报未执行/想象中的结果。\n" +
 		"4. 分析汇报：基于真实输出用简洁中文总结（关键信息、异常、下一步建议）。\n" +
+		"【信息收集任务】当用户要求做信息收集/侦察/枚举/态势了解时（如「对 xx 做信息收集」「看看这台机器情况」）：\n" +
+		"  - **固定清单一次收齐**，每项只执行一次，不重复不返工：身份权限（user_info/whoami /priv + /groups）→ 系统（system_info）→ 网络（net_info/net_connections）→ 用户与组（net user / net localgroup Administrators）→ 服务/计划任务/杀软（service_list/check_av/scheduled_tasks）→ 关键敏感位置（进程 process_list、常见敏感文件）→ 凭据线索（credentials 视权限谨慎触发）。\n" +
+		"  - **收敛**：清单项拿到结果后立即进入下一项，**绝不为同一信息点重跑命令**；若某项已足够支撑判断就跳过后续冗余项。\n" +
+		"  - **收尾必须输出结构化情报报告**，用 Markdown 分节汇总：主机与身份/权限、系统与补丁、网络（IP/外连）、本机用户与管理组、服务/杀软/计划任务、进程与敏感文件、凭据线索、可疑点与下一步建议。\n" +
+		"  - 报告直接引用关键字段值（用户、组、IP、端口、路径、版本），不要只罗列工具名；不要用「已收集 xx 信息」代替内容。\n" +
+		"  - 报告写完后**停止**，以「需要我继续深入哪一项？或按建议行动？」收尾，不要自动扩大范围。\n" +
 		"若某任务需要多步（列目录→看文件→读凭据→横向），按顺序连续调用工具完成完整链路。\n" +
 		"收敛原则（**严格执行，避免冗余/重复**）：\n" +
-		"  - **task_id 只能来自工具返回**（task_submit/run_command/fileless_exec 等的 task_id 字段），**严禁自己编造或猜测 task_id**；task_wait 报 task not found 时，说明该任务未成功，应**重新用工具下发**，而不是对同一命令重复执行。\n" +
 		"  - 每拿到一次完整结果就**立即停止**该信息点的搜集，不要对**完全相同的命令/参数**重发第二次（已见过该数据）。\n" +
 		"  - 连续 2 次相同命令无新增信息 → 判定该路径已到头，改用其它路径或直接进入「输出建议」。\n" +
 		"  - 拿到足够信息后**必须输出最终中文答复**；不要为了凑步数反复执行无意义命令。\n" +
@@ -208,14 +215,14 @@ func (c *Copilot) systemPrompt() string {
 		"  ② 逐步执行：每完成一步用工具拿真实结果，简短标注该步状态（如「步骤2 ✅」）；\n" +
 		"  ③ 全部完成后，给最终总结，进入待命。跨轮次继续时先引用原计划与进度，不重新从头规划。\n" +
 		"【自主提权闭环】提权是高危操作，**先评估、后谨慎行动**，绝不要一提到提权就无脑连发工具：\n" +
-		"  0 警觉：先判断是否**真的需要提权**——用 run_command(whoami + whoami /groups) 看当前身份与权限；" +
+		"  0 警觉：先判断是否**真的需要提权**——用 exec(whoami + whoami /priv + whoami /groups) 看当前身份与权限；" +
 		"若已是 admin/SYSTEM 或操作不需要更高权限，**就不要再执行提权**，直接说明并进入待命。\n" +
 		"  ① 评估路径：只有确认「当前权限不足且目标确实需要提权」后，才继续。结合环境（process_list/check_av 看 EDR、system_info/net_connections 看攻击面）" +
 		"选**一条最可能成功**的路径（如 Windows 普通用户→UAC，Linux→SUID/内核），不要同时铺开多条。\n" +
 		"  ② 确认工具：先 tool_list 看是否已有可用工具；没有再用 web_search 检索，remote_download 到服务端，" +
 		"并 tool_download_status / tool_list **确认拿到且平台/架构匹配**。**严禁**对不存在或不匹配的工具/载荷执行 fileless_exec / plugin_load（会崩溃植入端导致掉线）。\n" +
-		"  ③ 谨慎执行：一次只执行**一个**工具/动作，执行前说明意图，用 task_wait 等真实结果。\n" +
-		"  ④ 验证：提权后 run_command(whoami /priv 或 id) 确认权限确实提升；失败则**立即停止**，换路径或回退都**必须先说明**，绝不反复重试同一工具。\n" +
+		"  ③ 谨慎执行：一次只执行**一个**工具/动作，执行前说明意图，用原子工具直接等真实结果。\n" +
+		"  ④ 验证：提权后 exec(whoami /priv 或 id) 确认权限确实提升；失败则**立即停止**，换路径或回退都**必须先说明**，绝不反复重试同一工具。\n" +
 		"  ⑤ 待命：完成/失败后都转入「等待你后续指令」，把结果和建议简要汇报，不要擅自扩大操作范围。\n" +
 		"【失败恢复】工具调用失败或返回异常时，**绝不无脑重试/狂炸**：\n" +
 		"  - 先分析失败原因：是参数错、会话掉线、还是工具不存在/不匹配；据此选择**换等价工具**或**先向用户说明**。\n" +
@@ -225,6 +232,7 @@ func (c *Copilot) systemPrompt() string {
 		"  - 若确实无法继续，必须向用户**说明失败原因 + 可行的替代方案建议**，绝不要输出空白或只报错误。\n" +
 		"【输出要求】最终答复**只输出结论与建议**，不要大段罗列工具原始结果/命令输出/全部步骤明细——" +
 		"我只要【现状】(当前会话/权限/环境的简短判断) + 【建议】(下一步该做什么、怎么做的清晰可执行建议) + 【为何】一句话依据。" +
+		"信息收集类任务例外：按上文【信息收集任务】输出结构化报告（可较长，但必须是整合后的情报，不是工具流水账）。" +
 		"与待命状态呼应，最后以「需要我继续执行吗？」收尾，等待用户指令。\n" +
 		"下载约定：需要下载工具/载荷/文件到服务器时，**必须用 remote_download(url)**（服务端下载到 data/tools/，快且可靠，可复用）；" +
 		"**严禁**在目标会话上用手动命令（certutil / powershell Invoke-WebRequest / curl / bitsadmin 等）下载——" +
@@ -537,6 +545,34 @@ func (c *Copilot) currentSessions() string {
 	return sb.String()
 }
 
+// traceDigest 把已执行工具轨迹整理成紧凑的结果清单（保留每个结果的可读摘要），
+// 供最终收敛成文时参考，避免早期结果被上下文压缩后丢失。
+func traceDigest(traces []ToolTrace) string {
+	if len(traces) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("【本任务已收集到的工具结果汇总】\n")
+	for i, t := range traces {
+		if i >= 60 {
+			b.WriteString(fmt.Sprintf("…（其余 %d 条略）\n", len(traces)-60))
+			break
+		}
+		label := t.Name
+		if len(t.Args) > 0 {
+			ab, _ := json.Marshal(t.Args)
+			label += " " + truncate(string(ab), 120)
+		}
+		if t.Error != "" {
+			b.WriteString(fmt.Sprintf("%d. %s ❌ %s\n", i+1, label, truncate(t.Error, 200)))
+			continue
+		}
+		s := summarizeToolResult(t.Name, t.Result)
+		b.WriteString(fmt.Sprintf("%d. %s ✅ %s\n", i+1, label, truncate(s, 400)))
+	}
+	return b.String()
+}
+
 // buildActionSummary 把已完成的工具调用整理成可读的中文动作清单。
 func buildActionSummary(traces []ToolTrace) string {
 	if len(traces) == 0 {
@@ -699,10 +735,20 @@ func summarizeToolResult(name, result string) string {
 	}
 	switch name {
 	case "task_submit", "file_list", "file_download", "process_list", "process_kill",
-		"screenshot", "credentials", "task_result":
-		// JSON 结果：尝试解析出关键字段
+		"screenshot", "credentials", "task_result", "exec", "run_command", "user_info",
+		"system_info", "service_list", "check_av", "net_info", "net_connections",
+		"env_vars", "scheduled_tasks", "fileless_exec", "plugin_load":
+		// 原子/任务类工具 JSON 结果：优先提取 output 正文，其次关键字段
 		var m map[string]interface{}
 		if json.Unmarshal([]byte(result), &m) == nil {
+			status, _ := m["status"].(string)
+			if out, ok := m["output"].(string); ok && out != "" {
+				head := truncate(strings.TrimSpace(out), 200)
+				if status != "" && status != "completed" {
+					return fmt.Sprintf("status=%s, 输出: %s", status, head)
+				}
+				return head
+			}
 			parts := []string{}
 			if v, ok := m["task_id"]; ok {
 				parts = append(parts, fmt.Sprintf("task_id=%v", v))
@@ -712,6 +758,9 @@ func summarizeToolResult(name, result string) string {
 			}
 			if v, ok := m["exit_code"]; ok {
 				parts = append(parts, fmt.Sprintf("exit=%v", v))
+			}
+			if e, ok := m["error"].(string); ok && e != "" {
+				parts = append(parts, "error="+truncate(e, 120))
 			}
 			if len(parts) > 0 {
 				return strings.Join(parts, " ")
@@ -1095,6 +1144,12 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		}
 		if repeatCount >= 3 {
 			logging.Warn("ai", "agent %s: tool loop detected: %s repeated %d times", run.ID, tc.Function.Name, repeatCount)
+			// 收敛时尽量产出真实报告而不是动作清单
+			if len(run.Traces) > 0 {
+				if _, rerr := c.finalizeWithReport(ctx, run, "检测到你连续重复执行同一工具/命令，未产生新信息。工具阶段到此为止。"); rerr == nil {
+					return nil, fmt.Errorf("tool loop detected")
+				}
+			}
 			summary := buildActionSummary(run.Traces)
 			run.setReply(summary)
 			run.emit(AgentEventFinal, summary, "")
@@ -1109,6 +1164,34 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			c.waitForConsent(ctx, run, tc, args)
 			// run 已被挂起（awaiting_consent），停止本轮循环，等 resumeAgentAsync 恢复。
 			return nil, errAgentPaused
+		}
+
+		// 命令级去重（信息收集空转的结构性拦截）：exec/run_command/语义命令若本 run
+		// 已执行成功过，不再向植入端重复下发，直接回放上次完整结果。模型若仍反复要求
+		// 同一命令（execStall≥2），判定为空转 → 强制收敛输出最终情报报告。
+		// 仅「信息收集/侦察」类请求启用，避免误伤提权后的复验命令。
+		if ek := reconExecKey(run, tc.Function.Name, args); ek != "" {
+			if prev, ok := run.getCachedExec(ek); ok {
+				run.mu.Lock()
+				run.execStall++
+				stall := run.execStall
+				run.mu.Unlock()
+				logging.Info("agent-audit", "run=%s dedup tool=%s key=%s (stall=%d)", run.ID, tc.Function.Name, ek, stall)
+				replay := prev.Full
+				if replay == "" {
+					replay = "（该命令已在本次任务中执行过，未产生新信息）"
+				}
+				run.appendTimeline("tool_result", "⏭ 重复命令已去重（本次任务已执行过，结果复用）")
+				run.Traces = append(run.Traces, ToolTrace{Name: tc.Function.Name, Args: args, Result: truncate(replay, 2000)})
+				run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(replay, 4000)}, "")
+				run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: truncate(replay, 4000)})
+				if stall >= 2 {
+					// 空转判定：同一命令第二次重复且模型仍不收敛 → 强制输出报告，杜绝刷屏
+					return c.finalizeWithReport(ctx, run,
+						"你已两次重复执行同一命令（无新信息）。工具阶段到此为止。")
+				}
+				continue
+			}
 		}
 
 		// 执行工具
@@ -1128,6 +1211,13 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			}
 		}
 
+		// 命令执行成功后写入去重缓存（仅成功结果可回放，失败不缓存允许重试）
+		if err == nil && trace.Error == "" && !strings.Contains(out, `"failed"`) && !strings.Contains(out, `"exit_code":-1`) {
+			if ek := reconExecKey(run, tc.Function.Name, args); ek != "" {
+				run.rememberExec(ek, cachedExec{OK: true, Full: truncate(out, 4000), Brief: truncate(summarizeToolResult(tc.Function.Name, out), 300)})
+			}
+		}
+
 		// 失败刹车：连续失败 >= 3 次 → 强制收敛，输出已完成动作+下一步建议，不再让 LLM 无限瞎试。
 		isFail := err != nil || trace.Error != "" || strings.Contains(out, `"failed"`) || strings.Contains(out, `"exit_code":-1`)
 		if isFail {
@@ -1141,6 +1231,12 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			logging.Warn("ai", "agent %s: %d consecutive failures, converging to summary", run.ID, consecutiveFail)
 			run.Traces = append(run.Traces, trace)
 			run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(out, 4000), Error: trace.Error}, "")
+			// 收敛时尽量产出真实报告而不是动作清单
+			if len(run.Traces) > 0 {
+				if _, rerr := c.finalizeWithReport(ctx, run, "工具连续失败多次，工具阶段到此为止。"); rerr == nil {
+					return nil, fmt.Errorf("%d consecutive tool failures", consecutiveFail)
+				}
+			}
 			summary := buildActionSummary(run.Traces)
 			run.setReply(summary)
 			run.emit(AgentEventFinal, summary, "")
@@ -1161,7 +1257,12 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			run.ID, tc.Function.Name, truncate(tc.Function.Arguments, 200), trace.Error == "", trace.Error)
 	}
 
-	// 达到轮数上限：输出已完成的动作摘要
+	// 达到轮数上限：让模型基于已收集结果整理最终报告/答复（而非纯工具清单）
+	if len(run.Traces) > 0 {
+		if _, rerr := c.finalizeWithReport(ctx, run, "已达到本轮工具调用上限。工具阶段到此为止。"); rerr == nil {
+			return nil, fmt.Errorf("reached max turns %d", maxTurns)
+		}
+	}
 	summary := buildActionSummary(run.Traces)
 	run.setReply(summary)
 	run.emit(AgentEventFinal, summary, "")
@@ -1246,6 +1347,48 @@ func (c *Copilot) runChatReply(ctx context.Context, run *AgentRun, guard string)
 	return ag, nil
 }
 
+// finalizeWithReport 强制收敛：不再允许更多工具调用，让模型基于现有结果
+// 输出最终答复/情报报告（一次性无工具、较高 token 上限的收尾调用）。
+// 用于信息收集类任务空转/重复命令/轮数耗尽等场景，替代纯工具清单式收尾。
+func (c *Copilot) finalizeWithReport(ctx context.Context, run *AgentRun, reason string) (*AgentStream, error) {
+	msgs := append([]Message(nil), run.Messages...)
+	if len(msgs) == 0 || msgs[0].Role != "system" {
+		msgs = append([]Message{{Role: "system", Content: c.systemPrompt()}}, msgs...)
+	}
+	msgs = append(msgs, Message{Role: "system", Content: reason +
+		"请基于以上已经执行并返回的真实工具结果，输出一份结构清晰、信息完整的中文最终答复/情报报告" +
+		"（直接引用关键字段值，不要只罗列工具名，不要编造未获取的数据）。报告或结论写完即停止，不要再请求任何工具。"})
+	// 附上已收集结果的精简清单，确保被压缩掉的早期输出仍可用于成文
+	if digest := traceDigest(run.Traces); digest != "" {
+		msgs = append(msgs, Message{Role: "user", Content: digest})
+	}
+	// 上下文压缩：历史工具输出可能很大，折叠早期条目防止超出模型上下文
+	msgs = compressRunMessages(msgs)
+
+	ag, err := c.completeStreamOpts(ctx, msgs, streamReqOpts{MaxTokens: 2000}, func(phase, text string) {
+		if phase == "thinking" {
+			run.emit(AgentEventThinking, text, "")
+		} else {
+			run.emit(AgentEventMessage, text, "")
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	reply := strings.TrimSpace(ag.Content)
+	if reply == "" {
+		return nil, fmt.Errorf("empty final report")
+	}
+	run.Messages = append(run.Messages, Message{Role: "assistant", Content: reply})
+	run.setReply(reply)
+	run.appendTimeline("final", truncate(reply, 220))
+	run.emit(AgentEventFinal, reply, "")
+	run.emitRaw(AgentEvent{Kind: AgentEventDone})
+	run.setStatus(AgentDone)
+	run.closeEvents()
+	return ag, nil
+}
+
 // waitForConsent normal 模式下挂起 run，等前端 allow/deny。不返回——run 状态
 // 已置为 awaiting_consent，调用方应停止本轮循环，由 resumeAgentAsync 恢复。
 func (c *Copilot) waitForConsent(ctx context.Context, run *AgentRun, tc ToolCall, args map[string]string) {
@@ -1274,6 +1417,9 @@ type ToolTrace struct {
 }
 
 // toolSchemas 将 MCP 工具清单映射为 OpenAI function calling schema。
+// 注意：agent 工具面刻意**不暴露 task_submit/task_result/task_wait/run_command**——
+// 所有命令/读类工具都已原子化（一次调用直接返回最终结果），保留 task_wait 只会诱导
+// 模型猜测 task_id 导致 task not found 死循环。
 func toolSchemas() []ToolSchema {
 	defs := []struct {
 		name, desc string
@@ -1281,22 +1427,20 @@ func toolSchemas() []ToolSchema {
 	}{
 		{"intel_query", "查询跨会话情报库（IP/账号/哈希/共享/域名）", []string{"kind"}},
 		{"session_context", "获取指定会话的上下文摘要（OS/权限/监听器/最近任务）", []string{"session_id"}},
-		{"task_submit", "向会话下发命令任务（执行后返回任务 ID）", []string{"session_id", "command"}},
-		{"task_result", "查询单个任务的状态与输出（立即返回当前状态，不等待）", []string{"task_id"}},
-		{"task_wait", "轮询等待任务完成（下发任务后调用），返回最终输出/退出码。参数: task_id, timeout_sec（默认 60）", []string{"task_id", "timeout_sec"}},
 		{"session_list", "列出所有活跃会话（ID/主机名/OS/监听器/状态）", nil},
-		{"file_list", "列出会话上的目录内容（结果通过 task_wait 获取）", []string{"session_id", "path"}},
-		{"file_download", "从会话下载文件到服务器（结果通过 task_wait 获取）", []string{"session_id", "path"}},
-		{"process_list", "列出会话上的进程（结果通过 task_wait 获取）", []string{"session_id"}},
-		{"process_kill", "结束会话上的进程", []string{"session_id", "pid"}},
-		{"screenshot", "对会话截屏（结果通过 task_wait 获取，含 base64 图片）", []string{"session_id"}},
-		{"credentials", "收集会话上的凭据（all/browser/wifi/rdp/lsa，结果通过 task_wait 获取）", []string{"session_id", "action"}},
+		{"exec", "【命令执行首选】在会话原子执行命令并**直接返回最终结果**（服务端自动等待，无需也不存在 task_wait）。参数: session_id, command 或 kind(user_info/system_info/check_av/service_list/net_info/net_connections/env_vars/scheduled_tasks/process_list 等内置命令), timeout_sec(可选，默认120)", []string{"session_id", "command", "kind", "timeout_sec"}},
+		{"file_list", "列出会话上的目录内容（原子执行，直接返回结果）", []string{"session_id", "path"}},
+		{"file_download", "从会话下载文件到服务器（原子执行，直接返回结果）", []string{"session_id", "path"}},
+		{"process_list", "列出会话上的进程（原子执行，直接返回结果）", []string{"session_id"}},
+		{"process_kill", "结束会话上的进程（原子执行，直接返回结果）", []string{"session_id", "pid"}},
+		{"screenshot", "对会话截屏（原子执行，直接返回结果，含 base64 图片）", []string{"session_id"}},
+		{"credentials", "收集会话上的凭据（all/browser/wifi/rdp/lsa，原子执行直接返回）", []string{"session_id", "action"}},
 		{"session_kill", "终止会话（植入端退出）", []string{"session_id"}},
 		{"delegate", "子代理：在指定会话执行剧本（确定性多步链路），支持多会话并行。参数: playbook_id + session_id 或 session_ids", []string{"playbook_id", "session_id", "session_ids"}},
 		{"playbook_status", "查询剧本运行进度（delegate 返回 run_id 后查询）", []string{"run_id"}},
 		{"attack_suggest", "基于会话上下文给出下一步操作建议（提权/注入/凭据等）", []string{"session_id"}},
 		{"plugin_list", "列出已上传的插件（ID/名称/类型 exe/dll/shellcode/bof）", nil},
-		{"plugin_load", "把插件加载到指定会话执行。参数: session_id, plugin_id, args(可选)", []string{"session_id", "plugin_id", "args"}},
+		{"plugin_load", "把插件加载到指定会话执行（原子执行直接返回结果）。参数: session_id, plugin_id, args(可选)", []string{"session_id", "plugin_id", "args"}},
 		{"tunnel_start", "为指定会话启动 SOCKS5 隧道代理（本地端口转发，代理横向访问内网）。参数: session_id, local_port(可选默认1080)", []string{"session_id", "local_port"}},
 		{"tunnel_list", "列出当前所有隧道代理（会话 ID/本地端口/隧道数）", nil},
 		{"tunnel_stop", "停止指定会话的隧道代理。参数: session_id", []string{"session_id"}},
@@ -1305,17 +1449,15 @@ func toolSchemas() []ToolSchema {
 		{"tool_download_status", "查询一次远程下载的进度/结果（remote_download 返回 dl_id 后调用）。参数: dl_id", []string{"dl_id"}},
 		{"tool_list", "列出服务端 data/tools/ 已下载的可复用工具", nil},
 		{"plugin_upload", "把 data/tools/ 下的工具上传为插件（BOF/DLL/EXE/shellcode），之后用 plugin_load 加载到会话。参数: source, name(可选), description(可选)", []string{"source", "name", "description"}},
-		{"fileless_exec", "把 data/tools/ 下的工具按 kind(bof/shellcode/dll/exe) 内存加载执行（不落盘）。参数: session_id, source, kind(可选), args(可选)", []string{"session_id", "source", "kind", "args"}},
-		{"run_command", "向会话下发任意命令并返回待轮询任务（task_wait 取结果）。参数: session_id, command", []string{"session_id", "command"}},
-		{"exec", "【首选】在会话原子执行命令并直接返回最终结果（服务端自动等任务完成，无需再调 task_wait；比 task_submit+task_wait 更可靠）。参数: session_id, command 或 kind(user_info/system_info/check_av/process_list 等内置命令), timeout_sec(可选)", []string{"session_id", "command", "kind", "timeout_sec"}},
-		{"user_info", "获取会话当前用户/权限/本机用户", []string{"session_id"}},
-		{"system_info", "获取会话系统信息（systeminfo）", []string{"session_id"}},
-		{"service_list", "枚举会话上的 Windows 服务", []string{"session_id"}},
-		{"check_av", "检测会话上的杀软/EDR 相关进程", []string{"session_id"}},
-		{"net_info", "获取会话网络配置（ipconfig /all）", []string{"session_id"}},
-		{"net_connections", "列出会话上的网络连接（netstat -ano）", []string{"session_id"}},
-		{"env_vars", "获取会话环境变量", []string{"session_id"}},
-		{"scheduled_tasks", "列出会话上的计划任务", []string{"session_id"}},
+		{"fileless_exec", "把 data/tools/ 下的工具按 kind(bof/shellcode/dll/exe) 内存加载执行（不落盘，原子执行直接返回结果）。参数: session_id, source, kind(可选), args(可选)", []string{"session_id", "source", "kind", "args"}},
+		{"user_info", "获取会话当前用户/权限/本机用户（原子执行，直接返回结果）", []string{"session_id"}},
+		{"system_info", "获取会话系统信息（systeminfo，原子执行直接返回）", []string{"session_id"}},
+		{"service_list", "枚举会话上的 Windows 服务（原子执行直接返回）", []string{"session_id"}},
+		{"check_av", "检测会话上的杀软/EDR 相关进程（原子执行直接返回）", []string{"session_id"}},
+		{"net_info", "获取会话网络配置（ipconfig /all，原子执行直接返回）", []string{"session_id"}},
+		{"net_connections", "列出会话上的网络连接（netstat -ano，原子执行直接返回）", []string{"session_id"}},
+		{"env_vars", "获取会话环境变量（原子执行直接返回）", []string{"session_id"}},
+		{"scheduled_tasks", "列出会话上的计划任务（原子执行直接返回）", []string{"session_id"}},
 	}
 	schemas := make([]ToolSchema, 0, len(defs))
 	for _, d := range defs {
@@ -1353,7 +1495,8 @@ func truncate(s string, n int) string {
 // 与任务流（delegate/playbook_status）除外。
 func isRiskyTool(name string) bool {
 	switch name {
-	case "task_submit", "task_kill", "run_command", "user_info", "system_info",
+	case "task_submit", "task_kill", "run_command", "exec",
+		"user_info", "system_info",
 		"service_list", "check_av", "net_info", "net_connections", "env_vars", "scheduled_tasks",
 		"file_list", "file_download", "process_list", "process_kill",
 		"screenshot", "credentials", "session_kill", "plugin_load", "fileless_exec",
