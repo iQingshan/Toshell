@@ -67,7 +67,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
-          LDFLAGS="-s -w -X main.version=1.3.0 -X main.commit=$(git rev-parse --short HEAD) -X main.buildTime=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-s -w -X main.version=1.3.1 -X main.commit=$(git rev-parse --short HEAD) -X main.buildTime=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           go build -tags webui -ldflags "$LDFLAGS" -o "toserver${{ matrix.ext }}" ./cmd/server
 
       - name: Package zip
