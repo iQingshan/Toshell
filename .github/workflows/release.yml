@@ -74,9 +74,15 @@ jobs:
           # 完整可运行包：植入端模板 + 配置样例 + 依赖目录
           cp -r release/implant pkg/implant
           cp -r release/implant_c pkg/implant_c
-          cp configs/server.yaml.example pkg/server.yaml.example
+          # 配置：与 release/configs 布局一致（deploy.sh/bat 从 configs/ 读取）
+          mkdir -p pkg/configs
+          cp configs/server.yaml.example pkg/configs/server.yaml.example
           cp README.md pkg/README.md
+          cp USAGE.md pkg/USAGE.md
           cp "${{ matrix.deploy }}" pkg/
+          # 运行时数据预设：data 目录 + 杀软指纹库（服务端必需，db 由首次启动自动创建）
+          mkdir -p pkg/data
+          cp data/av_fingerprints.json pkg/data/av_fingerprints.json
           # upx/drivers/plugins 若存在于仓库则一并打包（可选依赖）
           for d in upx drivers plugins; do if [ -d "release/$d" ]; then cp -r "release/$d" "pkg/$d"; fi; done
           if [ "${{ matrix.goos }}" != "windows" ]; then chmod +x pkg/deploy.sh; fi

@@ -45,8 +45,27 @@ dashboard*.png
 .DS_Store
 Thumbs.db
 
-# ── 情报/下载的运行时数据 ──
-data/
+# ── 运行时数据目录：仅跟踪"预设文件"，运行时产物（db/上传/传输/uac载荷等）不提交 ──
+# 保留目录结构与必需资产：data/av_fingerprints.json（杀软指纹库，服务端必需）、
+# data/uploads / data/transfers / data/uac / data/tools / data/backup 目录占位。
+data/*
+!data/.gitkeep
+!data/av_fingerprints.json
+!data/uploads/
+!data/transfers/
+!data/uac/
+!data/tools/
+!data/backup/
+data/uploads/*
+!data/uploads/.gitkeep
+data/transfers/*
+!data/transfers/.gitkeep
+data/uac/*
+!data/uac/.gitkeep
+data/tools/*
+!data/tools/.gitkeep
+data/backup/*
+!data/backup/.gitkeep
 
 # ── 构建/缓存/打包/临时 ──
 .gocache/

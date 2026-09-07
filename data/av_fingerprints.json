@@ -1,0 +1,2802 @@
+{
+  "description": "杀软/EDR/安全软件 + 常见办公软件进程指纹库 — 合并自 avList + 多篇安全文章，按进程名已去重",
+  "sources": [
+    "github.com/HACK-THE-WORLD/avList",
+    "cnblogs.com/lcword",
+    "cnblogs.com/Yu-0",
+    "公开安全文章/EDR文档"
+  ],
+  "fingerprints": {
+    "av": [
+      {
+        "process": "360rp.exe",
+        "name": "360杀毒",
+        "category": "av"
+      },
+      {
+        "process": "360safe.exe",
+        "name": "360安全卫士",
+        "category": "av"
+      },
+      {
+        "process": "360safebox.exe",
+        "name": "360安全卫士",
+        "category": "av"
+      },
+      {
+        "process": "360sd.exe",
+        "name": "360杀毒",
+        "category": "av"
+      },
+      {
+        "process": "360tray.exe",
+        "name": "360安全卫士",
+        "category": "av"
+      },
+      {
+        "process": "_avp32.exe",
+        "name": "卡巴斯基",
+        "category": "av"
+      },
+      {
+        "process": "_avpcc.exe",
+        "name": "卡巴斯基",
+        "category": "av"
+      },
+      {
+        "process": "_avpm.exe",
+        "name": "卡巴斯基",
+        "category": "av"
+      },
+      {
+        "process": "A2CMD.exe",
+        "name": "Emsisoft Anti-Malware",
+        "category": "av"
+      },
+      {
+        "process": "A2FREE.exe",
+        "name": "Emsisoft Anti-Malware",
+        "category": "av"
+      },
+      {
+        "process": "a2guard.exe",
+        "name": "a-squared杀毒",
+        "category": "av"
+      },
+      {
+        "process": "A2SERVICE.exe",
+        "name": "Emsisoft Anti-Malware",
+        "category": "av"
+      },
+      {
+        "process": "aAvgApi.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "ad-watch.exe",
+        "name": "Lavasoft杀毒",
+        "category": "av"
+      },
+      {
+        "process": "adam.exe",
+        "name": "绿鹰安全精灵",
+        "category": "av"
+      },
+      {
+        "process": "ADVCHK.exe",
+        "name": "Norton AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "afwServ.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "agb.exe",
+        "name": "安天防线",
+        "category": "av"
+      },
+      {
+        "process": "AHProcMonServer.exe",
+        "name": "安天防线",
+        "category": "av"
+      },
+      {
+        "process": "AIRDEFENSE.exe",
+        "name": "AirDefense",
+        "category": "av"
+      },
+      {
+        "process": "alertsvc.exe",
+        "name": "Norton AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "AliSecGuard.exe",
+        "name": "阿里云盾",
+        "category": "av"
+      },
+      {
+        "process": "AliYunDun.exe",
+        "name": "阿里云盾",
+        "category": "av"
+      },
+      {
+        "process": "AliYunDunUpdate.exe",
+        "name": "阿里云盾",
+        "category": "av"
+      },
+      {
+        "process": "alogserv.exe",
+        "name": "McAfee VirusScan",
+        "category": "av"
+      },
+      {
+        "process": "AMON.exe",
+        "name": "Tiny Personal Firewall",
+        "category": "av"
+      },
+      {
+        "process": "ananwidget.exe",
+        "name": "墨者安全专家",
+        "category": "av"
+      },
+      {
+        "process": "anti-trojan.exe",
+        "name": "Anti-Trojan Elite",
+        "category": "av"
+      },
+      {
+        "process": "APVXDWIN.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "ArcaTasksService.exe",
+        "name": "ArcaVir",
+        "category": "av"
+      },
+      {
+        "process": "arr.exe",
+        "name": "Application Request Route",
+        "category": "av"
+      },
+      {
+        "process": "ashDisp.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "ASHMAISV.exe",
+        "name": "Alwil",
+        "category": "av"
+      },
+      {
+        "process": "ashServ.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "ASHSIMPL.exe",
+        "name": "AVAST!VirusCleaner",
+        "category": "av"
+      },
+      {
+        "process": "ashWebSv.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "AST.exe",
+        "name": "超级巡警",
+        "category": "av"
+      },
+      {
+        "process": "aswScan.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "aswUpdSv.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "atguard.exe",
+        "name": "AntiVir",
+        "category": "av"
+      },
+      {
+        "process": "ATool.exe",
+        "name": "安天防线",
+        "category": "av"
+      },
+      {
+        "process": "au.exe",
+        "name": "NSIS",
+        "category": "av"
+      },
+      {
+        "process": "aupdate.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "AvastSvc.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "AvastUI.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "avcenter.exe",
+        "name": "Avira 小红伞",
+        "category": "av"
+      },
+      {
+        "process": "AVCIMAN.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "avconsol.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "AVENGINE.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "avesvc.exe",
+        "name": "Avira 小红伞",
+        "category": "av"
+      },
+      {
+        "process": "avg.exe",
+        "name": "AVG Anti-Virus",
+        "category": "av"
+      },
+      {
+        "process": "AVGAM.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgaurd.exe",
+        "name": "Avira Antivir",
+        "category": "av"
+      },
+      {
+        "process": "AVGCC.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgcc32.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "AVGCHSVX.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "AVGCSRVX",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgctrl.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgemc.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "AVGFWSRV.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "AVGNSX.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgnt.exe",
+        "name": "Avira 小红伞",
+        "category": "av"
+      },
+      {
+        "process": "avgnt.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "AVGNTMGR.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgrsx.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgserv.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgserv9.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "AVGTRAY.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avguard.exe",
+        "name": "Avira 小红伞",
+        "category": "av"
+      },
+      {
+        "process": "avguard.exe",
+        "name": "Avira 小红伞",
+        "category": "av"
+      },
+      {
+        "process": "AVGUI.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "AVGUPSVC.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgw.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "avgwdsvc.exe",
+        "name": "AVG",
+        "category": "av"
+      },
+      {
+        "process": "AVINITNT.exe",
+        "name": "Command AntiVirus for NT Server",
+        "category": "av"
+      },
+      {
+        "process": "AVIRA.exe",
+        "name": "小红伞杀毒",
+        "category": "av"
+      },
+      {
+        "process": "AVK.exe",
+        "name": "AntiVirusKit",
+        "category": "av"
+      },
+      {
+        "process": "avkpop.exe",
+        "name": "G DATA SOFTWARE AG",
+        "category": "av"
+      },
+      {
+        "process": "avkserv.exe",
+        "name": "G DATA SOFTWARE AG",
+        "category": "av"
+      },
+      {
+        "process": "avkservice.exe",
+        "name": "G DATA SOFTWARE AG",
+        "category": "av"
+      },
+      {
+        "process": "avkwctl9.exe",
+        "name": "G DATA SOFTWARE AG",
+        "category": "av"
+      },
+      {
+        "process": "avltmain.exe",
+        "name": "Panda Software Aplication",
+        "category": "av"
+      },
+      {
+        "process": "avnt.exe",
+        "name": "H+BEDV Datentechnik GmbH",
+        "category": "av"
+      },
+      {
+        "process": "avp.exe",
+        "name": "Kaspersky",
+        "category": "av"
+      },
+      {
+        "process": "avp32.exe",
+        "name": "Kaspersky Anti-Virus",
+        "category": "av"
+      },
+      {
+        "process": "avpcc.exe",
+        "name": "Kaspersky AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "avpdos32.exe",
+        "name": "Kaspersky AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "avpm.exe",
+        "name": "Kaspersky AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "avptc32.exe",
+        "name": "Kaspersky AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "avpui.exe",
+        "name": "Kaspersky",
+        "category": "av"
+      },
+      {
+        "process": "avpupd.exe",
+        "name": "Kaspersky AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "AVSCHED32.exe",
+        "name": "H+BEDV",
+        "category": "av"
+      },
+      {
+        "process": "AVSERVER.exe",
+        "name": "Kerio MailServer",
+        "category": "av"
+      },
+      {
+        "process": "avsynmgr.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "AVWatchService.exe",
+        "name": "VIRUSfighter",
+        "category": "av"
+      },
+      {
+        "process": "avwin.exe",
+        "name": "H+BEDV",
+        "category": "av"
+      },
+      {
+        "process": "AVWUPSRV.exe",
+        "name": "H+BEDV",
+        "category": "av"
+      },
+      {
+        "process": "AVZ.exe",
+        "name": "AVZ",
+        "category": "av"
+      },
+      {
+        "process": "baiduansvx.exe",
+        "name": "百度卫士",
+        "category": "av"
+      },
+      {
+        "process": "BaiduSd.exe",
+        "name": "百度杀毒",
+        "category": "av"
+      },
+      {
+        "process": "BaiduSdSvc.exe",
+        "name": "百度杀毒",
+        "category": "av"
+      },
+      {
+        "process": "BaiduSdTray.exe",
+        "name": "百度杀毒",
+        "category": "av"
+      },
+      {
+        "process": "bdagent.exe",
+        "name": "BitDefender",
+        "category": "av"
+      },
+      {
+        "process": "bddownloader.exe",
+        "name": "百度卫士",
+        "category": "av"
+      },
+      {
+        "process": "bdredline.exe",
+        "name": "BitDefender",
+        "category": "av"
+      },
+      {
+        "process": "BDSWITCH.exe",
+        "name": "BitDefender Module",
+        "category": "av"
+      },
+      {
+        "process": "beagle.exe",
+        "name": "Avast",
+        "category": "av"
+      },
+      {
+        "process": "beikesan.exe",
+        "name": "贝壳云安全",
+        "category": "av"
+      },
+      {
+        "process": "BKavService.exe",
+        "name": "Bkav",
+        "category": "av"
+      },
+      {
+        "process": "blackd.exe",
+        "name": "BlackICE",
+        "category": "av"
+      },
+      {
+        "process": "blackice.exe",
+        "name": "BlackICE",
+        "category": "av"
+      },
+      {
+        "process": "blink.exe",
+        "name": "micromedia",
+        "category": "av"
+      },
+      {
+        "process": "bootwarn.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "ccapp.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "ccEvtMgr.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "ccRegVfy.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "ccSetMgr.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "ccSvcHst.exe",
+        "name": "Norton / Symantec",
+        "category": "av"
+      },
+      {
+        "process": "cdp.exe",
+        "name": "CyberLink Corp.",
+        "category": "av"
+      },
+      {
+        "process": "cfd.exe",
+        "name": "Motive Communications",
+        "category": "av"
+      },
+      {
+        "process": "cfgwiz.exe",
+        "name": "Norton AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "cfp.exe",
+        "name": "Comodo",
+        "category": "av"
+      },
+      {
+        "process": "CKSoftShiedAntivirus4.exe",
+        "name": "Shield Antivirus杀毒",
+        "category": "av"
+      },
+      {
+        "process": "CLAMWIN.exe",
+        "name": "ClamAV",
+        "category": "av"
+      },
+      {
+        "process": "clean.exe",
+        "name": "windows流氓软件清理大师",
+        "category": "av"
+      },
+      {
+        "process": "cleaner.exe",
+        "name": "windows流氓软件清理大师",
+        "category": "av"
+      },
+      {
+        "process": "cleaner3.exe",
+        "name": "windows流氓软件清理大师",
+        "category": "av"
+      },
+      {
+        "process": "cleaner8.exe",
+        "name": "The Cleaner杀毒",
+        "category": "av"
+      },
+      {
+        "process": "cleanpc.exe",
+        "name": "windows流氓软件清理大师",
+        "category": "av"
+      },
+      {
+        "process": "cleanup.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "cli.exe",
+        "name": "Comodo",
+        "category": "av"
+      },
+      {
+        "process": "CMCTrayIcon.exe",
+        "name": "CMC杀毒",
+        "category": "av"
+      },
+      {
+        "process": "cmdagent.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "cmdagent.exe",
+        "name": "Comodo",
+        "category": "av"
+      },
+      {
+        "process": "CorantiControlCenter32.exe",
+        "name": "Coranti2012杀毒",
+        "category": "av"
+      },
+      {
+        "process": "cpd.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "cpf.exe",
+        "name": "Comodo",
+        "category": "av"
+      },
+      {
+        "process": "cureit.exe",
+        "name": "Dr.Web CureIt!",
+        "category": "av"
+      },
+      {
+        "process": "d_manage.exe",
+        "name": "D盾",
+        "category": "av"
+      },
+      {
+        "process": "D_Safe_Manage.exe",
+        "name": "D盾",
+        "category": "av"
+      },
+      {
+        "process": "defalert.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "DEFENDERDAEMON.exe",
+        "name": "ShadowDefender",
+        "category": "av"
+      },
+      {
+        "process": "defscangui.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "defwatch.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "drwadins.exe",
+        "name": "Dr.Web",
+        "category": "av"
+      },
+      {
+        "process": "drweb.exe",
+        "name": "Dr.Web",
+        "category": "av"
+      },
+      {
+        "process": "dssagent.exe",
+        "name": "Broderbund",
+        "category": "av"
+      },
+      {
+        "process": "egui.exe",
+        "name": "ESET NOD32",
+        "category": "av"
+      },
+      {
+        "process": "eguiProxy.exe",
+        "name": "ESET NOD32",
+        "category": "av"
+      },
+      {
+        "process": "ekrn.exe",
+        "name": "ESET NOD32",
+        "category": "av"
+      },
+      {
+        "process": "emet_agent.exe",
+        "name": "EMET",
+        "category": "av"
+      },
+      {
+        "process": "emet_service.exe",
+        "name": "EMET",
+        "category": "av"
+      },
+      {
+        "process": "emsw.exe",
+        "name": "Alset Inc",
+        "category": "av"
+      },
+      {
+        "process": "engineserver.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "ethereal.exe",
+        "name": "RationalClearCase",
+        "category": "av"
+      },
+      {
+        "process": "EWIDOCTRL.exe",
+        "name": "Ewido Security Suite",
+        "category": "av"
+      },
+      {
+        "process": "EZANTIVIRUSREGISTRATIONCHECK.exe",
+        "name": "e-Trust Antivirus",
+        "category": "av"
+      },
+      {
+        "process": "F-PROT.exe",
+        "name": "F-Prot",
+        "category": "av"
+      },
+      {
+        "process": "f-secure.exe",
+        "name": "冰岛",
+        "category": "av"
+      },
+      {
+        "process": "fameh32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fast.exe",
+        "name": "FastUsr",
+        "category": "av"
+      },
+      {
+        "process": "fcag.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "fcagate.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "fcags.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "fcagswd.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "fch32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fih32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "findviru.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "firesvc.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "firetray.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "firewall.exe",
+        "name": "AshampooSoftware",
+        "category": "av"
+      },
+      {
+        "process": "fnrb32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "FortiTray.exe",
+        "name": "Fortinet",
+        "category": "av"
+      },
+      {
+        "process": "fp-win.exe",
+        "name": "F-Prot",
+        "category": "av"
+      },
+      {
+        "process": "FPROTTRAY.exe",
+        "name": "F-PROT Antivirus",
+        "category": "av"
+      },
+      {
+        "process": "FPWIN.exe",
+        "name": "Verizon",
+        "category": "av"
+      },
+      {
+        "process": "Frameworkservice.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "freshclam.exe",
+        "name": "ClamAV",
+        "category": "av"
+      },
+      {
+        "process": "frminst.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "fsaa.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsav.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsav32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsav530stbyb.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsav530wtbyb.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsav95.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsavgui.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "FSBWSYS.exe",
+        "name": "F-secure",
+        "category": "av"
+      },
+      {
+        "process": "fsdfwd.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsgk32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "FSGK32ST.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsm32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsma32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fsmb32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "fssm32.exe",
+        "name": "F-Secure",
+        "category": "av"
+      },
+      {
+        "process": "FYFireWall.exe",
+        "name": "风云防火墙",
+        "category": "av"
+      },
+      {
+        "process": "gg.exe",
+        "name": "巨盾网游安全盾",
+        "category": "av"
+      },
+      {
+        "process": "gov_defence_daemon.exe",
+        "name": "云锁",
+        "category": "av"
+      },
+      {
+        "process": "gov_defence_service.exe",
+        "name": "云锁",
+        "category": "av"
+      },
+      {
+        "process": "guard.exe",
+        "name": "Ewido",
+        "category": "av"
+      },
+      {
+        "process": "guarddog.exe",
+        "name": "Ewido",
+        "category": "av"
+      },
+      {
+        "process": "guardgui.exe",
+        "name": "网游保镖",
+        "category": "av"
+      },
+      {
+        "process": "GUARDNT.exe",
+        "name": "IKARUS",
+        "category": "av"
+      },
+      {
+        "process": "HipsDaemon.exe",
+        "name": "火绒",
+        "category": "av"
+      },
+      {
+        "process": "HipsMain.exe",
+        "name": "火绒安全",
+        "category": "av"
+      },
+      {
+        "process": "hipstray.exe",
+        "name": "火绒安全",
+        "category": "av"
+      },
+      {
+        "process": "HipsTray.exe",
+        "name": "火绒安全",
+        "category": "av"
+      },
+      {
+        "process": "hipsvc.exe",
+        "name": "McAfee主机IPS",
+        "category": "av"
+      },
+      {
+        "process": "hws.exe",
+        "name": "护卫神",
+        "category": "av"
+      },
+      {
+        "process": "hws_ui.exe",
+        "name": "护卫神",
+        "category": "av"
+      },
+      {
+        "process": "hwsd.exe",
+        "name": "护卫神",
+        "category": "av"
+      },
+      {
+        "process": "HwsPanel.exe",
+        "name": "护卫神",
+        "category": "av"
+      },
+      {
+        "process": "iamapp.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "iamserv.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "iamstats.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "iface.exe",
+        "name": "Panda Antivirus Module",
+        "category": "av"
+      },
+      {
+        "process": "INOCIT.exe",
+        "name": "eTrust",
+        "category": "av"
+      },
+      {
+        "process": "INORPC.exe",
+        "name": "eTrust",
+        "category": "av"
+      },
+      {
+        "process": "INORT.exe",
+        "name": "eTrust",
+        "category": "av"
+      },
+      {
+        "process": "INOTASK.exe",
+        "name": "eTrust",
+        "category": "av"
+      },
+      {
+        "process": "INOUPTNG.exe",
+        "name": "eTrust",
+        "category": "av"
+      },
+      {
+        "process": "Iparmor.exe.exe",
+        "name": "木马克星",
+        "category": "av"
+      },
+      {
+        "process": "iptray.exe",
+        "name": "Immunet杀毒",
+        "category": "av"
+      },
+      {
+        "process": "ISAFE.exe",
+        "name": "eTrust",
+        "category": "av"
+      },
+      {
+        "process": "JingYunMonSvr.exe",
+        "name": "景云防病毒",
+        "category": "av"
+      },
+      {
+        "process": "JingyunSdMainSvr.exe",
+        "name": "景云防病毒",
+        "category": "av"
+      },
+      {
+        "process": "JingyunSdSvr.exe",
+        "name": "景云防病毒",
+        "category": "av"
+      },
+      {
+        "process": "JingyunSdTray.exe",
+        "name": "景云防病毒",
+        "category": "av"
+      },
+      {
+        "process": "K7TSecurity.exe",
+        "name": "K7 Total Security",
+        "category": "av"
+      },
+      {
+        "process": "kav.exe",
+        "name": "Kaspersky",
+        "category": "av"
+      },
+      {
+        "process": "KAVMM.exe",
+        "name": "Kaspersky",
+        "category": "av"
+      },
+      {
+        "process": "kavpf.exe",
+        "name": "Kapersky",
+        "category": "av"
+      },
+      {
+        "process": "KAVPFW.exe",
+        "name": "Kaspersky",
+        "category": "av"
+      },
+      {
+        "process": "KAVSTART.exe",
+        "name": "Kaspersky",
+        "category": "av"
+      },
+      {
+        "process": "kavsvc.exe",
+        "name": "Kaspersky",
+        "category": "av"
+      },
+      {
+        "process": "KAVSVCUI.exe",
+        "name": "Kaspersky",
+        "category": "av"
+      },
+      {
+        "process": "kazza.exe",
+        "name": "Kapersky",
+        "category": "av"
+      },
+      {
+        "process": "keenvalue.exe",
+        "name": "EUNIVERSE INC",
+        "category": "av"
+      },
+      {
+        "process": "KMailMon.exe",
+        "name": "金山毒霸",
+        "category": "av"
+      },
+      {
+        "process": "knsdtray.exe",
+        "name": "可牛杀毒",
+        "category": "av"
+      },
+      {
+        "process": "kpfwtray.exe",
+        "name": "金山网镖",
+        "category": "av"
+      },
+      {
+        "process": "ksafe.exe",
+        "name": "金山卫士",
+        "category": "av"
+      },
+      {
+        "process": "KSafeSvc.exe",
+        "name": "金山毒霸",
+        "category": "av"
+      },
+      {
+        "process": "KSafeTray.exe",
+        "name": "金山毒霸",
+        "category": "av"
+      },
+      {
+        "process": "KSWebShield.exe",
+        "name": "金山网盾",
+        "category": "av"
+      },
+      {
+        "process": "KvMonXP.exe",
+        "name": "江民杀毒",
+        "category": "av"
+      },
+      {
+        "process": "KWatch.exe",
+        "name": "金山毒霸",
+        "category": "av"
+      },
+      {
+        "process": "kxetray.exe",
+        "name": "金山毒霸",
+        "category": "av"
+      },
+      {
+        "process": "launcher.exe",
+        "name": "Intercort Systems",
+        "category": "av"
+      },
+      {
+        "process": "ldscan.exe",
+        "name": "Windows Trojans Inspector",
+        "category": "av"
+      },
+      {
+        "process": "luall.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "luau.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "lucomserver.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "macompatsvc.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mailmon.exe",
+        "name": "金山毒霸",
+        "category": "av"
+      },
+      {
+        "process": "mbam.exe",
+        "name": "Malwarebytes",
+        "category": "av"
+      },
+      {
+        "process": "MBAMService.exe",
+        "name": "Malwarebytes",
+        "category": "av"
+      },
+      {
+        "process": "mcafeefire.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mcagent.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mcmnhdlr.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "MCREGWIZ.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mcscript.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mcscript_inuse.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "Mcshield.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mctool.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mctray.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mcupdate.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mcvsrte.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mcvsshld.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfeann.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfecanary.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfeconsole.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfeesp.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfefire.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfefw.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfemms.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfetp.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfevtps.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfewc.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mfewch.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mgavrtcl.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mgavrte.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mghtml.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mgui.exe",
+        "name": "BullGuard",
+        "category": "av"
+      },
+      {
+        "process": "minilog.exe",
+        "name": "Zone Labs Inc",
+        "category": "av"
+      },
+      {
+        "process": "MongoosaGUI.exe",
+        "name": "Mongoosa杀毒",
+        "category": "av"
+      },
+      {
+        "process": "MpCmdRun.exe",
+        "name": "Windows Defender",
+        "category": "av"
+      },
+      {
+        "process": "mpfagent.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mpfservice.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mpfservice.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "mpftray.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "MPMon.exe",
+        "name": "微点主动防御",
+        "category": "av"
+      },
+      {
+        "process": "mscache.exe",
+        "name": "Integrated Search Technologies Spyware",
+        "category": "av"
+      },
+      {
+        "process": "MsMpEng.exe",
+        "name": "Windows Defender",
+        "category": "av"
+      },
+      {
+        "process": "mssecess.exe",
+        "name": "微软杀毒",
+        "category": "av"
+      },
+      {
+        "process": "mtary.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "MYAGTSVC.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "MYAGTTRY.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "naprdmgr.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "nav.exe",
+        "name": "Reuters Limited",
+        "category": "av"
+      },
+      {
+        "process": "NAVAPSVC.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "navapw32.exe",
+        "name": "Norton AntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "NAVLU32.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "navw32.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "ndd32.exe",
+        "name": "诺顿磁盘医生",
+        "category": "av"
+      },
+      {
+        "process": "NEOWATCHLOG.exe",
+        "name": "NeoWatch",
+        "category": "av"
+      },
+      {
+        "process": "NEOWATCHTRAY.exe",
+        "name": "NeoWatch",
+        "category": "av"
+      },
+      {
+        "process": "nisserv.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "NisSrv.exe",
+        "name": "Windows Defender Network Inspection",
+        "category": "av"
+      },
+      {
+        "process": "nisum.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "nmain.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "nod32.exe",
+        "name": "ESET NOD32",
+        "category": "av"
+      },
+      {
+        "process": "NPFMntor.exe",
+        "name": "Norton杀毒软件",
+        "category": "av"
+      },
+      {
+        "process": "NPFMSG.exe",
+        "name": "Norman个人防火墙",
+        "category": "av"
+      },
+      {
+        "process": "nprotect.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "npscheck.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "npssvc.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "NSMDTR.exe",
+        "name": "Norton",
+        "category": "av"
+      },
+      {
+        "process": "nspupsvc.exe",
+        "name": "nProtect",
+        "category": "av"
+      },
+      {
+        "process": "ntrtscan.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "OfcPfwSvc.exe",
+        "name": "OfficeScan",
+        "category": "av"
+      },
+      {
+        "process": "OP_MON.exe",
+        "name": "OutpostFirewall",
+        "category": "av"
+      },
+      {
+        "process": "outpost.exe",
+        "name": "Outpost Firewall",
+        "category": "av"
+      },
+      {
+        "process": "outpostinstall.exe",
+        "name": "Outpost",
+        "category": "av"
+      },
+      {
+        "process": "parmor.exe",
+        "name": "木马克星",
+        "category": "av"
+      },
+      {
+        "process": "patch.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "PAVFIRES.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "PAVFNSVR.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "PAVKRE.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "PAVPROT.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "PAVPROXY.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "PAVPRSRV.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "pavsrv51.exe",
+        "name": "熊猫卫士 Panda",
+        "category": "av"
+      },
+      {
+        "process": "PAVSS.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "pccguide.exe",
+        "name": "趋势科技 PC-cillin",
+        "category": "av"
+      },
+      {
+        "process": "PCCIOMON.exe",
+        "name": "PC-cillin",
+        "category": "av"
+      },
+      {
+        "process": "PccNTMon.exe",
+        "name": "趋势科技 PC-cillin",
+        "category": "av"
+      },
+      {
+        "process": "PccPFW.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "PCCTLCOM.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "pcscan.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "PCTAV.exe",
+        "name": "PC Tools Antivirus",
+        "category": "av"
+      },
+      {
+        "process": "persfw.exe",
+        "name": "Tiny Personal Firewall",
+        "category": "av"
+      },
+      {
+        "process": "PESTPATROL.exe",
+        "name": "Ikarus",
+        "category": "av"
+      },
+      {
+        "process": "pfw.exe",
+        "name": "天网防火墙",
+        "category": "av"
+      },
+      {
+        "process": "pop3trap.exe",
+        "name": "PC-cillin",
+        "category": "av"
+      },
+      {
+        "process": "poproxy.exe",
+        "name": "NortonAntiVirus",
+        "category": "av"
+      },
+      {
+        "process": "powerscan.exe",
+        "name": "Integrated Search Technologies",
+        "category": "av"
+      },
+      {
+        "process": "PREVSRV.exe",
+        "name": "熊猫卫士",
+        "category": "av"
+      },
+      {
+        "process": "processmonitor.exe",
+        "name": "Sysinternals Process Monitor",
+        "category": "av"
+      },
+      {
+        "process": "ProtectX.exe",
+        "name": "ProtectX",
+        "category": "av"
+      },
+      {
+        "process": "PSafeSysTray.exe",
+        "name": "PSafe",
+        "category": "av"
+      },
+      {
+        "process": "psimsvc.exe",
+        "name": "熊猫卫士 Panda",
+        "category": "av"
+      },
+      {
+        "process": "qconsole.exe",
+        "name": "Norton AntiVirus Quarantine Console",
+        "category": "av"
+      },
+      {
+        "process": "QHActiveDefense.exe",
+        "name": "360 Total Security",
+        "category": "av"
+      },
+      {
+        "process": "QHSafeMain.exe",
+        "name": "360 Total Security",
+        "category": "av"
+      },
+      {
+        "process": "QHSafeTray.exe",
+        "name": "360 Total Security",
+        "category": "av"
+      },
+      {
+        "process": "QHWatchdog.exe",
+        "name": "360 Total Security",
+        "category": "av"
+      },
+      {
+        "process": "QQPCMgr.exe",
+        "name": "腾讯电脑管家",
+        "category": "av"
+      },
+      {
+        "process": "QQPCRTP.exe",
+        "name": "腾讯电脑管家",
+        "category": "av"
+      },
+      {
+        "process": "QQPCTray.exe",
+        "name": "腾讯电脑管家",
+        "category": "av"
+      },
+      {
+        "process": "qserver.exe",
+        "name": "Norton Internet Security",
+        "category": "av"
+      },
+      {
+        "process": "QUHLPSVC.exe",
+        "name": "Quick Heal",
+        "category": "av"
+      },
+      {
+        "process": "rapapp.exe",
+        "name": "BlackICE",
+        "category": "av"
+      },
+      {
+        "process": "RavMonD.exe",
+        "name": "瑞星杀毒",
+        "category": "av"
+      },
+      {
+        "process": "realmon.exe",
+        "name": "Realmon",
+        "category": "av"
+      },
+      {
+        "process": "remupd.exe",
+        "name": "熊猫卫士 Panda",
+        "category": "av"
+      },
+      {
+        "process": "rescue32.exe",
+        "name": "卡巴斯基互联网安全套装",
+        "category": "av"
+      },
+      {
+        "process": "rfwmain.exe",
+        "name": "瑞星防火墙",
+        "category": "av"
+      },
+      {
+        "process": "rtvscan.exe",
+        "name": "诺顿杀毒",
+        "category": "av"
+      },
+      {
+        "process": "RTVSCN95.exe",
+        "name": "Real-time Virus Scanner",
+        "category": "av"
+      },
+      {
+        "process": "rulaunch.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "RULaunch.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "safeboxTray.exe",
+        "name": "360安全卫士",
+        "category": "av"
+      },
+      {
+        "process": "safedog.exe",
+        "name": "安全狗",
+        "category": "av"
+      },
+      {
+        "process": "SafeDogGuardCenter.exe",
+        "name": "安全狗",
+        "category": "av"
+      },
+      {
+        "process": "safedogguardcenter.exe",
+        "name": "安全狗",
+        "category": "av"
+      },
+      {
+        "process": "SafeDogServerUI.exe",
+        "name": "安全狗",
+        "category": "av"
+      },
+      {
+        "process": "SafeDogSiteIIS.exe",
+        "name": "安全狗",
+        "category": "av"
+      },
+      {
+        "process": "SafeDogTray.exe",
+        "name": "安全狗",
+        "category": "av"
+      },
+      {
+        "process": "safedogupdatecenter.exe",
+        "name": "安全狗",
+        "category": "av"
+      },
+      {
+        "process": "safeweb.exe",
+        "name": "PSafe Tecnologia",
+        "category": "av"
+      },
+      {
+        "process": "SAVADMINSERVICE.exe",
+        "name": "SAV",
+        "category": "av"
+      },
+      {
+        "process": "SAVMAIN.exe",
+        "name": "SAV",
+        "category": "av"
+      },
+      {
+        "process": "SavProgress.exe",
+        "name": "Sophos",
+        "category": "av"
+      },
+      {
+        "process": "savscan.exe",
+        "name": "Sophos",
+        "category": "av"
+      },
+      {
+        "process": "SBAMSvc.exe",
+        "name": "VIPRE",
+        "category": "av"
+      },
+      {
+        "process": "sbserv.exe",
+        "name": "Norton Antivirus",
+        "category": "av"
+      },
+      {
+        "process": "scan32.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "sched.exe",
+        "name": "Avira 小红伞",
+        "category": "av"
+      },
+      {
+        "process": "scrscan.exe",
+        "name": "360杀毒",
+        "category": "av"
+      },
+      {
+        "process": "sdhelp.exe",
+        "name": "Spyware Doctor",
+        "category": "av"
+      },
+      {
+        "process": "sfc.exe",
+        "name": "System file checker",
+        "category": "av"
+      },
+      {
+        "process": "sh.exe",
+        "name": "MKS Toolkit for Win3",
+        "category": "av"
+      },
+      {
+        "process": "showbehind.exe",
+        "name": "MicroSmarts Enterprise Component",
+        "category": "av"
+      },
+      {
+        "process": "shstat.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "smartscreen.exe",
+        "name": "Windows Defender SmartScreen",
+        "category": "av"
+      },
+      {
+        "process": "soap.exe",
+        "name": "System Soap Pro",
+        "category": "av"
+      },
+      {
+        "process": "SophosCleanM.exe",
+        "name": "Sophos",
+        "category": "av"
+      },
+      {
+        "process": "SophosFS.exe",
+        "name": "Sophos",
+        "category": "av"
+      },
+      {
+        "process": "SophosHealth.exe",
+        "name": "Sophos",
+        "category": "av"
+      },
+      {
+        "process": "SophosSafestore64.exe",
+        "name": "Sophos杀毒",
+        "category": "av"
+      },
+      {
+        "process": "SophosUI.exe",
+        "name": "Sophos",
+        "category": "av"
+      },
+      {
+        "process": "SPBBCSVC.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "SPHINX.exe",
+        "name": "SPHINX防火墙",
+        "category": "av"
+      },
+      {
+        "process": "spidercpl.exe",
+        "name": "Dr.Web",
+        "category": "av"
+      },
+      {
+        "process": "SPIDERML.exe",
+        "name": "Dr.Web",
+        "category": "av"
+      },
+      {
+        "process": "spidernt.exe",
+        "name": "Dr.Web",
+        "category": "av"
+      },
+      {
+        "process": "SPIDERUI.exe",
+        "name": "Dr.Web",
+        "category": "av"
+      },
+      {
+        "process": "spybotSD.exe",
+        "name": "Spybot Search & Destroy",
+        "category": "av"
+      },
+      {
+        "process": "SpywareTerminatorShield.exe",
+        "name": "SpywareTerminator反间谍软件",
+        "category": "av"
+      },
+      {
+        "process": "supporter5.exe",
+        "name": "eScorcher",
+        "category": "av"
+      },
+      {
+        "process": "swagent.exe",
+        "name": "SonicWALL",
+        "category": "av"
+      },
+      {
+        "process": "swdoctor.exe",
+        "name": "SonicWALL",
+        "category": "av"
+      },
+      {
+        "process": "swnetsup.exe",
+        "name": "Sophos",
+        "category": "av"
+      },
+      {
+        "process": "SYMLCSVC.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "SymProxySvc.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "SYMSPORT.exe",
+        "name": "Sysmantec",
+        "category": "av"
+      },
+      {
+        "process": "symtray.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "SYMWSC.exe",
+        "name": "Sysmantec",
+        "category": "av"
+      },
+      {
+        "process": "SYNMGR.exe",
+        "name": "Sysmantec",
+        "category": "av"
+      },
+      {
+        "process": "Tbmon.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "tbscan.exe",
+        "name": "ThunderBYTE",
+        "category": "av"
+      },
+      {
+        "process": "tc.exe",
+        "name": "TimeCalende",
+        "category": "av"
+      },
+      {
+        "process": "titanin.exe",
+        "name": "TitanHide",
+        "category": "av"
+      },
+      {
+        "process": "TMBMSRV.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "Tmlisten.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "Tmntsrv.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "Tmproxy.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "tnbutil.exe",
+        "name": "趋势科技",
+        "category": "av"
+      },
+      {
+        "process": "TrojanHunter.exe",
+        "name": "木马猎手",
+        "category": "av"
+      },
+      {
+        "process": "tvmd.exe",
+        "name": "Total Velocity",
+        "category": "av"
+      },
+      {
+        "process": "tvtmd.exe",
+        "name": "Total Velocity",
+        "category": "av"
+      },
+      {
+        "process": "udaterui.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "UnThreat.exe",
+        "name": "UnThreat杀毒",
+        "category": "av"
+      },
+      {
+        "process": "updaterui.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "usysdiag.exe",
+        "name": "火绒安全",
+        "category": "av"
+      },
+      {
+        "process": "vba32lder.exe",
+        "name": "vb32杀毒",
+        "category": "av"
+      },
+      {
+        "process": "VCRMON.exe",
+        "name": "VirusChaser",
+        "category": "av"
+      },
+      {
+        "process": "vettray.exe",
+        "name": "eTrust",
+        "category": "av"
+      },
+      {
+        "process": "vpc32.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "vpc42.exe",
+        "name": "Symantec",
+        "category": "av"
+      },
+      {
+        "process": "VRMONNT.exe",
+        "name": "HAURI",
+        "category": "av"
+      },
+      {
+        "process": "VRMONSVC.exe",
+        "name": "HAURI",
+        "category": "av"
+      },
+      {
+        "process": "vshwin32.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "vsmain.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "vsmon.exe",
+        "name": "ZoneAlarm",
+        "category": "av"
+      },
+      {
+        "process": "vsserv.exe",
+        "name": "BitDefender",
+        "category": "av"
+      },
+      {
+        "process": "vsstat.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "vstskmgr.exe",
+        "name": "McAfee",
+        "category": "av"
+      },
+      {
+        "process": "wdswfsafe.exe",
+        "name": "360杀毒-网盾",
+        "category": "av"
+      },
+      {
+        "process": "wsctrl.exe",
+        "name": "火绒安全",
+        "category": "av"
+      },
+      {
+        "process": "XCOMMSVR.exe",
+        "name": "BitDefender",
+        "category": "av"
+      },
+      {
+        "process": "yunsuo_agent_daemon.exe",
+        "name": "云锁",
+        "category": "av"
+      },
+      {
+        "process": "yunsuo_agent_service.exe",
+        "name": "云锁",
+        "category": "av"
+      },
+      {
+        "process": "zapro.exe",
+        "name": "ZoneAlarm",
+        "category": "av"
+      },
+      {
+        "process": "ZhuDongFangYu.exe",
+        "name": "360主动防御",
+        "category": "av"
+      },
+      {
+        "process": "zonealarm.exe",
+        "name": "ZoneAlarm",
+        "category": "av"
+      }
+    ],
+    "edr": [
+      {
+        "process": "360EntClient.exe",
+        "name": "天擎EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "cb.exe",
+        "name": "Carbon Black",
+        "category": "edr"
+      },
+      {
+        "process": "CbDefense.exe",
+        "name": "Carbon Black Defense",
+        "category": "edr"
+      },
+      {
+        "process": "CbResponse.exe",
+        "name": "Carbon Black Response",
+        "category": "edr"
+      },
+      {
+        "process": "CbSensor.exe",
+        "name": "Carbon Black",
+        "category": "edr"
+      },
+      {
+        "process": "concentr.exe",
+        "name": "VMware Carbon Black",
+        "category": "edr"
+      },
+      {
+        "process": "CSFalconAgent.exe",
+        "name": "CrowdStrike Falcon",
+        "category": "edr"
+      },
+      {
+        "process": "CSFalconSensor.exe",
+        "name": "CrowdStrike Falcon",
+        "category": "edr"
+      },
+      {
+        "process": "CSFalconService.exe",
+        "name": "CrowdStrike Falcon",
+        "category": "edr"
+      },
+      {
+        "process": "CybereasonRansomFree.exe",
+        "name": "Cybereason",
+        "category": "edr"
+      },
+      {
+        "process": "CylanceSvc.exe",
+        "name": "Cylance (Blackberry)",
+        "category": "edr"
+      },
+      {
+        "process": "CyOptics.exe",
+        "name": "Cylance (Blackberry)",
+        "category": "edr"
+      },
+      {
+        "process": "cyserver.exe",
+        "name": "Cortex XDR (Palo Alto)",
+        "category": "edr"
+      },
+      {
+        "process": "CyveraService.exe",
+        "name": "Cortex XDR (Palo Alto)",
+        "category": "edr"
+      },
+      {
+        "process": "ds_agent.exe",
+        "name": "Trend Micro Deep Security",
+        "category": "edr"
+      },
+      {
+        "process": "ds_monitor.exe",
+        "name": "Trend Micro Deep Security",
+        "category": "edr"
+      },
+      {
+        "process": "edr_agent.exe",
+        "name": "深信服EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "edr_monitor.exe",
+        "name": "深信服EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "edr_sec_plan.exe",
+        "name": "深信服EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "ElasticAgent.exe",
+        "name": "Elastic Endpoint",
+        "category": "edr"
+      },
+      {
+        "process": "ElasticEndpoint.exe",
+        "name": "Elastic Endpoint",
+        "category": "edr"
+      },
+      {
+        "process": "ESAV.exe",
+        "name": "启明星辰天珣EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "ESCC.exe",
+        "name": "启明星辰天珣EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "ESCCControl.exe",
+        "name": "启明星辰天珣EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "ESCCIndex.exe",
+        "name": "启明星辰天珣EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "gse_win_agent.exe",
+        "name": "蓝鲸Agent",
+        "category": "edr"
+      },
+      {
+        "process": "gse_win_daemon.exe",
+        "name": "蓝鲸Agent",
+        "category": "edr"
+      },
+      {
+        "process": "mssense.exe",
+        "name": "Microsoft Defender for Endpoint",
+        "category": "edr"
+      },
+      {
+        "process": "QaxEntClient.exe",
+        "name": "天擎EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "QAXTray.exe",
+        "name": "天擎EDR Agent",
+        "category": "edr"
+      },
+      {
+        "process": "S1Agent.exe",
+        "name": "SentinelOne",
+        "category": "edr"
+      },
+      {
+        "process": "Sense.exe",
+        "name": "Microsoft Defender for Endpoint",
+        "category": "edr"
+      },
+      {
+        "process": "SenseNdr.exe",
+        "name": "Microsoft Defender for Endpoint",
+        "category": "edr"
+      },
+      {
+        "process": "SentinelAgent.exe",
+        "name": "SentinelOne",
+        "category": "edr"
+      },
+      {
+        "process": "SentinelHelperService.exe",
+        "name": "SentinelOne",
+        "category": "edr"
+      },
+      {
+        "process": "SentinelMonitor.exe",
+        "name": "SentinelOne",
+        "category": "edr"
+      },
+      {
+        "process": "SentinelServiceHost.exe",
+        "name": "SentinelOne",
+        "category": "edr"
+      },
+      {
+        "process": "SentinelStaticEngine.exe",
+        "name": "SentinelOne",
+        "category": "edr"
+      },
+      {
+        "process": "TaniumClient.exe",
+        "name": "Tanium",
+        "category": "edr"
+      },
+      {
+        "process": "TaniumCX.exe",
+        "name": "Tanium",
+        "category": "edr"
+      },
+      {
+        "process": "TaniumModuleServer.exe",
+        "name": "Tanium",
+        "category": "edr"
+      },
+      {
+        "process": "TitanAgent.exe",
+        "name": "天眼云镜",
+        "category": "edr"
+      },
+      {
+        "process": "TitanMonitor.exe",
+        "name": "天眼云镜",
+        "category": "edr"
+      },
+      {
+        "process": "TopsecMain.exe",
+        "name": "天融信终端防御",
+        "category": "edr"
+      },
+      {
+        "process": "TopsecTray.exe",
+        "name": "天融信终端防御",
+        "category": "edr"
+      },
+      {
+        "process": "traps.exe",
+        "name": "Cortex XDR / Traps",
+        "category": "edr"
+      },
+      {
+        "process": "xagt.exe",
+        "name": "FireEye HX",
+        "category": "edr"
+      },
+      {
+        "process": "xagtnotify.exe",
+        "name": "FireEye HX",
+        "category": "edr"
+      },
+      {
+        "process": "YDLive.exe",
+        "name": "腾讯云-云镜",
+        "category": "edr"
+      },
+      {
+        "process": "YDService.exe",
+        "name": "腾讯云-云镜",
+        "category": "edr"
+      },
+      {
+        "process": "ZentitleAgent.exe",
+        "name": "VMware Carbon Black",
+        "category": "edr"
+      }
+    ],
+    "office": [
+      {
+        "process": "7zFM.exe",
+        "name": "7-Zip 文件管理器",
+        "category": "office"
+      },
+      {
+        "process": "Acrobat.exe",
+        "name": "Adobe Acrobat",
+        "category": "office"
+      },
+      {
+        "process": "AdobeARM.exe",
+        "name": "Adobe Reader/Acrobat",
+        "category": "office"
+      },
+      {
+        "process": "AliWorkbench.exe",
+        "name": "阿里千牛",
+        "category": "office"
+      },
+      {
+        "process": "chrome.exe",
+        "name": "Google Chrome",
+        "category": "office"
+      },
+      {
+        "process": "clash-verge.exe",
+        "name": "Clash Verge 代理",
+        "category": "office"
+      },
+      {
+        "process": "code.exe",
+        "name": "Visual Studio Code",
+        "category": "office"
+      },
+      {
+        "process": "Code.exe",
+        "name": "VS Code (Win)",
+        "category": "office"
+      },
+      {
+        "process": "devenv.exe",
+        "name": "Visual Studio",
+        "category": "office"
+      },
+      {
+        "process": "DingTalk.exe",
+        "name": "钉钉",
+        "category": "office"
+      },
+      {
+        "process": "DingTalkLauncher.exe",
+        "name": "钉钉",
+        "category": "office"
+      },
+      {
+        "process": "et.exe",
+        "name": "WPS 表格 (Excel)",
+        "category": "office"
+      },
+      {
+        "process": "Everything.exe",
+        "name": "Everything 文件搜索",
+        "category": "office"
+      },
+      {
+        "process": "excel.exe",
+        "name": "Microsoft Excel",
+        "category": "office"
+      },
+      {
+        "process": "Feishu.exe",
+        "name": "飞书",
+        "category": "office"
+      },
+      {
+        "process": "finalshell.exe",
+        "name": "FinalShell",
+        "category": "office"
+      },
+      {
+        "process": "firefox.exe",
+        "name": "Mozilla Firefox",
+        "category": "office"
+      },
+      {
+        "process": "FoxitPDFReader.exe",
+        "name": "福昕 PDF 阅读器",
+        "category": "office"
+      },
+      {
+        "process": "git-bash.exe",
+        "name": "Git Bash",
+        "category": "office"
+      },
+      {
+        "process": "Lark.exe",
+        "name": "飞书国际版",
+        "category": "office"
+      },
+      {
+        "process": "msedge.exe",
+        "name": "Microsoft Edge",
+        "category": "office"
+      },
+      {
+        "process": "MSOSYNC.exe",
+        "name": "Microsoft Office 同步",
+        "category": "office"
+      },
+      {
+        "process": "msteams.exe",
+        "name": "Microsoft Teams",
+        "category": "office"
+      },
+      {
+        "process": "navicat.exe",
+        "name": "Navicat 数据库管理",
+        "category": "office"
+      },
+      {
+        "process": "notepad++.exe",
+        "name": "Notepad++",
+        "category": "office"
+      },
+      {
+        "process": "notepad.exe",
+        "name": "Windows 记事本",
+        "category": "office"
+      },
+      {
+        "process": "OneDrive.exe",
+        "name": "Microsoft OneDrive",
+        "category": "office"
+      },
+      {
+        "process": "outlook.exe",
+        "name": "Microsoft Outlook",
+        "category": "office"
+      },
+      {
+        "process": "powerpnt.exe",
+        "name": "Microsoft PowerPoint",
+        "category": "office"
+      },
+      {
+        "process": "putty.exe",
+        "name": "PuTTY",
+        "category": "office"
+      },
+      {
+        "process": "QQ.exe",
+        "name": "腾讯QQ",
+        "category": "office"
+      },
+      {
+        "process": "SunloginClient.exe",
+        "name": "向日葵远程控制",
+        "category": "office"
+      },
+      {
+        "process": "Teams.exe",
+        "name": "Microsoft Teams",
+        "category": "office"
+      },
+      {
+        "process": "TeamViewer.exe",
+        "name": "TeamViewer",
+        "category": "office"
+      },
+      {
+        "process": "TIM.exe",
+        "name": "TIM Office QQ",
+        "category": "office"
+      },
+      {
+        "process": "ToDesk.exe",
+        "name": "ToDesk 远程控制",
+        "category": "office"
+      },
+      {
+        "process": "Typora.exe",
+        "name": "Typora Markdown编辑器",
+        "category": "office"
+      },
+      {
+        "process": "v2rayN.exe",
+        "name": "v2rayN 代理",
+        "category": "office"
+      },
+      {
+        "process": "WeChat.exe",
+        "name": "微信 PC版",
+        "category": "office"
+      },
+      {
+        "process": "WeChatApp.exe",
+        "name": "微信 PC版",
+        "category": "office"
+      },
+      {
+        "process": "WeChatPlayer.exe",
+        "name": "微信 PC版",
+        "category": "office"
+      },
+      {
+        "process": "WeMail.exe",
+        "name": "企业微信",
+        "category": "office"
+      },
+      {
+        "process": "WinRAR.exe",
+        "name": "WinRAR",
+        "category": "office"
+      },
+      {
+        "process": "winword.exe",
+        "name": "Microsoft Word",
+        "category": "office"
+      },
+      {
+        "process": "wpp.exe",
+        "name": "WPS 演示 (PPT)",
+        "category": "office"
+      },
+      {
+        "process": "wps.exe",
+        "name": "WPS Office 主程序",
+        "category": "office"
+      },
+      {
+        "process": "wpscloudsvr.exe",
+        "name": "WPS Office 云服务",
+        "category": "office"
+      },
+      {
+        "process": "wpspdf.exe",
+        "name": "WPS PDF",
+        "category": "office"
+      },
+      {
+        "process": "WXWork.exe",
+        "name": "企业微信",
+        "category": "office"
+      },
+      {
+        "process": "Xshell.exe",
+        "name": "XShell 终端",
+        "category": "office"
+      }
+    ]
+  }
+}

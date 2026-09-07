@@ -158,9 +158,32 @@ func NewServer(cfgPath string) (*Server, error) {
 	}
 	logging.Info("server", "ToShell Team Server v%s starting...", version)
 
+	// 运行时数据目录：确保 data/ 及子目录存在（部分精简/只读环境可能预置缺失，
+	// 若此处创建失败会在后续 db/指纹库初始化时给出明确降级提示）。
+	ensureDataDirs(cfg)
+
 	db, err := database.New(cfg.Database.Type, cfg.Database.Path)
 	if err != nil {
-		logger.Warn("server", "Failed to initialize database: %v, running without persistence", err)
+		// 数据库文件打不开（如 data 目录缺失/无写权限/只读环境）：
+		// 1) 先尝试自动创建目录后重试一次；
+		// 2) 仍失败则回退内存库（volatile），保证服务可跑、接口不因 nil db panic。
+		logger.Warn("server", "Failed to initialize database at %s: %v; trying auto-create dir then fallback", cfg.Database.Path, err)
+		if dir := filepath.Dir(cfg.Database.Path); dir != "" && dir != "." {
+			if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+				db, err = database.New(cfg.Database.Type, cfg.Database.Path)
+			}
+		}
+	}
+	if err != nil {
+		logger.Warn("server", "Database still unavailable (%v); falling back to in-memory database (data lost on restart)", err)
+		db, err = database.New("sqlite", "file:tsh_mem?mode=memory&cache=shared")
+		if err != nil {
+			logger.Warn("server", "In-memory fallback also failed: %v; continuing without persistence", err)
+			db = nil
+		} else {
+			logging.Info("server", "Running on in-memory database (no data/ write access)")
+			registerDefaultListener(cfg, db)
+		}
 	} else {
 		logging.Info("server", "Database initialized: %s", cfg.Database.Path)
 		registerDefaultListener(cfg, db)
@@ -401,6 +424,27 @@ func (s *Server) Shutdown() error {
 
 	logging.Info("server", "Server shutdown complete")
 	return nil
+}
+
+// ensureDataDirs 确保运行时数据目录存在（data/ 及子目录），
+// 供 SQLite db、上传/传输暂存、UAC 载荷、工具库使用。
+// 目录创建失败不致命：后续各模块会各自降级处理。
+func ensureDataDirs(cfg *config.Config) {
+	dirs := []string{
+		filepath.Dir(cfg.Database.Path), // 默认 ./data
+		filepath.Join("data", "uploads"),
+		filepath.Join("data", "transfers"),
+		filepath.Join("data", "uac"),
+		filepath.Join("data", "tools"),
+	}
+	for _, d := range dirs {
+		if d == "" || d == "." {
+			continue
+		}
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			logging.Warn("server", "ensureDataDirs: cannot create %s: %v", d, err)
+		}
+	}
 }
 
 // registerDefaultListener registers the listener defined in the config file into the
