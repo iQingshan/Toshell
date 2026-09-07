@@ -263,9 +263,14 @@ func (l *MQTTListener) handleRegister(sid string, packet *protocol.Packet) {
 	info := buildSessionInfo(packet, reg, "mqtt", l.cfg.ID, "mqtt:"+sid)
 	if l.sessionMgr != nil {
 		if existing, gerr := l.sessionMgr.Get(sid); gerr == nil && existing != nil {
+			wasDead := existing.Info == nil || existing.Info.Status == "dead" || existing.Info.Status == "asleep"
 			info.RemoteAddr = "mqtt:" + sid
 			info.LastSeen = time.Now()
 			_ = l.sessionMgr.RefreshInfo(sid, info)
+			// 死亡会话重连复活：广播上线事件，前端即时点亮
+			if wasDead && l.onSessionOnline != nil {
+				l.onSessionOnline(info)
+			}
 		} else {
 			if err := l.sessionMgr.Add(info); err != nil {
 				logging.Warn("listener", "mqtt: failed to add session %s: %v", sid, err)

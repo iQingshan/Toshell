@@ -643,9 +643,14 @@ func (l *Listener) handleRegister(conn *transport.Conn, packet *protocol.Packet,
 	if l.sessionMgr != nil {
 		// 已存在（重连）：刷新信息而非重建，保留上层状态（隧道/shell 处理器）
 		if existing, gerr := l.sessionMgr.Get(sessInfo.ID); gerr == nil && existing != nil {
+			wasDead := existing.Info == nil || existing.Info.Status == "dead" || existing.Info.Status == "asleep"
 			sessInfo.RemoteAddr = remoteAddr
 			sessInfo.LastSeen = time.Now()
 			_ = l.sessionMgr.RefreshInfo(sessInfo.ID, sessInfo)
+			// 死亡会话重连复活：广播上线事件，前端即时点亮
+			if wasDead && l.onSessionOnline != nil {
+				l.onSessionOnline(sessInfo)
+			}
 		} else {
 			if err := l.sessionMgr.Add(sessInfo); err != nil {
 				fmt.Printf("[ERROR] [listener] Failed to add session: %v\n", err)

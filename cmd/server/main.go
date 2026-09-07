@@ -259,16 +259,24 @@ func NewServer(cfgPath string) (*Server, error) {
 		// 仅在用户主动 DELETE /api/v1/tunnels/{id} 时停止代理。
 		tcpListener.SetOnSessionDead(func(sessionID string) {
 			fmt.Printf("[INFO] [server] Session %s disconnected (SOCKS5 kept alive for reconnect)\n", sessionID)
+			apiServer.BroadcastSessionOffline(sessionID)
 		})
-		tcpListener.SetOnSessionOnline(webhookNotifier.NotifyOnline)
+		tcpListener.SetOnSessionOnline(func(info *types.SessionInfo) {
+			webhookNotifier.NotifyOnline(info)
+			apiServer.BroadcastSessionOnline(info)
+		})
 		tcpListener.SetOnScreenFrame(apiServer.BroadcastScreenFrame)
 	}
 	if httpListener != nil {
 		httpListener.SetOnTaskResult(taskResultCallback)
 		httpListener.SetOnSessionDead(func(sessionID string) {
 			fmt.Printf("[INFO] [server] Session %s disconnected (SOCKS5 kept alive for reconnect)\n", sessionID)
+			apiServer.BroadcastSessionOffline(sessionID)
 		})
-		httpListener.SetOnSessionOnline(webhookNotifier.NotifyOnline)
+		httpListener.SetOnSessionOnline(func(info *types.SessionInfo) {
+			webhookNotifier.NotifyOnline(info)
+			apiServer.BroadcastSessionOnline(info)
+		})
 	}
 
 	// 优先使用 TCP listener, 回退到 HTTP listener

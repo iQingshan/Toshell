@@ -379,10 +379,15 @@ func (s *Server) startListenerByID(id string) error {
 		}
 		s.BroadcastTaskEvent(eventType, taskID, sessionID, taskType, exitCode, outputSummary, errorMsg)
 	}
+	webhookNotifier := webhook.New(&s.cfg.Webhook)
 	sessionDeadCB := func(sessionID string) {
 		fmt.Printf("[INFO] [server] Session %s disconnected (SOCKS5 kept alive for reconnect)\n", sessionID)
+		s.BroadcastSessionOffline(sessionID)
 	}
-	webhookNotifier := webhook.New(&s.cfg.Webhook)
+	sessionOnlineCB := func(info *types.SessionInfo) {
+		webhookNotifier.NotifyOnline(info)
+		s.BroadcastSessionOnline(info)
+	}
 
 	var rl *runtimeListener
 	switch rec.Type {
@@ -393,7 +398,7 @@ func (s *Server) startListenerByID(id string) error {
 		}
 		hl.SetOnTaskResult(taskResultCB)
 		hl.SetOnSessionDead(sessionDeadCB)
-		hl.SetOnSessionOnline(webhookNotifier.NotifyOnline)
+		hl.SetOnSessionOnline(sessionOnlineCB)
 		rl = &runtimeListener{id: id, typ: "http", pusher: hl, stop: hl.Stop}
 	case "websocket":
 		// WebSocket 通道：复用 Listener 实现（TSHL 帧 + AES-GCM，传输层为 WS 升级）。
@@ -405,7 +410,7 @@ func (s *Server) startListenerByID(id string) error {
 		}
 		wl.SetOnTaskResult(taskResultCB)
 		wl.SetOnSessionDead(sessionDeadCB)
-		wl.SetOnSessionOnline(webhookNotifier.NotifyOnline)
+		wl.SetOnSessionOnline(sessionOnlineCB)
 		wl.SetOnScreenFrame(s.BroadcastScreenFrame)
 		wlStop := func() { _ = wl.Stop() }
 		rl = &runtimeListener{id: id, typ: "websocket", pusher: wl, stop: wlStop}
@@ -416,7 +421,7 @@ func (s *Server) startListenerByID(id string) error {
 		}
 		tl.SetOnTaskResult(taskResultCB)
 		tl.SetOnSessionDead(sessionDeadCB)
-		tl.SetOnSessionOnline(webhookNotifier.NotifyOnline)
+		tl.SetOnSessionOnline(sessionOnlineCB)
 		tl.SetOnScreenFrame(s.BroadcastScreenFrame)
 		rl = &runtimeListener{id: id, typ: "tcp", pusher: tl, stop: tl.Stop}
 	case "mqtt":
@@ -431,7 +436,7 @@ func (s *Server) startListenerByID(id string) error {
 		}
 		ml.SetOnTaskResult(taskResultCB)
 		ml.SetOnSessionDead(sessionDeadCB)
-		ml.SetOnSessionOnline(webhookNotifier.NotifyOnline)
+		ml.SetOnSessionOnline(sessionOnlineCB)
 		ml.SetOnScreenFrame(s.BroadcastScreenFrame)
 		mlStop := func() { _ = ml.Stop() }
 		rl = &runtimeListener{id: id, typ: "mqtt", pusher: ml, stop: mlStop}

@@ -219,6 +219,57 @@ func (s *Server) BroadcastTaskEvent(eventType string, taskID uint64, sessionID s
 	})
 }
 
+// sessionOnlinePayload 从 SessionInfo 构建前端可用的上线事件负载。
+func sessionOnlinePayload(info *types.SessionInfo) map[string]interface{} {
+	status := "active"
+	if info.Status != "" {
+		status = info.Status
+	}
+	lastSeen := ""
+	if !info.LastSeen.IsZero() {
+		lastSeen = info.LastSeen.Format(time.RFC3339Nano)
+	}
+	return map[string]interface{}{
+		"id":          info.ID,
+		"hostname":    info.Hostname,
+		"username":    info.Username,
+		"os":          info.OS,
+		"arch":        info.Arch,
+		"pid":         info.PID,
+		"status":      status,
+		"listener":    info.Listener,
+		"remote_addr": info.RemoteAddr,
+		"last_seen":   lastSeen,
+	}
+}
+
+// BroadcastSessionOnline 广播 session_online 事件（新会话上线/恢复在线）。
+// 所有监听器类型（TCP/HTTP/WS/MQTT/relay）的新会话注册都走这里，
+// 前端 Sessions 页据此即时插入/点亮行，不依赖轮询。
+func (s *Server) BroadcastSessionOnline(info *types.SessionInfo) {
+	if s.wsHub == nil || info == nil {
+		return
+	}
+	s.wsHub.Broadcast(WSEvent{
+		Type:    "session_online",
+		Payload: sessionOnlinePayload(info),
+	})
+}
+
+// BroadcastSessionOffline 广播 session_offline 事件（会话判定死亡）。
+func (s *Server) BroadcastSessionOffline(sessionID string) {
+	if s.wsHub == nil || sessionID == "" {
+		return
+	}
+	s.wsHub.Broadcast(WSEvent{
+		Type: "session_offline",
+		Payload: map[string]interface{}{
+			"id":     sessionID,
+			"status": "dead",
+		},
+	})
+}
+
 // BroadcastScreenFrame broadcasts a real-time screen stream frame to all WebSocket clients.
 // payload 是植入端截图 JSON（{image, format, width, height}），附加 session_id 后透传。
 func (s *Server) BroadcastScreenFrame(sessionID string, payload []byte) {

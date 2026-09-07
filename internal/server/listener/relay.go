@@ -336,7 +336,15 @@ func (l *TCPListener) handleRegisterRelayed(childSessionID, relaySessionID strin
 		Listener:     listener,
 	}
 	if err := l.sessionMgr.Add(sess); err != nil {
+		wasDead := false
+		if existing, gerr := l.sessionMgr.Get(childSessionID); gerr == nil && existing != nil {
+			wasDead = existing.Info == nil || existing.Info.Status == "dead" || existing.Info.Status == "asleep"
+		}
 		_ = l.sessionMgr.RefreshInfo(childSessionID, sess)
+		// 死亡会话重连复活：广播上线事件
+		if wasDead && l.onSessionOnline != nil {
+			l.onSessionOnline(sess)
+		}
 	} else if l.onSessionOnline != nil {
 		l.onSessionOnline(sess)
 	}

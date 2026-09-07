@@ -833,9 +833,14 @@ func (l *TCPListener) handleRegister(conn net.Conn, packet *protocol.Packet) {
 		// 表现为 HTTPS 站点 ERR_SSL_PROTOCOL_ERROR / 连接挂起。
 		existing, gerr := l.sessionMgr.Get(sessionID)
 		if gerr == nil && existing != nil {
+			wasDead := existing.Info == nil || existing.Info.Status == "dead" || existing.Info.Status == "asleep"
 			sess.RemoteAddr = conn.RemoteAddr().String()
 			sess.LastSeen = time.Now()
 			_ = l.sessionMgr.RefreshInfo(sessionID, sess)
+			// 死亡会话重连复活：同样广播上线事件，让前端即时点亮（不依赖轮询）
+			if wasDead && l.onSessionOnline != nil {
+				l.onSessionOnline(sess)
+			}
 		} else {
 			// 注册表不一致的极端兜底：清理后重建
 			_ = l.sessionMgr.Remove(sessionID)

@@ -302,6 +302,17 @@ func (r *AgentRun) ResetForResume() {
 	r.mu.Unlock()
 }
 
+// ResetTaskView 清空任务视图状态（目标/计划/时间线/轨迹）——纯聊短回复等
+// 非执行轮次使用，避免前端展示上一轮任务的残留目标与计划。
+func (r *AgentRun) ResetTaskView() {
+	r.mu.Lock()
+	r.Objective = ""
+	r.Plan = nil
+	r.Timeline = nil
+	r.Traces = nil
+	r.mu.Unlock()
+}
+
 var agentIDSeq uint64
 
 func newAgentID() string {

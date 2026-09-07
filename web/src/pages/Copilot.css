@@ -650,19 +650,31 @@
 @keyframes blink { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
 .copilot-inputbar button.cancel { background: color-mix(in srgb, var(--color-danger, #e5484d) 15%, transparent); color: var(--color-danger, #e5484d); }
 .copilot-inputbar button.cancel:hover:not(:disabled) { background: var(--color-danger, #e5484d); color: #fff; }
-/* ── Agent 控制台视图 ── */
-.agent-console {
-  margin: 0 12px 10px; padding: 10px 12px; border: 1px solid var(--color-border);
+/* ── Agent 状态条（紧凑单行，点击展开计划/轨迹，避免挤占聊天区）── */
+.agent-bar {
+  margin: 0 0 8px; border: 1px solid var(--color-border);
   border-radius: var(--radius-lg); background: var(--color-bg-secondary);
+  overflow: hidden;
 }
-.agent-console-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.agent-console-label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--color-primary); }
-.agent-run-badge { font-size: 11px; padding: 1px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
-.agent-run-badge.st-running { background: color-mix(in srgb, var(--color-info) 18%, transparent); color: var(--color-info); }
-.agent-run-badge.st-done { background: color-mix(in srgb, var(--color-success) 18%, transparent); color: var(--color-success); }
-.agent-run-badge.st-error { background: color-mix(in srgb, var(--color-danger) 18%, transparent); color: var(--color-danger); }
-.agent-run-badge.st-awaiting_consent { background: color-mix(in srgb, var(--color-warning) 18%, transparent); color: var(--color-warning); }
-.agent-console-objective { font-size: 12.5px; color: var(--color-text); margin-bottom: 6px; word-break: break-all; }
+.agent-bar-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 12px; border: none; background: transparent; cursor: pointer;
+  text-align: left; font: inherit; color: var(--color-text);
+}
+.agent-bar-toggle:hover { background: color-mix(in srgb, var(--color-border) 18%, transparent); }
+.agent-bar-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-muted); }
+.agent-bar-dot.st-running { background: var(--color-info); animation: blink 1.2s ease-in-out infinite; }
+.agent-bar-dot.st-done { background: var(--color-success); }
+.agent-bar-dot.st-error { background: var(--color-danger); }
+.agent-bar-dot.st-awaiting_consent { background: var(--color-warning); }
+.agent-bar-title { flex: 0 0 auto; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.agent-bar-objective {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--color-text-secondary);
+}
+.agent-bar-chev { flex: 0 0 auto; font-size: 10px; color: var(--color-text-muted); }
+.agent-bar-body { border-top: 1px dashed var(--color-border); padding: 8px 12px 10px; max-height: 260px; overflow-y: auto; }
+.agent-bar-body .agent-timeline { margin-top: 8px; border-top: 1px dashed var(--color-border); padding-top: 6px; }
 .agent-plan { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 .plan-step { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-text-secondary); }
 .plan-step.st-done { color: var(--color-success); }

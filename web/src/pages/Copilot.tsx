@@ -21,6 +21,8 @@ export function Copilot() {
   const [showTraces, setShowTraces] = useState<Record<number, boolean>>({})
   // Agent 控制台视图：当前 run 的目标/执行计划/时间线/状态（来自轮询 status()）
   const [agentView, setAgentView] = useState<{ objective?: string; plan?: { index: number; desc: string; status: string }[]; timeline?: { ts: number; kind: string; text: string }[]; status?: string; runId?: string } | null>(null)
+  // Agent 状态条是否展开（默认折叠，仅显示一行状态，避免挤占聊天区）
+  const [agentPanelOpen, setAgentPanelOpen] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const busyRef = useRef(false)
   busyRef.current = busy
@@ -29,6 +31,8 @@ export function Copilot() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [selPlaybook, setSelPlaybook] = useState('')
   const [selSession, setSelSession] = useState('')
+  const selSessionRef = useRef('')
+  useEffect(() => { selSessionRef.current = selSession }, [selSession])
   const [runs, setRuns] = useState<PlaybookRun[]>([])
   // 审批弹窗（normal 权限模式：影响会话的操作需用户确认）
   const [pendingConsents, setPendingConsents] = useState<ConsentReq[] | null>(null)
@@ -81,11 +85,32 @@ export function Copilot() {
       setPlaybooks(pbRes?.data?.playbooks || [])
       const s = sessRes?.data?.sessions || []
       setSessions(s)
-      if (!selSession && s.length > 0) setSelSession(s[0].id)
+      if (!selSession && s.length > 0) {
+        setSelSession(s[0].id)
+        selSessionRef.current = s[0].id
+      }
       if (!selPlaybook && pbRes?.data?.playbooks?.length > 0) setSelPlaybook(pbRes.data.playbooks[0].id)
     } catch (e) { console.error('load playbooks failed:', e) }
   }
   useEffect(() => { loadPlaybooks() }, [])
+
+  // 侧栏「在线会话」周期刷新（10s）：新会话上线/掉线即时可见，不点刷新也更新
+  useEffect(() => {
+    const refresh = async () => {
+      try {
+        const sessRes = await sessionApi.list()
+        const s = sessRes?.data?.sessions || []
+        setSessions(s)
+        // 无选中会话时自动补选第一个（不清掉已选中的会话）
+        if (!selSessionRef.current && s.length > 0) {
+          setSelSession(s[0].id)
+          selSessionRef.current = s[0].id
+        }
+      } catch { /* 静默 */ }
+    }
+    const iv = setInterval(refresh, 10000)
+    return () => clearInterval(iv)
+  }, [])
 
   // 两侧信息面板：右侧「最近任务」概览（每 8s 刷新，静默）
   useEffect(() => {
@@ -403,41 +428,51 @@ export function Copilot() {
         )}
       </div>
 
-      {/* ── Agent 控制台视图：目标 + 执行计划进度 ── */}
-      {agentView && agentView.objective && (
-        <div className={`agent-console ${agentView.status === 'done' || agentView.status === 'error' ? 'done' : ''}`}>
-          <div className="agent-console-head">
-            <span className="agent-console-label"><Sparkles size={13} /> Agent 执行计划</span>
-            <span className={`agent-run-badge st-${agentView.status || 'queued'}`}>{agentView.status || 'queued'}</span>
-          </div>
-          <div className="agent-console-objective" title={agentView.objective}>🎯 {agentView.objective}</div>
-          {agentView.plan && agentView.plan.length > 0 && (
-            <ol className="agent-plan">
-              {agentView.plan.map((p) => (
-                <li key={p.index} className={`plan-step st-${p.status}`}>
-                  <span className="plan-step-icon">
-                    {p.status === 'done' ? '✅' : p.status === 'failed' ? '❌' : p.status === 'running' ? '⏳' : '⬜'}
-                  </span>
-                  <span className="plan-step-desc">{p.desc}</span>
-                </li>
-              ))}
-            </ol>
-          )}
-          {agentView.timeline && agentView.timeline.length > 0 && (
-            <div className="agent-timeline">
-              <div className="agent-timeline-title">执行轨迹（{agentView.timeline.length}）</div>
-              <div className="agent-timeline-list">
-                {agentView.timeline.slice(-30).map((ev, i) => (
-                  <div key={i} className={`tl-item tl-${ev.kind}`}>
-                    <span className="tl-icon">
-                      {ev.kind === 'tool_result' && ev.text.startsWith('❌') ? '❌'
-                        : ev.kind === 'tool_result' ? '✅' : ev.kind === 'tool_start' ? '🔧'
-                        : ev.kind === 'final' ? '💬' : ev.kind === 'error' ? '⚠️' : '·'}
-                    </span>
-                    <span className="tl-text">{ev.text}</span>
+      {/* ── Agent 状态条（紧凑单行，点击展开计划/轨迹）──
+          仅真正的执行任务展示（有目标/计划/轨迹）；短消息纯聊回复不显示此条 */}
+      {agentView && (agentView.objective || (agentView.plan && agentView.plan.length > 0) || (agentView.timeline && agentView.timeline.length > 0)) && (
+        <div className={`agent-bar ${agentPanelOpen ? 'open' : ''}`}>
+          <button className="agent-bar-toggle" onClick={() => setAgentPanelOpen(!agentPanelOpen)}>
+            <span className={`agent-bar-dot st-${agentView.status || 'queued'}`} />
+            <span className="agent-bar-title">
+              {agentView.status === 'done' ? '✅ Agent 完成'
+                : agentView.status === 'error' ? '⚠️ Agent 出错'
+                : agentView.status === 'awaiting_consent' ? '🛡 等待确认'
+                : '🤖 Agent 执行中'}
+            </span>
+            {agentView.objective && <span className="agent-bar-objective">{agentView.objective}</span>}
+            <span className="agent-bar-chev">{agentPanelOpen ? '▾' : '▸'}</span>
+          </button>
+          {agentPanelOpen && (
+            <div className="agent-bar-body">
+              {agentView.plan && agentView.plan.length > 0 && (
+                <ol className="agent-plan">
+                  {agentView.plan.map((p) => (
+                    <li key={p.index} className={`plan-step st-${p.status}`}>
+                      <span className="plan-step-icon">
+                        {p.status === 'done' ? '✅' : p.status === 'failed' ? '❌' : p.status === 'running' ? '⏳' : '⬜'}
+                      </span>
+                      <span className="plan-step-desc">{p.desc}</span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+              {agentView.timeline && agentView.timeline.length > 0 && (
+                <div className="agent-timeline">
+                  <div className="agent-timeline-list">
+                    {agentView.timeline.slice(-25).map((ev, i) => (
+                      <div key={i} className={`tl-item tl-${ev.kind}`}>
+                        <span className="tl-icon">
+                          {ev.kind === 'tool_result' && ev.text.startsWith('❌') ? '❌'
+                            : ev.kind === 'tool_result' ? '✅' : ev.kind === 'tool_start' ? '🔧'
+                            : ev.kind === 'final' ? '💬' : ev.kind === 'error' ? '⚠️' : '·'}
+                        </span>
+                        <span className="tl-text">{ev.text}</span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -194,6 +194,11 @@ func (c *Copilot) systemPrompt() string {
 		"  - 每拿到一次完整结果就**立即停止**该信息点的搜集，不要对**完全相同的命令/参数**重发第二次（已见过该数据）。\n" +
 		"  - 连续 2 次相同命令无新增信息 → 判定该路径已到头，改用其它路径或直接进入「输出建议」。\n" +
 		"  - 拿到足够信息后**必须输出最终中文答复**；不要为了凑步数反复执行无意义命令。\n" +
+		"【短消息克制】当用户只发了**极短输入**（单个数字、单个字，如「1」「好」「嗯」「继续」或只发一个表情/标点）时：\n" +
+		"  - **绝不主动调用任何工具**，也绝不续跑之前的任务链；\n" +
+		"  - 优先把它理解为「用户在简短回应你上一轮的问题/建议」——若上轮你给出了编号选项，则确认用户选了哪项，并用一两句话简短回应或询问是否需要执行；\n" +
+		"  - 若上轮没有待确认的选项，则用一句简短话询问「你想让我做什么？」，等待明确指令；\n" +
+		"  - 不要因为这类短消息就展开新一轮侦察/执行/汇报。\n" +
 		"任务流编排：当目标可标准化/批量执行时，优先用 delegate 启动任务流（确定性多步链路）执行，再用 playbook_status 轮询进度；" +
 		"不要逐个手工重复下发命令。\n" +
 		"自主原则：收到目标时先识别信息缺口并补齐（session_context/intel_query/侦察类），再决定行动，无需每步征询用户；" +
@@ -627,7 +632,32 @@ func parsePlanMarkdown(content string) []GoalStep {
 	return steps
 }
 
-// compressRunMessages 做上下文压缩：保留 system + 最近的 keepRecent 条消息原样，
+// shortInputGuard 检查最新用户消息是否为「极短/确认类」输入（单个数字/字/标点）。
+// 若是，返回一段硬性 system 指令，禁止本轮调用工具或续跑旧任务链，只做简短回应。
+func shortInputGuard(messages []Message) string {
+	// 找最新一条 user 消息
+	var last string
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role != "user" {
+			continue
+		}
+		// 跳过 guard 注入后的临时 system 不算；找真正的用户文本
+		last = strings.TrimSpace(m.Content)
+		break
+	}
+	if last == "" {
+		return ""
+	}
+	// 极短判定：去除空白后 ≤2 个字符（单字/单数字/单标点/「好/嗯/哦/可以/行/1/2/3」等确认类）
+	runes := []rune(last)
+	if len(runes) > 2 {
+		return ""
+	}
+	return "该条用户消息属于极短输入（确认/选择/闲聊性质），只能简短回应，不得扩展。"
+}
+
+// compressRunMessages 做上下文压缩：保留 system + 最近 keepRecent 条消息原样，
 // 更早的 tool 结果/assistant 长文折叠为一行摘要，控制送入 LLM 的 token 量。
 func compressRunMessages(messages []Message) []Message {
 	const keepRecent = 14 // 保留最近 N 条（含最新 user 指令与最近工具结果）
@@ -778,14 +808,33 @@ type AgentStream struct {
 // OnToken 回调：phase=thinking|content，text 为增量。
 type OnToken func(phase, text string)
 
-// completeStream 流式调用 LLM。onToken 每收到增量触发一次；返回累积结果。
+// streamReqOpts 流式补全选项（无工具/低 token 上限等）。
+type streamReqOpts struct {
+	// Tools 为 nil 时请求不带工具定义（模型无法发起工具调用）。
+	Tools []ToolSchema
+	// MaxTokens 为 0 时不设置上限。
+	MaxTokens int
+}
+
+// completeStream 标准流式调用（带全量工具定义）。
 func (c *Copilot) completeStream(ctx context.Context, messages []Message, onToken OnToken) (*AgentStream, error) {
+	return c.completeStreamOpts(ctx, messages, streamReqOpts{Tools: toolSchemas()}, onToken)
+}
+
+// completeStreamOpts 流式调用 LLM（可指定工具集与 token 上限）。
+// onToken 每收到增量触发一次；返回累积结果。
+func (c *Copilot) completeStreamOpts(ctx context.Context, messages []Message, opts streamReqOpts, onToken OnToken) (*AgentStream, error) {
 	req := chatRequest{
-		Model:      c.cfg.Model,
-		Messages:   messages,
-		Tools:      toolSchemas(),
-		ToolChoice: "auto",
-		Stream:     true,
+		Model:    c.cfg.Model,
+		Messages: messages,
+		Stream:   true,
+	}
+	if opts.Tools != nil {
+		req.Tools = opts.Tools
+		req.ToolChoice = "auto"
+	}
+	if opts.MaxTokens > 0 {
+		req.MaxTokens = opts.MaxTokens
 	}
 	body, _ := json.Marshal(req)
 
@@ -942,6 +991,14 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 	run.setStatus(AgentRunning)
 	run.emitRaw(AgentEvent{Kind: AgentEventMessage, Data: json.RawMessage(`""`)})
 
+	// 短消息根治护栏：最新用户消息是极短输入（如「1」「好」「嗯」/单表情）时，
+	// **不进入自主执行循环**——单次纯聊调用：无工具定义、低 token 上限、清空旧的
+	// 目标/计划/时间线展示。agent 只做一两句简短回应（确认上一轮编号选项或询问意图），
+	// 绝不续跑旧任务链、绝不调用工具、绝不长篇汇报。（结构保证，非仅提示词约束）
+	if guard := shortInputGuard(run.Messages); guard != "" {
+		return c.runChatReply(ctx, run, guard)
+	}
+
 	maxTurns := run.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = c.cfg.MaxTurns
@@ -966,6 +1023,8 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		default:
 		}
 
+		// 短消息已在上方 runChatReply 独立处理（无工具、纯聊、token 封顶），
+		// 能走到循环里的都是正常任务指令，无需逐轮 guard。
 		// 上下文压缩：历史过长时保留 system + 最近 ~14 条完整，较早的 tool 结果
 		// 折叠为一行摘要（保留任务关键信息），防止长任务 token 爆炸。
 		ctxMsgs := compressRunMessages(run.Messages)
@@ -1110,6 +1169,81 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 	run.setStatus(AgentDone)
 	run.closeEvents()
 	return nil, fmt.Errorf("reached max turns %d", maxTurns)
+}
+
+// runChatReply 短消息纯聊回复（根治护栏的执行体）：不进入自主执行循环——
+// 单次 LLM 调用（无工具定义 + token 上限），清空旧任务视图，只做一两句简短回应。
+// 若上一条助手回复里有编号选项，让模型据此确认用户选中的项；否则询问意图。
+// 返回最终 AgentStream（无 ToolCalls）。run 由调用方保证已 ResetForResume。
+func (c *Copilot) runChatReply(ctx context.Context, run *AgentRun, guard string) (*AgentStream, error) {
+	// 不展示旧任务的 目标/计划/时间线/轨迹（纯聊不是一次执行）
+	run.ResetTaskView()
+
+	chatSys := "你是 ToShell C2 平台的 AI 副驾驶。用户刚发来一条**极短消息**（单个数字/字/表情/「好」「嗯」等）。\n" +
+		"硬性要求（必须遵守）：\n" +
+		"- 不要调用任何工具，不要继续执行之前任何任务链/计划，不要输出长篇分析或重复背景。\n" +
+		"- 若你上一条回复里给过编号选项（如 1. 2. 3.），把这条极短消息理解为用户的选择：用一句话确认用户选的是哪一项，并询问是否需要现在执行。\n" +
+		"- 否则用一两句话询问用户想让你做什么。\n" +
+		"- 整个回复不得超过两句话。\n\n以下为最近对话（供你确认上一轮内容）："
+	if guard != "" {
+		chatSys += "\n\n额外约束：" + guard
+	}
+
+	// 取最近少量消息作为上下文（跳过系统提示与过旧的工具往返），避免把整段旧执行
+	// 轨迹喂进去诱导模型继续任务；保留上一轮助手回复（含编号选项）即可。
+	// 注意剔除带 tool_calls 的助手消息与 tool 回执：纯聊请求不带工具定义，
+	// 这类成对消息若残缺会导致上游校验失败；且它们属于已完成的执行轨迹，无需引用。
+	msgs := run.Messages
+	const keepTail = 12
+	start := 0
+	if len(msgs) > keepTail {
+		start = len(msgs) - keepTail
+	}
+	tail := make([]Message, 0, keepTail+1)
+	for i := start; i < len(msgs); i++ {
+		m := msgs[i]
+		if m.Role == "system" || m.Role == "tool" || len(m.ToolCalls) > 0 {
+			continue
+		}
+		tail = append(tail, m)
+	}
+	if len(tail) == 0 {
+		// 极端情况（历史全是工具往返）：只回一句询问，不送旧上下文
+		tail = append(tail, Message{Role: "user", Content: "（无有效上文）"})
+	}
+	all := append([]Message{{Role: "system", Content: chatSys}}, tail...)
+
+	var content strings.Builder
+	ag, err := c.completeStreamOpts(ctx, all, streamReqOpts{MaxTokens: 500}, func(phase, text string) {
+		if phase == "thinking" {
+			run.emit(AgentEventThinking, text, "")
+		} else {
+			content.WriteString(text)
+			run.emit(AgentEventMessage, text, "")
+		}
+	})
+	if err != nil {
+		reply := "❌ 短消息回复遇到异常，未能完成：`" + err.Error() + "`。请稍后重试，或直接告诉我具体目标。"
+		run.setReply(reply)
+		run.emit(AgentEventFinal, reply, "")
+		run.emitRaw(AgentEvent{Kind: AgentEventError, Error: err.Error()})
+		run.setStatus(AgentError)
+		run.closeEvents()
+		return nil, err
+	}
+
+	reply := strings.TrimSpace(ag.Content)
+	if reply == "" {
+		reply = "收到。你想让我做什么？请直接告诉我目标，我会照做。"
+	}
+	// 保留本轮回复到长期记忆（后续继续同会话时仍可引用）
+	run.Messages = append(run.Messages, Message{Role: "assistant", Content: reply})
+	run.setReply(reply)
+	run.emit(AgentEventFinal, reply, "")
+	run.emitRaw(AgentEvent{Kind: AgentEventDone})
+	run.setStatus(AgentDone)
+	run.closeEvents()
+	return ag, nil
 }
 
 // waitForConsent normal 模式下挂起 run，等前端 allow/deny。不返回——run 状态

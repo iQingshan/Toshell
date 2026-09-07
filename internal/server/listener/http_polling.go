@@ -352,9 +352,17 @@ func (l *HTTPListener) handleRegisterHTTP(w http.ResponseWriter, r *http.Request
 	sess := buildSessionInfo(packet, reg, "http", l.cfg.ID, r.RemoteAddr)
 
 	if err := l.sessionMgr.Add(sess); err != nil {
+		// 重连：若此前被判 dead，本次重新上线要广播复活
+		wasDead := false
+		if existing, gerr := l.sessionMgr.Get(sessionID); gerr == nil && existing != nil {
+			wasDead = existing.Info == nil || existing.Info.Status == "dead" || existing.Info.Status == "asleep"
+		}
 		l.sessionMgr.Update(sessionID, sess)
+		if wasDead && l.onSessionOnline != nil {
+			l.onSessionOnline(sess)
+		}
 	} else if l.onSessionOnline != nil {
-		// 新会话上线：触发 webhook 通知
+		// 新会话上线：触发 webhook/WS 通知
 		l.onSessionOnline(sess)
 	}
 
