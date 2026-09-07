@@ -852,9 +852,23 @@ func sendHeartbeat() bool {
 		Payload:   heartbeatPayload,
 	}
 
-	// 心跳走同步写（sendPacketSync）：直接检查 conn.Write 底层错误。
-	// 半开 TCP 下写会"成功"无法感知，但连接 RST/EOF 时能立即暴露，
-	// 与读侧空闲判死（maxIdleReadDuration）共同保证链路死亡必然触发重连。
+	// 心跳走异步队列（writeLoop 负责写出）：非阻塞投递，绝不让主循环停在慢写上。
+	// 关键：主循环唯一职责是「持续读帧 + 保活 touchRead」；若心跳同步写被慢网络
+	// 卡住 10s，主循环停摆 → 读侧空闲累计 → 误判链路死亡触发重连（表现为任务
+	// 一跑就掉线/network error）。异步入队后即使写慢，主循环仍持续读、收到
+	// 服务端 ACK 即 touchRead，链路保活不再被写阻塞拖垮。
+	// 写失败无法即时感知：服务端在心跳超时（可配）+ 忙期宽限后判定离线并重连，
+	// 读侧的空闲判死（maxIdleReadDuration）仍兜底半开连接。
+	if writeQueue != nil {
+		select {
+		case writeQueue <- packet:
+			return true
+		default:
+			// 队列满：丢弃本次心跳，下一个心跳周期会再发（心跳间隔远小于服务端超时）。
+			// 若持续拥塞，读侧会先因收不到 ACK 判死重连，由读侧兜底。
+			return true
+		}
+	}
 	return sendPacketSync(packet)
 }
 

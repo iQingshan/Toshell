@@ -160,6 +160,11 @@ func (m *Manager) Create(sessionID string, params TaskParams) (*types.TaskInfo, 
 	m.tasks[taskID] = task
 	m.pending = append(m.pending, task)
 
+	// 任务下发 → 会话进入忙期：存活判定放宽（长任务执行期间不被误判离线）。
+	if m.sessionMgr != nil && sessionID != "" {
+		m.sessionMgr.MarkSessionBusy(sessionID, 0) // 忙期默认 = 心跳超时*2
+	}
+
 	db := database.Get()
 	if db != nil {
 		db.CreateTask(task)
@@ -482,6 +487,11 @@ func (m *Manager) Complete(id uint64, exitCode int32, output, errorMsg string) e
 
 	m.completed = append(m.completed, task)
 
+	// 结果归位 → 任务完成；给会话短暂忙期宽限，覆盖连续任务间的收尾（避免下一任务紧接时误判）
+	if m.sessionMgr != nil && task.SessionID != "" {
+		m.sessionMgr.MarkSessionBusy(task.SessionID, 30*time.Second)
+	}
+
 	// 从 pending 中移除（防止无限增长）
 	m.removeFromPending(id)
 
@@ -515,6 +525,11 @@ func (m *Manager) Fail(id uint64, errorMsg string) error {
 	task.CompletedAt = &now
 
 	m.completed = append(m.completed, task)
+
+	// 结果归位：给会话短暂忙期宽限（连续任务收尾）
+	if m.sessionMgr != nil && task.SessionID != "" {
+		m.sessionMgr.MarkSessionBusy(task.SessionID, 30*time.Second)
+	}
 
 	// 从 pending 中移除（防止无限增长）
 	m.removeFromPending(id)

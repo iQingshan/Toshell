@@ -193,6 +193,13 @@ func NewServer(cfgPath string) (*Server, error) {
 	sessMgr := session.New()
 	taskMgr := task.New(sessMgr)
 
+	// 会话心跳超时来自监听器配置（默认 60s），让存活判定与植入端心跳节奏对齐，
+	// 避免固定 90s 在长任务/慢网下误判离线（任务忙期还有额外宽限，见 session.MarkBusy）。
+	if cfg.Listener.HeartbeatTimeout > 0 {
+		session.HeartbeatTimeout = cfg.Listener.HeartbeatTimeout
+	}
+	logging.Info("server", "Session heartbeat timeout: %v", session.HeartbeatTimeout)
+
 	// 加载服务端安全软件指纹库（data/av_fingerprints.json），供 av_detect 任务结果匹配
 	if err := avdetect.Load(); err != nil {
 		logging.Warn("server", "Failed to load AV fingerprint library: %v", err)

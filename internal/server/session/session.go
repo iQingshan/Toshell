@@ -18,10 +18,21 @@ type Manager struct {
 	mu       sync.RWMutex
 }
 
+// HeartbeatTimeout 会话心跳超时：超过该时长无心跳即判定离线。
+// 由服务端启动时用 listener.heartbeat_timeout 覆盖（默认 60s）。
+var HeartbeatTimeout = 90 * time.Second
+
+// 会话忙期宽限：会话上有运行中的任务时，判定阈值自动放宽到
+// HeartbeatTimeout * BusyGrace，避免长任务期间因心跳间隔抖动被误判离线
+// （根因：大任务/慢网导致心跳同步写阻塞，主循环短暂停摆）。
+const BusyGrace = 3
+
 type Session struct {
 	Info               *types.SessionInfo
 	Heartbeat          *protocol.Heartbeat
 	LastSeen           time.Time
+	// BusyUntil 会话忙期（有运行中任务/大文件传输）截止时间；忙期内存活阈值放宽。
+	BusyUntil          time.Time
 	manager            *Manager
 	Conn               interface{}
 	connMu             sync.RWMutex
@@ -97,6 +108,27 @@ func (m *Manager) Get(id string) (*Session, error) {
 	}
 
 	return session, nil
+}
+
+// MarkSessionBusy 标记会话忙期（任务下发/大文件传输等）。任务侧在创建任务与
+// 结果回调时调用，使存活判定在忙期放宽，避免长任务被误判离线。
+func (m *Manager) MarkSessionBusy(id string, d time.Duration) {
+	m.mu.RLock()
+	sess, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if ok && sess != nil {
+		sess.MarkBusy(d)
+	}
+}
+
+// ClearSessionBusy 清除会话忙期标记（任务终态后调用）。
+func (m *Manager) ClearSessionBusy(id string) {
+	m.mu.RLock()
+	sess, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if ok && sess != nil {
+		sess.ClearBusy()
+	}
 }
 
 func (m *Manager) List() []*Session {
@@ -351,7 +383,7 @@ func (m *Manager) GetStatus(id string) (string, error) {
 		return "", fmt.Errorf("session not found: %s", id)
 	}
 
-	if time.Since(session.LastSeen) > 90*time.Second {
+	if !session.isAliveAt(time.Now()) {
 		return "asleep", nil
 	}
 
@@ -399,7 +431,36 @@ func (s *Session) GetInfo() *types.SessionInfo {
 }
 
 func (s *Session) IsAlive() bool {
-	return time.Since(s.LastSeen) < 90*time.Second
+	return s.isAliveAt(time.Now())
+}
+
+// isAliveAt 判定会话在 t 时刻是否存活。
+// 存活 = 距最近心跳 < HeartbeatTimeout，或处于忙期（有运行中任务/大传输，
+// 见 MarkBusy）且在忙期宽限内 —— 避免长任务期间被误判离线。
+func (s *Session) isAliveAt(t time.Time) bool {
+	if t.Sub(s.LastSeen) < HeartbeatTimeout {
+		return true
+	}
+	if t.Before(s.BusyUntil) {
+		// 忙期：允许心跳间隔抖动/短暂停摆，用更宽的窗口
+		return t.Sub(s.LastSeen) < HeartbeatTimeout*BusyGrace
+	}
+	return false
+}
+
+// MarkBusy 将会话标记为忙（任务运行/大文件传输），忙期持续 d。
+// 忙期内存活判定放宽到 HeartbeatTimeout*BusyGrace，避免长任务误判掉线。
+func (s *Session) MarkBusy(d time.Duration) {
+	if d <= 0 {
+		d = HeartbeatTimeout * 2
+	}
+	until := time.Now().Add(d)
+	s.BusyUntil = until
+}
+
+// ClearBusy 清除忙期标记。
+func (s *Session) ClearBusy() {
+	s.BusyUntil = time.Time{}
 }
 
 func (s *Session) AddShellOutputHandler(id string, handler func([]byte)) {
