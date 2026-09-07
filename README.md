@@ -35,9 +35,8 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 **加密通信**
 - 控制帧 AES-256-GCM 认证加密 + 隧道数据 SM4-GCM（国密自研），密钥域分离；配置热更新。
 
-## 功能截图
+## 功能部分截图
 
-> 截图位于 `docs/screenshots/`。
 
 **仪表盘**：会话/任务概览、图表与实时状态。
 
@@ -46,6 +45,10 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 **会话管理**：多平台会话、任务下发与状态跟踪。
 
 <img src="docs/screenshots/sessions.png" width="100%" alt="会话管理">
+
+**交互式shell**：动态交互式shell独立标签页面。
+
+<img src="docs/screenshots/shell.png" width="100%" alt="会话管理">
 
 **AI 副驾驶**：联网分析、工具调用与权限审批。
 
