@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -274,6 +275,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("ai.agent_concurrency", 2)
 
 	viper.SetEnvPrefix("TOSHELL")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil && !os.IsNotExist(err) {

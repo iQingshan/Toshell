@@ -83,6 +83,30 @@ export function Settings() {
 
   const num = (v: any): number => (typeof v === 'number' ? v : Number(v) || 0)
 
+  /** 一键轮换 API Key：生成新密钥追加到列表，新密钥仅返回一次 */
+  const rotateApiKey = async () => {
+    setSaving(true)
+    setMsg(null)
+    try {
+      const res = await settingsApi.save({ security: { rotate_api_key: true } })
+      const newKey: string = (res.data as any).new_api_key || ''
+      if (newKey) {
+        // 展示新密钥（一次性），用户复制保存
+        setMsg({ kind: 'ok', text: '✓ 新 API 密钥已生成：' + newKey + '（请立即保存，关闭后不再显示）' })
+        // 用浏览器剪贴板辅助（尽力而为）
+        try { await navigator.clipboard.writeText(newKey) } catch { /* 忽略 */ }
+      } else {
+        setMsg({ kind: 'ok', text: '✓ 已轮换' })
+      }
+      await load()
+    } catch (e: any) {
+      const errText = e?.response?.data?.error || (e instanceof Error ? e.message : String(e))
+      setMsg({ kind: 'err', text: '轮换失败: ' + errText })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   /** 发送测试通知到当前填写的 webhook（不改动已保存配置） */
   const testWebhook = async () => {
     setSaving(true)
@@ -283,6 +307,25 @@ export function Settings() {
                       <input type="checkbox" checked={!!draft.security.api_key_enabled} onChange={(e) => setField('security', 'api_key_enabled', e.target.checked)} />
                       <span className="toggle-slider" />
                     </label>
+                  </div>
+
+                  {/* API 密钥管理：轮换（追加新 key）*/}
+                  <div className="setting-item">
+                    <div className="setting-info">
+                      <label>API 密钥管理</label>
+                      <span className="setting-desc">密钥用于 X-API-Key 认证。轮换会追加一个新密钥（旧密钥仍有效），新密钥仅显示一次请立即保存。</span>
+                    </div>
+                    <div className="setting-inputs-col">
+                      {(draft.security.api_keys as string[] | undefined)?.map((k: string, i: number) => (
+                        <code key={i} className="api-key-chip">{k}</code>
+                      ))}
+                      {!((draft.security.api_keys as string[] | undefined)?.length) && <span className="setting-muted">暂无 API 密钥</span>}
+                    </div>
+                  </div>
+                  <div className="settings-inline-actions">
+                    <button className="save-btn sm" onClick={() => rotateApiKey()} disabled={saving || !draft.security.api_key_enabled}>
+                      <RefreshCw size={14} /> 轮换新密钥
+                    </button>
                   </div>
                 </div>
                 <div className="settings-actions">

@@ -234,3 +234,10 @@
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── API 密钥管理 ── */
+.setting-inputs-col { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.api-key-chip { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 6px; padding: 3px 8px; font-size: 11px; font-family: var(--font-mono); color: var(--color-success); }
+.setting-muted { color: var(--color-text-2); font-size: 12px; }
+.settings-inline-actions { display: flex; gap: 8px; margin-top: 6px; }
+.save-btn.sm { padding: 5px 10px; font-size: 12px; }

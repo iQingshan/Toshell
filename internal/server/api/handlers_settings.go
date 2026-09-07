@@ -77,8 +77,15 @@ type settingsWebhookUpdate struct {
 }
 
 type settingsSecurityUpdate struct {
-	AdminUsername *string `json:"admin_username"`
-	NewPassword   *string `json:"new_password"` // 明文新密码，保存时 bcrypt 哈希
+	AdminUsername *string  `json:"admin_username"`
+	NewPassword   *string  `json:"new_password"` // 明文新密码，保存时 bcrypt 哈希
+	// API Keys 管理（可选，三种动作可组合）：
+	// api_keys        整组替换（传 []string 或空数组清空；null=不改动）
+	// rotate_api_key  一键轮换：生成新 key 追加到列表（保留旧 key 宽限期）
+	// remove_api_key  从列表移除指定 key
+	APIKeys       *[]string `json:"api_keys"`
+	RotateAPIKey  *bool     `json:"rotate_api_key"`
+	RemoveAPIKey  *string   `json:"remove_api_key"`
 }
 
 // getSettingsHandler 返回当前配置（分组、脱敏），供设置页面加载。
@@ -132,6 +139,9 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"jwt_enabled":     cfg.Auth.JWTEnabled,
 			"api_key_enabled": cfg.Auth.APIKeyEnabled,
 			"admin_username":  cfg.Auth.AdminUsername,
+			// API keys：返回脱敏版本用于展示（首 4 + 尾 4），不泄露全文
+			"api_keys":        maskedAPIKeys(cfg.Auth.APIKeys),
+			"api_key_count":   len(cfg.Auth.APIKeys),
 		},
 		AI: map[string]interface{}{
 			"enabled":      cfg.AI.Enabled,
@@ -154,6 +164,15 @@ func maskSecret(s string) string {
 		return "********"
 	}
 	return s[:4] + "****" + s[len(s)-4:]
+}
+
+// maskedAPIKeys 返回 API keys 的脱敏展示列表（首 4 + 尾 4）。
+func maskedAPIKeys(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, maskSecret(k))
+	}
+	return out
 }
 
 // updateSettingsHandler 保存设置：校验 → 写回配置文件 → 热生效。
@@ -317,6 +336,48 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			updates["auth.admin_password"] = hashed
 		}
+		// ── API Keys 管理 ──
+		if sec.APIKeys != nil || (sec.RotateAPIKey != nil && *sec.RotateAPIKey) || (sec.RemoveAPIKey != nil && *sec.RemoveAPIKey != "") {
+			curCfg := config.Get()
+			var curKeys []string
+			if curCfg != nil {
+				curKeys = curCfg.Auth.APIKeys
+			}
+			keys := make([]string, len(curKeys))
+			copy(keys, curKeys)
+			if sec.APIKeys != nil {
+				// 整组替换（前端传完整新列表）
+				keys = *sec.APIKeys
+			}
+			if sec.RemoveAPIKey != nil && *sec.RemoveAPIKey != "" {
+				removed := *sec.RemoveAPIKey
+				out := keys[:0]
+				for _, k := range keys {
+					if k != removed {
+						out = append(out, k)
+					}
+				}
+				keys = out
+			}
+			if sec.RotateAPIKey != nil && *sec.RotateAPIKey {
+				newKey, kerr := auth.GenerateRandomKey(24)
+				if kerr != nil {
+					http.Error(w, `{"error":"生成 API Key 失败"}`, http.StatusInternalServerError)
+					return
+				}
+				keys = append(keys, newKey)
+				// 新 key 单独回传一次（仅本次可见，前端立即展示保存）
+				updates["_new_api_key"] = newKey
+			}
+			// 清理空串
+			clean := keys[:0]
+			for _, k := range keys {
+				if strings.TrimSpace(k) != "" {
+					clean = append(clean, strings.TrimSpace(k))
+				}
+			}
+			updates["auth.api_keys"] = clean
+		}
 	}
 
 	// ── AI 副驾驶段 ──
@@ -381,6 +442,13 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 轮换产生的新 key 不写入配置文件（仅一次性返回给前端展示）
+	var newAPIKey string
+	if v, ok := updates["_new_api_key"].(string); ok {
+		newAPIKey = v
+		delete(updates, "_new_api_key")
+	}
+
 	if err := config.Save(updates); err != nil {
 		logging.Error("settings", "save config failed: %v", err)
 		http.Error(w, fmt.Sprintf(`{"error":"保存配置失败: %v"}`, err), http.StatusInternalServerError)
@@ -398,11 +466,16 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		s.onConfigApplied(cfg)
 	}
 
-	logging.Info("settings", "settings saved (hot=%v, %d keys)", hot, len(updates))
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	resp := map[string]interface{}{
 		"message": "设置已保存",
 		"hot":     hot,
-	})
+	}
+	if newAPIKey != "" {
+		resp["new_api_key"] = newAPIKey
+		resp["warning"] = "请立即保存该 API Key，关闭后不再显示"
+	}
+	logging.Info("settings", "settings saved (hot=%v, %d keys)", hot, len(updates))
+	json.NewEncoder(w).Encode(resp)
 }
 
 func contains(list []string, v string) bool {
