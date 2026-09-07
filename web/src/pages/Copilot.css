@@ -650,3 +650,23 @@
 @keyframes blink { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
 .copilot-inputbar button.cancel { background: color-mix(in srgb, var(--color-danger, #e5484d) 15%, transparent); color: var(--color-danger, #e5484d); }
 .copilot-inputbar button.cancel:hover:not(:disabled) { background: var(--color-danger, #e5484d); color: #fff; }
+/* ── Agent 控制台视图 ── */
+.agent-console {
+  margin: 0 12px 10px; padding: 10px 12px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg); background: var(--color-bg-secondary);
+}
+.agent-console-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.agent-console-label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--color-primary); }
+.agent-run-badge { font-size: 11px; padding: 1px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
+.agent-run-badge.st-running { background: color-mix(in srgb, var(--color-info) 18%, transparent); color: var(--color-info); }
+.agent-run-badge.st-done { background: color-mix(in srgb, var(--color-success) 18%, transparent); color: var(--color-success); }
+.agent-run-badge.st-error { background: color-mix(in srgb, var(--color-danger) 18%, transparent); color: var(--color-danger); }
+.agent-run-badge.st-awaiting_consent { background: color-mix(in srgb, var(--color-warning) 18%, transparent); color: var(--color-warning); }
+.agent-console-objective { font-size: 12.5px; color: var(--color-text); margin-bottom: 6px; word-break: break-all; }
+.agent-plan { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.plan-step { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-text-secondary); }
+.plan-step.st-done { color: var(--color-success); }
+.plan-step.st-failed { color: var(--color-danger); }
+.plan-step.st-running { color: var(--color-text); }
+.plan-step-icon { flex: 0 0 auto; }
+.plan-step-desc { word-break: break-word; }

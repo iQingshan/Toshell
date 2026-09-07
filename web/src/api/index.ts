@@ -420,8 +420,8 @@ export const agentApi = {
   /** 创建/续接异步 agent run（立即返回 run_id+session_id，不卡对话）。session_id 用于续接同一自主记忆上下文。 */
   chat: (messages: { role: string; content: string }[], sessionId?: string) =>
     api.post<{ run_id: string; session_id: string; status: string }>('/agent/chat', sessionId ? { messages, session_id: sessionId } : { messages }),
-  /** 查询 run 状态/轨迹/最终答复 */
-  status: (runId: string) => api.get<{ run_id: string; status: string; traces: CopilotTrace[]; reply: string }>(`/agent/runs/${runId}`),
+  /** 查询 run 状态/目标/计划/轨迹/最终答复 */
+  status: (runId: string) => api.get<{ run_id: string; status: string; objective?: string; plan?: { index: number; desc: string; status: string }[]; traces: CopilotTrace[]; reply: string }>(`/agent/runs/${runId}`),
   /** 取消 run */
   cancel: (runId: string) => api.post<{ run_id: string; status: string }>(`/agent/runs/${runId}/cancel`),
   /** 处理审批：allow/deny */

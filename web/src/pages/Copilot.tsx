@@ -19,6 +19,8 @@ export function Copilot() {
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<{ enabled: boolean; model: string; consent_mode?: string } | null>(null)
   const [showTraces, setShowTraces] = useState<Record<number, boolean>>({})
+  // Agent 控制台视图：当前 run 的目标/执行计划/状态（来自轮询 status()）
+  const [agentView, setAgentView] = useState<{ objective?: string; plan?: { index: number; desc: string; status: string }[]; status?: string; runId?: string } | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const busyRef = useRef(false)
   busyRef.current = busy
@@ -178,6 +180,7 @@ export function Copilot() {
     const userMsg: CopilotMsg = { role: 'user', content: text }
     addMessage(userMsg)
     setBusy(true)
+    setAgentView(null) // 新任务重置 Agent 控制台视图
     // 流式占位：思考中（无正文）
     addMessage({ role: 'assistant', content: '', streaming: true, thinking: true })
     try {
@@ -231,6 +234,13 @@ export function Copilot() {
       try {
         const st = await agentApi.status(runId)
         const data = st.data
+        // Agent 控制台视图：目标 + 执行计划 + 状态
+        setAgentView({
+          objective: data.objective || undefined,
+          plan: data.plan || [],
+          status: data.status,
+          runId,
+        })
         // 用最新状态增量更新最后一条 assistant 消息：轨迹 + 内容
         if (data.traces && data.traces.length > 0) {
           useCopilotStore.getState().appendToLast({ role: 'assistant', traces: data.traces, thinking: false, streaming: true })
@@ -391,6 +401,29 @@ export function Copilot() {
           </button>
         )}
       </div>
+
+      {/* ── Agent 控制台视图：目标 + 执行计划进度 ── */}
+      {agentView && agentView.objective && (
+        <div className={`agent-console ${agentView.status === 'done' || agentView.status === 'error' ? 'done' : ''}`}>
+          <div className="agent-console-head">
+            <span className="agent-console-label"><Sparkles size={13} /> Agent 执行计划</span>
+            <span className={`agent-run-badge st-${agentView.status || 'queued'}`}>{agentView.status || 'queued'}</span>
+          </div>
+          <div className="agent-console-objective" title={agentView.objective}>🎯 {agentView.objective}</div>
+          {agentView.plan && agentView.plan.length > 0 && (
+            <ol className="agent-plan">
+              {agentView.plan.map((p) => (
+                <li key={p.index} className={`plan-step st-${p.status}`}>
+                  <span className="plan-step-icon">
+                    {p.status === 'done' ? '✅' : p.status === 'failed' ? '❌' : p.status === 'running' ? '⏳' : '⬜'}
+                  </span>
+                  <span className="plan-step-desc">{p.desc}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
 
       <div className="copilot-body">
         <aside className="side-panel side-left">

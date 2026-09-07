@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Shell, Lock, User } from 'lucide-react'
 import { useAuthStore } from '../stores/auth'
 import { authApi } from '../api'
+import { useI18n } from '../i18n'
 import './Login.css'
 
 export function Login() {
@@ -10,6 +11,7 @@ export function Login() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const login = useAuthStore((state) => state.login)
+  const { t, lang, setLang } = useI18n()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -25,9 +27,9 @@ export function Login() {
       }
     } catch (err: any) {
       if (err.response?.status === 401) {
-        setError('用户名或密码错误')
+        setError(t('login.errBadCreds'))
       } else {
-        setError('登录失败，请检查服务器连接')
+        setError(t('login.errConn'))
       }
     } finally {
       setLoading(false)
@@ -43,10 +45,15 @@ export function Login() {
       
       <div className="login-container">
         <div className="login-card">
+          <div className="login-card-top">
+            <button className="lang-toggle" onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')} title={lang === 'zh' ? 'English' : '中文'}>
+              {lang === 'zh' ? 'EN' : '中'}
+            </button>
+          </div>
           <div className="login-header">
             <Shell size={48} className="login-logo" />
             <h1>ToShell</h1>
-            <p>C2 命令控制平台</p>
+            <p>{t('login.subtitle')}</p>
           </div>
 
           <form onSubmit={handleSubmit} className="login-form">
@@ -54,7 +61,7 @@ export function Login() {
               <User size={18} className="form-icon" />
               <input
                 type="text"
-                placeholder="用户名"
+                placeholder={t('login.username')}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 required
@@ -65,7 +72,7 @@ export function Login() {
               <Lock size={18} className="form-icon" />
               <input
                 type="password"
-                placeholder="密码"
+                placeholder={t('login.password')}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
@@ -75,12 +82,12 @@ export function Login() {
             {error && <div className="error-message">{error}</div>}
 
             <button type="submit" className="login-btn" disabled={loading}>
-              {loading ? '登录中...' : '登录'}
+              {loading ? t('login.submitting') : t('login.submit')}
             </button>
           </form>
 
           <div className="login-footer">
-            <span>请输入服务器账户凭据</span>
+            <span>{t('login.footer')}</span>
           </div>
         </div>
       </div>
