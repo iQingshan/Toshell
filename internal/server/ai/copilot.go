@@ -1091,6 +1091,11 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		run.Traces = append(run.Traces, trace)
 		run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(out, 4000), Error: trace.Error}, "")
 		run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: truncate(out, 4000)})
+
+		// 动作审计：记录 agent 每次工具调用（工具名、参数、成败），供追溯/合规。
+		// 结构化日志 component=agent-audit（可按该组件过滤审计轨迹）。
+		logging.Info("agent-audit", "run=%s tool=%s args=%s ok=%v err=%v",
+			run.ID, tc.Function.Name, truncate(tc.Function.Arguments, 200), trace.Error == "", trace.Error)
 	}
 
 	// 达到轮数上限：输出已完成的动作摘要
