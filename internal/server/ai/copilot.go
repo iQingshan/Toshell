@@ -198,6 +198,10 @@ func (c *Copilot) systemPrompt() string {
 		"不要逐个手工重复下发命令。\n" +
 		"自主原则：收到目标时先识别信息缺口并补齐（session_context/intel_query/侦察类），再决定行动，无需每步征询用户；" +
 		"信息不足时先深入获取，不要臆测。\n" +
+		"【目标驱动】收到一个**复杂/多步目标**时，按以下方式自主推进，无需用户逐步指导：\n" +
+		"  ① 先在回复开头输出**【执行计划】**（编号 1. 2. 3.… 列出要做的步骤），再开始执行；\n" +
+		"  ② 逐步执行：每完成一步用工具拿真实结果，简短标注该步状态（如「步骤2 ✅」）；\n" +
+		"  ③ 全部完成后，给最终总结，进入待命。跨轮次继续时先引用原计划与进度，不重新从头规划。\n" +
 		"【自主提权闭环】提权是高危操作，**先评估、后谨慎行动**，绝不要一提到提权就无脑连发工具：\n" +
 		"  0 警觉：先判断是否**真的需要提权**——用 run_command(whoami + whoami /groups) 看当前身份与权限；" +
 		"若已是 admin/SYSTEM 或操作不需要更高权限，**就不要再执行提权**，直接说明并进入待命。\n" +
@@ -548,6 +552,116 @@ func buildActionSummary(traces []ToolTrace) string {
 	return b.String()
 }
 
+// trackGoal 从消息历史维护 run 的目标与执行计划（供前端展示/续接）。
+func (c *Copilot) trackGoal(run *AgentRun) {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+
+	// 1) 目标：取最近一条 user 消息作为当前目标（截断避免过长）
+	for i := len(run.Messages) - 1; i >= 0; i-- {
+		if run.Messages[i].Role == "user" && run.Messages[i].Content != "" {
+			obj := truncate(strings.TrimSpace(run.Messages[i].Content), 200)
+			if obj != "" {
+				run.Objective = obj
+			}
+			break
+		}
+	}
+
+	// 2) 执行计划：从最近助手消息解析【执行计划】（编号列表 1. 2. 3.）
+	for i := len(run.Messages) - 1; i >= 0; i-- {
+		content := run.Messages[i].Content
+		if content == "" {
+			continue
+		}
+		if strings.Contains(content, "【执行计划】") || strings.Contains(content, "【执行步骤】") {
+			run.Plan = parsePlanMarkdown(content)
+			break
+		}
+	}
+}
+
+// parsePlanMarkdown 从助手正文解析【执行计划】编号步骤为 GoalStep 列表。
+func parsePlanMarkdown(content string) []GoalStep {
+	var steps []GoalStep
+	lines := strings.Split(content, "\n")
+	inPlan := false
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if strings.Contains(line, "【执行计划】") || strings.Contains(line, "【执行步骤】") {
+			inPlan = true
+			continue
+		}
+		// 计划区结束：遇到下一个【xx】标题或空段落后的普通文本
+		if inPlan && (line == "" || strings.HasPrefix(line, "【")) {
+			if line != "" && strings.HasPrefix(line, "【") && !strings.Contains(line, "执行计划") && !strings.Contains(line, "执行步骤") {
+				break
+			}
+			if line == "" {
+				continue
+			}
+		}
+		if !inPlan {
+			continue
+		}
+		desc := ""
+		switch {
+		case strings.HasPrefix(line, "步骤") && strings.Contains(line, ":"):
+			if idx := strings.Index(line, ":"); idx > 0 {
+				desc = strings.TrimSpace(line[idx+1:])
+			}
+		case len(line) > 2 && line[0] >= '1' && line[0] <= '9' && len(line) >= 3 && line[1] == '.':
+			desc = strings.TrimSpace(line[2:])
+		case strings.HasPrefix(line, "-"):
+			desc = strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		case strings.HasPrefix(line, "•"):
+			desc = strings.TrimSpace(strings.TrimPrefix(line, "•"))
+		}
+		if desc != "" && !strings.HasPrefix(desc, "【") {
+			steps = append(steps, GoalStep{Index: len(steps) + 1, Desc: truncate(desc, 120), Status: "pending"})
+		}
+		if len(steps) >= 15 {
+			break
+		}
+	}
+	return steps
+}
+
+// compressRunMessages 做上下文压缩：保留 system + 最近的 keepRecent 条消息原样，
+// 更早的 tool 结果/assistant 长文折叠为一行摘要，控制送入 LLM 的 token 量。
+func compressRunMessages(messages []Message) []Message {
+	const keepRecent = 14 // 保留最近 N 条（含最新 user 指令与最近工具结果）
+	if len(messages) <= keepRecent+1 {
+		return messages
+	}
+	// 保留 system（首条）与末尾 keepRecent 条
+	out := make([]Message, 0, keepRecent+2)
+	if len(messages) > 0 && messages[0].Role == "system" {
+		out = append(out, messages[0])
+	}
+	start := len(messages) - keepRecent
+	if start < 1 {
+		start = 1
+	}
+	// 较早的消息：逐条折叠（tool → 一行摘要；assistant 长文本 → 截断）
+	for i := 1; i < start; i++ {
+		m := messages[i]
+		switch m.Role {
+		case "tool":
+			if m.Content != "" {
+				m.Content = "tool:" + summarizeToolResult("task_wait", truncate(m.Content, 4000))
+			}
+		case "assistant":
+			if len(m.Content) > 300 {
+				m.Content = truncate(m.Content, 300)
+			}
+		}
+		out = append(out, m)
+	}
+	out = append(out, messages[start:]...)
+	return out
+}
+
 // summarizeToolResult 从工具原始结果中提取一行可读摘要。
 func summarizeToolResult(name, result string) string {
 	if result == "" {
@@ -852,7 +966,11 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		default:
 		}
 
-		ag, err := c.completeStream(ctx, run.Messages, func(phase, text string) {
+		// 上下文压缩：历史过长时保留 system + 最近 ~14 条完整，较早的 tool 结果
+		// 折叠为一行摘要（保留任务关键信息），防止长任务 token 爆炸。
+		ctxMsgs := compressRunMessages(run.Messages)
+
+		ag, err := c.completeStream(ctx, ctxMsgs, func(phase, text string) {
 			if phase == "thinking" {
 				fullThinking.WriteString(text)
 				run.emit(AgentEventThinking, text, "")
@@ -886,6 +1004,9 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			Content:   ag.Content,
 			ToolCalls: ag.ToolCalls,
 		})
+
+		// 目标驱动：从用户最新指令提取目标，从助手正文解析【执行计划】维护进度
+		c.trackGoal(run)
 
 		if len(ag.ToolCalls) == 0 {
 			// 最终答复

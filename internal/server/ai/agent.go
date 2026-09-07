@@ -64,11 +64,22 @@ const (
 	AgentWaitConsent AgentStatus = "awaiting_consent"
 )
 
+// GoalStep 目标分解后的一个执行步骤（agent 自主维护进度）。
+type GoalStep struct {
+	Index    int    `json:"index"`
+	Desc     string `json:"desc"`     // 步骤描述
+	Status   string `json:"status"`   // pending / running / done / skipped / failed
+	Result   string `json:"result,omitempty"`
+}
+
 // AgentRun 一次自主任务运行实例。
 type AgentRun struct {
 	ID     string `json:"id"`
 	Status AgentStatus `json:"status"`
-	// Plan 跨消息保持的执行计划/上下文（由 run 自己管理，可被后续 turn 延续）。
+	// Objective 当前被交代的目标（用户最新指令摘要，供展示/续接）。
+	Objective string `json:"objective,omitempty"`
+	// Plan 目标驱动执行计划（LLM 输出【执行计划】后由服务端解析维护，跨消息保持）。
+	Plan []GoalStep `json:"plan,omitempty"`
 	// Messages 保存本 run 的完整消息序列（system+history+tool）。后续「继续」可追加。
 	Messages []Message `json:"-"`
 	// Traces 已完成的工具轨迹（最终汇总展示用）。
@@ -91,6 +102,25 @@ type AgentRun struct {
 	Pending *pendingState `json:"-"`
 
 	mu sync.Mutex
+}
+
+// SetObjective 记录当前目标（线程安全）。
+func (r *AgentRun) SetObjective(o string) {
+	r.mu.Lock()
+	if o != "" {
+		r.Objective = o
+	}
+	r.mu.Unlock()
+}
+
+// SyncPlan 用 LLM 输出的最新计划同步 run.Plan（线程安全）。
+func (r *AgentRun) SyncPlan(steps []GoalStep) {
+	if len(steps) == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.Plan = steps
+	r.mu.Unlock()
 }
 
 // pendingState 挂起时的上下文（用于恢复）。

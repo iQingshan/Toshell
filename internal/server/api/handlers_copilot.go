@@ -276,10 +276,12 @@ func (s *Server) agentRunHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"run_id": run.ID,
-		"status": run.Status,
-		"traces": run.Traces,
-		"reply":  run.FinalReply,
+		"run_id":    run.ID,
+		"status":    run.Status,
+		"objective": run.Objective,
+		"plan":      run.Plan,
+		"traces":    run.Traces,
+		"reply":     run.FinalReply,
 	})
 }
 
