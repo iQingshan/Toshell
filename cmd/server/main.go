@@ -32,7 +32,8 @@ import (
 )
 
 var (
-	version   = "1.2.1"
+	// version/commit/buildTime 由构建时 -ldflags 注入（默认 dev 构建）。
+	version   = "1.3.0"
 	commit    = "dev"
 	buildTime = "unknown"
 )

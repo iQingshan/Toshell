@@ -59,13 +59,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          check-latest: true
 
       - name: Build server
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
-        run: go build -tags webui -ldflags "-s -w" -o "toserver${{ matrix.ext }}" ./cmd/server
+        run: |
+          LDFLAGS="-s -w -X main.version=1.3.0 -X main.commit=$(git rev-parse --short HEAD) -X main.buildTime=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          go build -tags webui -ldflags "$LDFLAGS" -o "toserver${{ matrix.ext }}" ./cmd/server
 
       - name: Package zip
         run: |
