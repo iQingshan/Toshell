@@ -285,6 +285,15 @@ python scripts/reset_release_db.py --db release/data/toshell.db
 ## 附、更新日志与新增功能
 
 ### v1.3.0(2026-09)
+- **Agent 目标驱动执行**:复杂/多步目标先输出【执行计划】并逐步推进;run 记录目标与计划进度,跨消息保持。
+- **上下文压缩**:历史过长时保留 system+最近 14 条,更早工具结果折叠为一行摘要,防长任务 token 爆炸。
+- **动作审计**:每次 agent 工具调用写结构化日志(component=agent-audit),动作可追溯。
+- **安全加固**:API Key 一键轮换(设置页,新密钥一次性展示);敏感配置支持环境变量覆盖(TOSHELL_AUTH_JWT_KEY/TOSHELL_AUTH_API_KEYS/TOSHELL_LISTENER_ENCRYPTION_KEY/TOSHELL_AI_API_KEY)。
+- **Web 多语言 + Agent 控制台**:新增中/英语言切换(顶栏/登录页);副驾驶页显示当前 run 的目标、执行计划与状态(Agent 控制台视图)。
+- **任务幂等**:已终态任务忽略重复结果帧,杜绝重连补发导致的重复副作用。
+- **工程**:CI check-latest 修正 Go 工具链;-ldflags 注入 version/commit/buildTime(`-version` 可溯源)。
+
+### v1.2.1(2026-08)
 - **自主 Agent（异步）**:副驾驶改为异步自主执行——交代任务后立即返回 run_id，后台 goroutine 自主完成 ReAct 循环，不再同步阻塞对话；支持取消、并发上限。
 - **SSE 流式思考**:agent 推理（reasoning）与工具步骤经 SSE 事件流实时推送前端，思考过程与每步工具可见。
 - **连续上下文记忆**:同一 agent 会话跨消息追加记忆（session_id 续接），agent 记住全部历史判断，能持续规划。
