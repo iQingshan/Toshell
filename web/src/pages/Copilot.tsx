@@ -19,8 +19,8 @@ export function Copilot() {
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<{ enabled: boolean; model: string; consent_mode?: string } | null>(null)
   const [showTraces, setShowTraces] = useState<Record<number, boolean>>({})
-  // Agent 控制台视图：当前 run 的目标/执行计划/状态（来自轮询 status()）
-  const [agentView, setAgentView] = useState<{ objective?: string; plan?: { index: number; desc: string; status: string }[]; status?: string; runId?: string } | null>(null)
+  // Agent 控制台视图：当前 run 的目标/执行计划/时间线/状态（来自轮询 status()）
+  const [agentView, setAgentView] = useState<{ objective?: string; plan?: { index: number; desc: string; status: string }[]; timeline?: { ts: number; kind: string; text: string }[]; status?: string; runId?: string } | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const busyRef = useRef(false)
   busyRef.current = busy
@@ -234,10 +234,11 @@ export function Copilot() {
       try {
         const st = await agentApi.status(runId)
         const data = st.data
-        // Agent 控制台视图：目标 + 执行计划 + 状态
+        // Agent 控制台视图：目标 + 执行计划 + 时间线 + 状态
         setAgentView({
           objective: data.objective || undefined,
           plan: data.plan || [],
+          timeline: data.timeline || [],
           status: data.status,
           runId,
         })
@@ -421,6 +422,23 @@ export function Copilot() {
                 </li>
               ))}
             </ol>
+          )}
+          {agentView.timeline && agentView.timeline.length > 0 && (
+            <div className="agent-timeline">
+              <div className="agent-timeline-title">执行轨迹（{agentView.timeline.length}）</div>
+              <div className="agent-timeline-list">
+                {agentView.timeline.slice(-30).map((ev, i) => (
+                  <div key={i} className={`tl-item tl-${ev.kind}`}>
+                    <span className="tl-icon">
+                      {ev.kind === 'tool_result' && ev.text.startsWith('❌') ? '❌'
+                        : ev.kind === 'tool_result' ? '✅' : ev.kind === 'tool_start' ? '🔧'
+                        : ev.kind === 'final' ? '💬' : ev.kind === 'error' ? '⚠️' : '·'}
+                    </span>
+                    <span className="tl-text">{ev.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       )}

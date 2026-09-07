@@ -281,6 +281,7 @@ func (s *Server) agentRunHandler(w http.ResponseWriter, r *http.Request) {
 		"objective": run.Objective,
 		"plan":      run.Plan,
 		"traces":    run.Traces,
+		"timeline":  run.Timeline,
 		"reply":     run.FinalReply,
 	})
 }

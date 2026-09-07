@@ -1011,6 +1011,7 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		if len(ag.ToolCalls) == 0 {
 			// 最终答复
 			run.setReply(ag.Content)
+			run.appendTimeline("final", truncate(ag.Content, 220))
 			run.emit(AgentEventFinal, ag.Content, "")
 			run.emitRaw(AgentEvent{Kind: AgentEventDone})
 			run.setStatus(AgentDone)
@@ -1053,6 +1054,7 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 
 		// 执行工具
 		run.emit(AgentEventToolStart, ToolStart{Name: tc.Function.Name, Args: args}, "")
+		run.appendTimeline("tool_start", tc.Function.Name+" "+truncate(tc.Function.Arguments, 160))
 		result, err := c.executor.InvokeTool(tc.Function.Name, args)
 		trace := ToolTrace{Name: tc.Function.Name, Args: args}
 		var out string
@@ -1071,8 +1073,10 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		isFail := err != nil || trace.Error != "" || strings.Contains(out, `"failed"`) || strings.Contains(out, `"exit_code":-1`)
 		if isFail {
 			consecutiveFail++
+			run.appendTimeline("tool_result", "❌ "+tc.Function.Name+": "+truncate(trace.Error, 200))
 		} else {
 			consecutiveFail = 0
+			run.appendTimeline("tool_result", "✅ "+tc.Function.Name+" → "+truncate(out, 220))
 		}
 		if consecutiveFail >= 3 {
 			logging.Warn("ai", "agent %s: %d consecutive failures, converging to summary", run.ID, consecutiveFail)

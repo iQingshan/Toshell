@@ -64,6 +64,13 @@ const (
 	AgentWaitConsent AgentStatus = "awaiting_consent"
 )
 
+// RunEvent run 的结构化时间线事件（供前端展示 goal→step→tool→result 及失败原因）。
+type RunEvent struct {
+	Ts   int64  `json:"ts"`   // unix ms
+	Kind string `json:"kind"` // thinking/tool_start/tool_result/final/error
+	Text string `json:"text,omitempty"` // 摘要文本（thinking 片段/工具名/结果摘要/错误）
+}
+
 // GoalStep 目标分解后的一个执行步骤（agent 自主维护进度）。
 type GoalStep struct {
 	Index    int    `json:"index"`
@@ -86,6 +93,8 @@ type AgentRun struct {
 	Traces []ToolTrace `json:"traces,omitempty"`
 	// FinalReply 最终答复（done 后填充）。
 	FinalReply string `json:"reply,omitempty"`
+	// Timeline 结构化时间线（goal→thinking→tool→result/error，供前端回放/失败定位）。
+	Timeline []RunEvent `json:"timeline,omitempty"`
 	// CreatedAt / UpdatedAt。
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -111,6 +120,16 @@ func (r *AgentRun) SetObjective(o string) {
 		r.Objective = o
 	}
 	r.mu.Unlock()
+}
+
+// appendTimeline 记录一条时间线事件（线程安全，按时间序追加，上限 400 条防膨胀）。
+func (r *AgentRun) appendTimeline(kind, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Timeline = append(r.Timeline, RunEvent{Ts: time.Now().UnixMilli(), Kind: kind, Text: truncate(text, 300)})
+	if len(r.Timeline) > 400 {
+		r.Timeline = r.Timeline[len(r.Timeline)-400:]
+	}
 }
 
 // SyncPlan 用 LLM 输出的最新计划同步 run.Plan（线程安全）。

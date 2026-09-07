@@ -670,3 +670,14 @@
 .plan-step.st-running { color: var(--color-text); }
 .plan-step-icon { flex: 0 0 auto; }
 .plan-step-desc { word-break: break-word; }
+/* ── Agent 执行轨迹时间线 ── */
+.agent-timeline { margin-top: 8px; border-top: 1px dashed var(--color-border); padding-top: 6px; }
+.agent-timeline-title { font-size: 11px; color: var(--color-text-muted); margin-bottom: 4px; }
+.agent-timeline-list { display: flex; flex-direction: column; gap: 2px; max-height: 140px; overflow-y: auto; }
+.tl-item { display: flex; gap: 6px; align-items: flex-start; font-size: 11.5px; color: var(--color-text-secondary); }
+.tl-icon { flex: 0 0 auto; font-size: 11px; }
+.tl-text { word-break: break-word; white-space: normal; }
+.tl-tool_start .tl-text { color: var(--color-info); }
+.tl-tool_result .tl-text { color: var(--color-text-secondary); }
+.tl-final .tl-text { color: var(--color-primary); font-weight: 600; }
+.tl-error .tl-text { color: var(--color-danger); }
