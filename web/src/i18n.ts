@@ -52,6 +52,7 @@ export const zhDict: Dict = {
   'nav.logs': '日志',
   'nav.timeline': '时间线',
   'nav.copilot': '副驾驶',
+  'nav.settings': '设置',
   'nav.about': '关于',
   // 主题
   'theme.toLight': '切换到亮色模式',
@@ -104,6 +105,7 @@ export const enDict: Dict = {
   'nav.logs': 'Logs',
   'nav.timeline': 'Timeline',
   'nav.copilot': 'Copilot',
+  'nav.settings': 'Settings',
   'nav.about': 'About',
   'theme.toLight': 'Switch to light mode',
   'theme.toDark': 'Switch to dark mode',
