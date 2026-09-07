@@ -32,6 +32,7 @@ configs/local.yaml
 *.log
 *.err.log
 *.out.log
+*.log.err
 
 # ── 临时/调试 ──
 tmp/

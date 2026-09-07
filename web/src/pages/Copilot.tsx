@@ -39,7 +39,8 @@ export function Copilot() {
   // 忽略历史已完成 run，避免历史剧本刷屏/重复回复。
   const sawRunningRef = useRef<Set<string>>(new Set())      // 本会话见过 running 的 run
   const pendingRef = useRef<Map<string, number>>(new Map()) // 已启用 AI 但分析未就绪的轮询计数
-  const analyzedBatchRef = useRef<Set<string>>(new Set())   // 已按触发批次分析过（同批 run 合一，每次触发给一条）
+  const analyzedBatchRef = useRef<Set<string>>(new Set())   // 已发过「AI 建议」的批次（每条只发一次）
+  const fallbackedRef = useRef<Set<string>>(new Set())      // 已发过「兜底摘要」的批次（晚到的 analysis 仍会补发 AI 建议）
   // 基线：首次轮询时已存在的 run（页面打开前的历史任务）记为历史，忽略；
   // 之后新出现的 run（含快速完成/由 AI 触发，未见其 running）也会给建议。
   const baselineRef = useRef<Set<string> | null>(null)
@@ -147,7 +148,7 @@ export function Copilot() {
         // 逐批次聚合：同批 run 全部完成后给【一条】汇总下一步建议；不同批次各给一条
         for (const [bk, runs] of groups) {
           const key = 'b:' + bk
-          if (analyzedBatchRef.current.has(key)) continue
+          if (analyzedBatchRef.current.has(key)) continue // AI 建议已发过，不再重复
           if (!runs.every(r => isTerminal(r.status))) continue
           const pbName = playbooks.find(p => p.id === runs[0].playbook)?.name || runs[0].playbook
           const aiReady = runs.some(r => r.analysis)
@@ -155,7 +156,9 @@ export function Copilot() {
             const parts = runs.map(r => r.analysis
               ? `【${pbName} · 会话 ${r.session_id}】\n${r.analysis}`
               : buildStepSummary(r))
-            addMessage({ role: 'assistant', content: `📋 任务「${pbName}」执行完成，AI 下一步建议：\n\n${parts.join('\n\n—\n\n')}` })
+            // 之前可能已发过兜底摘要，这里补发正式 AI 建议（标记来源）
+            const prefix = fallbackedRef.current.has(key) ? '📋 任务「' + pbName + '」执行完成，AI 下一步建议（补充）：\n\n' : '📋 任务「' + pbName + '」执行完成，AI 下一步建议：\n\n'
+            addMessage({ role: 'assistant', content: prefix + parts.join('\n\n—\n\n') })
             analyzedBatchRef.current.add(key)
             pendingRef.current.delete(key)
             continue
@@ -168,14 +171,15 @@ export function Copilot() {
             pendingRef.current.delete(key)
             continue
           }
-          // 已启用 AI 但分析尚未生成：继续等，超限兜底用结果摘要给一条
+          // 已启用 AI 但分析尚未生成：等待（上限 30 轮 ≈ 90s，兼容 LLM 慢分析）。
+          // 超限先发兜底摘要但不标记 AI 已发——analysis 晚到仍会在后续轮次补发建议。
           const n = (pendingRef.current.get(key) || 0) + 1
           pendingRef.current.set(key, n)
-          if (n >= 8) {
+          if (n >= 30 && !fallbackedRef.current.has(key)) {
             const parts = runs.map(r => buildStepSummary(r))
             addMessage({ role: 'assistant', content: parts.length === 1 ? parts[0] : `📋 任务「${pbName}」已完成：\n\n${parts.join('\n\n')}` })
-            analyzedBatchRef.current.add(key)
-            pendingRef.current.delete(key)
+            fallbackedRef.current.add(key)
+            pendingRef.current.set(key, 15) // 之后继续小步等待，analysis 到达即补发 AI 建议
           }
         }
       } catch { /* 轮询失败静默，下轮重试 */ }

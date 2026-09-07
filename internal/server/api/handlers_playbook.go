@@ -163,7 +163,8 @@ func (s *Server) analyzePlaybook(sessionID string, results []ai.StepResult) stri
 		"【重要】提供的各步骤结果是**可能被截断/摘要化的**，你必须**基于现有结果**给出综述、判断与建议——" +
 		"**绝不要向用户索要数据、完整输出或让用户粘贴原始文本**。信息不足时，直接在「下一步建议」里给出本平台能拉取该数据的工具/命令方向，并在「攻击判断」里基于已知信息合理推断、明确标注不确定处。"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	// 90s：步骤输出可能很大（信息收集类结果几百 KB），LLM 分析耗时要放宽
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	summary, err := s.copilot.Summarize(ctx, system, b.String())
 	if err != nil {
