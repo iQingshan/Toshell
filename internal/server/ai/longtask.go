@@ -320,7 +320,7 @@ func (c *Copilot) rebuildRunMessages(rctx TaskResumeContext) []Message {
 	}
 	sb.WriteString("\n下面这条工具调用的结果来自目标主机的真实执行记录，请基于它继续完成任务；若信息已足够，直接给出最终结论，不要再重复下发同一条命令。")
 	return []Message{
-		{Role: "system", Content: c.systemPrompt()},
+		{Role: "system", Content: c.residentPrompt()},
 		{Role: "user", Content: sb.String()},
 		{Role: "assistant", ToolCalls: []ToolCall{{
 			ID: rctx.CallID, Type: "function",

@@ -142,6 +142,27 @@ type WebConfig struct {
 // 直接引用本常量，杜绝"注释写 150 / viper 写 120 / 运行时兜底 180"这类历史漂移。
 const DefaultLongTaskThresholdSec = 150
 
+// 上下文分层与 token 预算的默认值（v1.4.0 S2 / M3）。
+//
+// 同样定义在 config 包：viper 默认值、ai 包的运行时兜底、示例配置注释三处必须是**同一个数**
+// （历史教训：ai.max_turns 曾在结构体注释/viper/前端/后端四处取不同值）。ai 包直接引用这些常量。
+const (
+	// DefaultMaxContextTokens 单次请求送入模型的上下文预算（近似 token）。
+	//
+	// 口径与取值理由：四层装配后用"字符近似估算"（中文 1 token/字、其余 4 字符/token）
+	// 计算上下文规模，并另留 30% 安全余量（ai.TokenSafetyFactor=1.3）兜住估算误差；
+	// 因此 32000 的预算在"估算 ≈ 24615 token"时就触发第一段压缩。
+	// 32000 的取值对齐 docs/plan/01-agent.md 1.3.9 的分层预算合计（常驻 6000 + 任务 2000 +
+	// 工作 12000 + 历史 4000 = 24000 ≈ 32000/1.3），对 64k 窗口的模型留足输出空间。
+	DefaultMaxContextTokens = 32000
+	// DefaultMaxRunTokens 一次 run 的累计 token 预算（prompt + completion 真值口径）。
+	// 与单次上下文预算不是一回事：前者管"这一次 run 一共能花多少"，后者管"一次请求能塞多大"。
+	// 400000 ≈ 20 轮 × (32k 上下文 + 输出)，与 max_turns=20 大致同量级。
+	DefaultMaxRunTokens = 400000
+	// DefaultContextWorkingKeep 工作层（最近 N 条消息原文）保留的条数。
+	DefaultContextWorkingKeep = 14
+)
+
 // AIConfig AI 副驾驶（LLM 聊天 + 工具调用）配置。
 // BaseURL 为 OpenAI 兼容的 chat/completions 端点（如 https://api.deepseek.com/v1）；
 // 留空时 AI 副驾驶不可用（前端显示未配置提示）。
@@ -181,6 +202,22 @@ type AIConfig struct {
 	// DownloadAllowlist 工具下载域名白名单（空=允许任意公网域名，但仍拒绝内网/回环地址）。
 	// 用于限制 remote_download 只能从可信域名拉取，防止被诱导下载到恶意源头。
 	DownloadAllowlist []string `mapstructure:"download_allowlist" json:"download_allowlist"`
+	// MaxContextTokens 单次请求送入模型的上下文预算（近似 token，默认 32000）。
+	//
+	// 语义：四层装配完成后按字符近似估算上下文规模，超过该值先做更激进的分层压缩
+	// （缩减工作层、把大结果替换为句柄说明）；**压到极限仍超预算**才停止循环并把
+	// stop_reason 记为 max_tokens，照常产出"因预算耗尽而停止"的最终回复。
+	// 估算另留 30% 安全余量（见 ai.TokenSafetyFactor），所以 32000 的预算在
+	// "估算 ≈ 24615"时就触发第一段压缩。<=0 一律回落默认值：预算不允许被配置关掉。
+	MaxContextTokens int `mapstructure:"max_context_tokens" json:"max_context_tokens"`
+	// MaxRunTokens 一次 run 的累计 token 预算（prompt + completion，默认 400000）。
+	// 数据优先取上游响应的 usage 真值并回填校准估算；上游不回 usage 的轮次按估算计入，
+	// 保证"上游不回 usage"不会让预算失效。<=0 一律回落默认值。
+	MaxRunTokens int `mapstructure:"max_run_tokens" json:"max_run_tokens"`
+	// ContextWorkingKeep 工作层（最近 N 条消息原文）保留的条数，默认 14。
+	// 调大 = 更依赖原文、更费 token；调小 = 更早折叠、更省 token 但更依赖摘要质量。
+	// <=0 一律回落默认值。
+	ContextWorkingKeep int `mapstructure:"context_working_keep" json:"context_working_keep"`
 }
 
 type ServerConfig struct {
@@ -643,6 +680,13 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("ai.agent_concurrency", 2)
 	// 长任务挂起阈值：与 ai.DefaultLongTaskThresholdSec 同一个常量（单一来源）。
 	viper.SetDefault("ai.long_task_threshold_sec", DefaultLongTaskThresholdSec)
+	// v1.4.0 S2 上下文分层与 token 预算：与 ai 包的运行时兜底共用同一批常量（单一来源）。
+	//   max_context_tokens = 单次请求的上下文预算（近似 token，含 30% 安全余量口径）
+	//   max_run_tokens     = 一次 run 的累计 token 预算（prompt+completion 真值）
+	//   context_working_keep = 工作层（最近 N 条原文）保留条数
+	viper.SetDefault("ai.max_context_tokens", DefaultMaxContextTokens)
+	viper.SetDefault("ai.max_run_tokens", DefaultMaxRunTokens)
+	viper.SetDefault("ai.context_working_keep", DefaultContextWorkingKeep)
 
 	// ── 对外 MCP 服务端（默认整体关闭；开启后也只绑回环 + 需 token + 只放行只读工具）──
 	viper.SetDefault("mcp.enabled", false)

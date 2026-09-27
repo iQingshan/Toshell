@@ -310,6 +310,10 @@ func (s *Server) agentRunHandler(w http.ResponseWriter, r *http.Request) {
 	// waiting_on 描述在等谁（新增可选字段，既有字段名与语义不变）。
 	status, waitingOn := run.WaitState()
 	taskID, taskTimeout := run.PendingTaskInfo()
+	// v1.4.0 S2 可观测性：当前上下文估算 token / 是否被压缩过 / 本 run 累计 token。
+	// 全部是**新增可选字段**，既有字段名与语义一律不变（老前端忽略即可）。
+	ctxTokens, ctxBudget, ctxCompressed := run.ContextSnapshot()
+	tokenUsage := run.TokenUsage()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"run_id":           run.ID,
 		"status":           status,
@@ -323,6 +327,15 @@ func (s *Server) agentRunHandler(w http.ResponseWriter, r *http.Request) {
 		"waiting_on":       waitingOn,
 		"task_id":          taskID,
 		"task_timeout_sec": taskTimeout,
+		// 上下文与 token（新增可选）
+		"context_tokens":           ctxTokens,
+		"context_budget_tokens":    ctxBudget,
+		"context_compressed":       ctxCompressed,
+		"prompt_tokens":            tokenUsage.PromptTokens,
+		"completion_tokens":        tokenUsage.CompletionTokens,
+		"token_usage_estimated":    tokenUsage.EstimatedTokens,
+		"token_usage_total":        tokenUsage.Total(),
+		"token_calibration_factor": tokenUsage.Calibration.EffectiveFactor(),
 	})
 }
 

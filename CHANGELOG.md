@@ -24,7 +24,13 @@
 
 **目标**：把「单轮同步阻塞 + 状态全在内存 + 长结果整段灌上下文」换成可恢复、有预算、可回放的长任务执行。
 
-- **异步任务状态机：提交 → 句柄 → 事件驱动恢复（本版核心增量之二）**
+- **上下文四层装配 + token 双预算（本版核心增量）**
+  - **常驻层逐字节稳定（前缀缓存终于能命中）**：旧实现把**每轮都变的在线会话清单**拼进 system prompt，而且 `currentSessions()` 内部**又真的调一次 `session_list` 工具**（一次未审计的调用 + 缓存前缀每轮失效）。现在常驻层只含不变的方法论；在线会话快照移到**任务层**，并按 **run + 5 分钟 TTL 缓存**（模型随时可自己复查 `session_list`，而快照晚 5 分钟几乎不影响决策）。分层与装配抽成纯函数 `AssembleContext`/`CompressMessages`（新文件 `ai/context.go`），同步与异步两条路径共用同一套实现。
+  - **四层与折叠保真**：常驻 / 任务 / 工作（最近 N 条原文，默认 14） / 历史（更早折叠成摘要）。折叠摘要现在**保留真实工具名**（旧实现把工具名写死成 `task_wait`，模型会误判自己做过什么）、保留**外置句柄与截断标注**（识别结果信封），并显式标注「历史摘要-非原文」；同时保证 `assistant.tool_calls` 与配对的 `tool` 消息不被拆散（否则上游 chat/completions 直接拒绝）。
+  - **token 预算（两道）**：`ai.max_context_tokens`（单次请求上下文预算，默认 **32000**）与 `ai.max_run_tokens`（一次 run 累计预算，默认 **400000**≈20 轮），外加 `ai.context_working_keep`（默认 14）。估算用**字符近似**（中文 1 token/字、其余 4 字符/token，不引入 tiktoken/词表依赖）并留 **30% 安全余量**；同时**解析 LLM 响应的 `usage`**（旧实现完全没解析）做**校准回填**，避免估算长期漂移。超预算两段式：先做更激进的分层压缩（缩减工作层、大结果换成句柄说明）→ 压到极限仍超才停止，并把 `stop_reason` 记为 **`max_tokens`**，照常产出"因预算耗尽而停止"的最终回复（附上下文用量、触发阈值、压缩情况），不静默中断。设置页可改三个值并回传**生效值**。
+  - **可观测性**：run 查询新增可选字段 `context_tokens`/`context_budget_tokens`/`context_compressed`/`token_usage_estimated`/`token_usage_total`/`token_calibration_factor`（既有字段名未动）。
+  - **验证**：`go test ./...` 全绿（13 个包）；`scripts/mcp_smoke.ps1` **18/18**（对外契约未变）；**真实服务端 + mock LLM 端到端**：把 `max_context_tokens` 压到下限 1000 → run 立刻以 `stop_reason=max_tokens` 收尾，回复里写明"估算 3361 token / 预算 1000（含 30% 余量，阈值 770）"且"工作层已压到 1 条"，即先压缩后停止两段都被实际触发；把预算恢复正常（32000）后重跑三档循环回归：`loop_detected` / `awaiting_consent` / `max_turns` 全部符合预期。
+- **异步任务状态机：提交 → 句柄 → 事件驱动恢复（本版核心增量）**
   - **彻底去掉 sleep 轮询**：`task.Manager` 新增终结通知原语（`Subscribe`/`WaitSettled`/`WaiterCount`，注册与状态判定共用一把锁，避免"判定非终态→此刻终结→永远收不到通知"的丢通知窗口；通道一次性关闭、等待者摘除不留泄漏），通知挂在**真正的状态变更点**（Complete/Fail/Cancel/Delete/CleanupOldTasks）。`pushAndAwait`/`task_wait`/`execAndAwait` 与剧本的 `waitForTask` 全部改为等待通知：一次 300s 下载不再空转 600 次、每个等待者少掉最多 500ms 固定延迟。**对外契约逐字段不变**（超时仍表示"仍在跑"、错误码与响应字段名全等，有测试断言 key 集合）。
   - **Agent 长任务不再占满并发槽位**：预估超时 ≥ `ai.long_task_threshold_sec`（默认 **150s**）的任务类工具改为「提交任务 → run 进入 `awaiting_task` 并落库 `waiting_on` → 退出循环（**释放 agent_concurrency 槽位**）→ 任务完成事件唤醒 → 结果接回上下文与轨迹 → 重入循环」。判定是纯函数 `ShouldSuspendLongTask`（含 `NeverSuspend` 运维开关；阈值 ≤0 回落默认，不允许用它关掉）。恢复复用既有的**审批挂起**模式（同一套"消息在 run 里 + 恢复即重入循环 + trace 不变"），两套状态一条恢复路径。
   - **重启恢复**：启动时扫描 `agent_runs.status=awaiting_task`，按 `waiting_on.internal_task_id` 与 `tasks` 表对账 —— 已完成→重建 run（复用 run_id/trace_id）+ 最小上下文 + 接回结果并继续；仍在跑→重新订阅等它完成；任务已丢失/`waiting_on` 不可解析→**明确终态**（`failed` + `task_lost`/`waiting_on_unparsable`）+ 中文说明，绝不静默卡在等待态。`task.Manager` 顺带修掉一个既有缺陷：Complete/Fail 原先要求任务在内存里，**重启前下发的任务结果永远丢失**，现在会从库回填。
@@ -33,7 +39,7 @@
   - **验证**：`go test ./...` 全绿（13 个包，本增量新增 37 个用例，含新的 `task` 包）；`scripts/mcp_smoke.ps1` **18/18**；`scripts/e2e_smoke.ps1` **19 项 0 失败**（其中"真实植入端上线 + whoami 任务 completed"证明改造后的事件驱动等待在真实植入端上工作正常）；另补一条**收益断言**用例 `TestSuspendedLongTaskReleasesAgentSlot`（并发上限压到 1：挂起后槽位必须立刻可再获取，且第二个 run 能同样挂起）—— 防止将来把挂起实现成"在循环里等事件"而用例照样全绿。
   - **已知边界（如实记录）**：`database.truncateTaskContent` 仍把 `tasks.output` 截到 500 字节 → 重启恢复拿到的结果最多 500 字节（已在给模型的说明里显式标注）；挂起期间的 `max_wallclock_sec`/`max_turns` 预算会重置（沿用审批恢复的既有行为，理论上可被多次挂起绕过墙钟上限，后续应把用量接到 `agent_runs` 已有字段）；阈值目前只在 YAML/viper 可配（GET 已回传生效值，未加入设置页 PUT 白名单）；旧前端不认识 `awaiting_task` 与新事件 `task_wait`（走 default 忽略，不影响既有功能）；新用例未跑 `-race`（本机 CGO_ENABLED=0，Windows 上 race 需要 cgo）。
 
-- **长结果外置 + 句柄内联 + 分页回读（本版核心增量之一，完整设计见 [docs/AGENT-RESULT-OFFLOAD.md](docs/AGENT-RESULT-OFFLOAD.md)）**
+- **长结果外置 + 句柄内联 + 分页回读（本版核心增量，完整设计见 [docs/AGENT-RESULT-OFFLOAD.md](docs/AGENT-RESULT-OFFLOAD.md)）**
   - **唯一转换点**：新增 `mcp.InlineForModel`/`mcp.ModelView`（放在 `mcp` 包：外置信封、句柄、分页语义本就在那里，且 `mcp` 不依赖 `ai`/`api`/`config`，三个消费方都能复用同一把尺子）。两个 ReAct 循环 + 两条审批恢复路径**全部**改走它，**删掉 8 处 `truncate(out, 4000)` 字符串硬截断**。
   - **判定**：≤ `mcp.inline_limit`（默认 8192 字节）→ 原文；超限且外置成功 → 模型只看到**统一信封 JSON（摘要 + 句柄 + 总字节 + 显式截断说明）**；外置失败/未配置存储 → 信封里放**开头预览**（作为 JSON 字符串字段转义，因此**恒为合法 JSON**）+ 说明"这不是全部、没有句柄可回读"。硬性质：**凡被截断，模型拿到的一定是合法 JSON 且必带显式标注**。
   - **回读闭环**：`result_read` 此前**只登记在注册表里 —— `invokeTool` 没有实现、`agentToolNames` 也没有它**，等于"外置=丢结果"。现已实现（含 `slice`/`tail` 两种模式、页大小自适应收缩到内联上限以内以免"句柄套句柄"自锁、`has_more`/`next_offset` 游标）并加入 Agent 工具面（LevelRead 免审批）。存储与 `mcp.enabled` **解耦**（默认关闭 MCP 也能用），并补了 api 侧 30 分钟 GC；`agentstore.tool_results` 索引已接线（句柄/sha256/字节数/TTL，写失败只告警）。

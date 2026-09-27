@@ -64,6 +64,12 @@ type TraceInfo struct {
 	MaxTurns        int    `json:"max_turns"`
 	MaxToolCalls    int    `json:"max_tool_calls"`
 	MaxWallclockSec int    `json:"max_wallclock_sec"`
+	// MaxContextTokens / MaxRunTokens / ContextWorkingKeep 为 v1.4.0 S2 新增可选字段：
+	// 生效的上下文预算（近似 token）、累计 token 预算与工作层保留条数。
+	// 老前端不认识这些字段，忽略即可（同一个 JSON 对象里多几个键）。
+	MaxContextTokens   int `json:"max_context_tokens,omitempty"`
+	MaxRunTokens       int `json:"max_run_tokens,omitempty"`
+	ContextWorkingKeep int `json:"context_working_keep,omitempty"`
 }
 
 // DoneInfo 事件 kind=done 的载荷（v1.4.0 S2 新增）：trace id 与停止原因。
@@ -173,6 +179,24 @@ type AgentRun struct {
 	// 由持久化层构造、执行层透传，保证内存与库里是同一份描述。
 	// GET /api/v1/agent/runs/{id} 会回传它：新等待态必须"看得见"。
 	WaitingOn string `json:"waiting_on,omitempty"`
+
+	// ── v1.4.0 S2 上下文/token 可观测性（全部是**新增可选字段**，既有字段名与语义不变）──
+	//
+	// PromptTokens / CompletionTokens 是上游 usage 真值累计（无 usage 的轮次不计入，
+	// 那部分记在 tokenUsage.EstimatedTokens 里）；ContextTokens 是最近一次四层装配的
+	// 估算上下文 token（含 30% 余量口径之外的原始估算），ContextCompressed 表示那次装配
+	// 是否做过压缩。前端/脚本据此回答"这次 run 的上下文有多大、有没有被压过"。
+	PromptTokens        int  `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int  `json:"completion_tokens,omitempty"`
+	ContextTokens       int  `json:"context_tokens,omitempty"`
+	ContextBudgetTokens int  `json:"context_budget_tokens,omitempty"`
+	ContextCompressed   bool `json:"context_compressed,omitempty"`
+
+	// tokenUsage 累计 token 用量（真值优先、估算兜底）+ 估算校准系数。
+	tokenUsage RunTokenUsage
+	// sessionsSnapshot 在线会话快照（任务层用）。缓存在 run 上的理由见 cachedSessions 注释。
+	sessionsSnapshot string
+	sessionsAt       time.Time
 
 	// events 缓冲事件通道（有缓冲，避免阻塞循环）。
 	events chan AgentEvent
@@ -494,6 +518,84 @@ func (r *AgentRun) setStopReason(reason string) {
 // SetStopReason 记录停止原因（导出给恢复编排使用；与 setStopReason 同一份状态）。
 func (r *AgentRun) SetStopReason(reason string) { r.setStopReason(reason) }
 
+// ─── 上下文/token 可观测性（v1.4.0 S2）─────────────────────────────────────
+
+// ObserveLLMUsage 记录一次 LLM 往返的 token 用量（线程安全）。
+//
+// 真值优先：上游给了 usage 就累加真值并用它回填估算校准；没给（prompt/completion 均为 0）
+// 就按估算回填，保证 token 预算不会因为"上游不回 usage"而失效。
+func (r *AgentRun) ObserveLLMUsage(prompt, completion, estimatedPrompt int) {
+	r.mu.Lock()
+	if prompt > 0 || completion > 0 {
+		r.tokenUsage = r.tokenUsage.ObserveUsage(prompt, completion, estimatedPrompt)
+	} else {
+		r.tokenUsage = r.tokenUsage.ObserveEstimate(estimatedPrompt)
+	}
+	r.PromptTokens = r.tokenUsage.PromptTokens
+	r.CompletionTokens = r.tokenUsage.CompletionTokens
+	r.UpdatedAt = time.Now()
+	r.mu.Unlock()
+}
+
+// TokenUsage 读取累计 token 用量快照（线程安全；纯值对象，供预算判定使用）。
+func (r *AgentRun) TokenUsage() RunTokenUsage {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tokenUsage
+}
+
+// SetTokenUsage 直接写入累计用量（重启恢复路径用：从持久化的 agent_runs 恢复计数）。
+func (r *AgentRun) SetTokenUsage(u RunTokenUsage) {
+	r.mu.Lock()
+	r.tokenUsage = u
+	r.PromptTokens = u.PromptTokens
+	r.CompletionTokens = u.CompletionTokens
+	r.mu.Unlock()
+}
+
+// RecordContextStats 把一次四层装配的统计挂到 run 上（线程安全）。
+// 只记录"当前上下文有多大 / 是否压缩过 / 预算多少"，不改动任何既有字段。
+func (r *AgentRun) RecordContextStats(s ContextStats) {
+	r.mu.Lock()
+	r.ContextTokens = s.TotalTokens
+	r.ContextBudgetTokens = s.BudgetTokens
+	r.ContextCompressed = s.Compressed
+	r.UpdatedAt = time.Now()
+	r.mu.Unlock()
+}
+
+// ContextSnapshot 读取最近一次装配的上下文可观测信息（线程安全）。
+func (r *AgentRun) ContextSnapshot() (tokens, budget int, compressed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ContextTokens, r.ContextBudgetTokens, r.ContextCompressed
+}
+
+// cachedSessions 读取在线会话快照；超过 ttl 视为过期（返回 ok=false）。
+//
+// 为什么把快照缓存在 run 上而不是每轮重新取：取快照的实现（Copilot.currentSessions）
+// 内部是一次真实的 session_list 工具调用——每轮都调既慢，又会在审计之外多出大量工具调用；
+// 而它只影响**任务层**（不参与前缀缓存稳定性），因此按 run + TTL 缓存即可。
+func (r *AgentRun) cachedSessions(ttl time.Duration) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sessionsAt.IsZero() {
+		return "", false
+	}
+	if ttl > 0 && time.Since(r.sessionsAt) > ttl {
+		return "", false
+	}
+	return r.sessionsSnapshot, true
+}
+
+// setSessionsSnapshot 记录在线会话快照（失败取空也要记时间，避免每轮都重试一次工具调用）。
+func (r *AgentRun) setSessionsSnapshot(s string) {
+	r.mu.Lock()
+	r.sessionsSnapshot = s
+	r.sessionsAt = time.Now()
+	r.mu.Unlock()
+}
+
 // SetReply 写入最终答复（导出给恢复编排使用，线程安全）。
 func (r *AgentRun) SetReply(reply string) { r.setReply(reply) }
 
@@ -590,6 +692,10 @@ func (r *AgentRun) AppendMessages(msgs []Message) {
 // （保留 Messages/Traces，即保留完整上下文memory）。
 // v1.4.0 S2：同时换一条新的 trace_id——trace 归因的单位是「一次指令 → 一次执行」，
 // 复用 run 续接新指令若沿用旧 id，两次独立执行会在审计日志里混成一条。
+//
+// 四处预算（轮次/工具调用数/墙钟/token）在循环里都是"本次执行"的口径（局部计数器），
+// 所以这里同步清零 token 累计与上下文统计：否则一条长指令花光 token 预算后，用户续接的
+// 下一条指令会立刻被 max_tokens 掐断。在线会话快照也一并作废（新指令要看最新的清单）。
 func (r *AgentRun) ResetForResume() {
 	r.mu.Lock()
 	r.Status = AgentQueued
@@ -602,6 +708,13 @@ func (r *AgentRun) ResetForResume() {
 	r.TraceID = newTraceID()
 	r.events = make(chan AgentEvent, 256)
 	r.once = sync.Once{}
+	r.tokenUsage = RunTokenUsage{}
+	r.PromptTokens = 0
+	r.CompletionTokens = 0
+	r.ContextTokens = 0
+	r.ContextCompressed = false
+	r.sessionsSnapshot = ""
+	r.sessionsAt = time.Time{}
 	r.mu.Unlock()
 }
 

@@ -1066,6 +1066,45 @@ export function Settings() {
                     />
                   </Field>
                   <Field
+                    label="上下文预算(token)"
+                    hint="单次请求送进模型的上下文预算（近似 token，后端默认 32000）。超过时先做更激进的分层压缩（缩减工作层、把大结果换成句柄说明），压到极限仍超预算才停止本轮并记 stop_reason=max_tokens"
+                  >
+                    <input
+                      type="number"
+                      min={1000}
+                      max={2000000}
+                      className="ui-input"
+                      value={num(draft.ai.max_context_tokens) || 32000}
+                      onChange={(e) => setField('ai', 'max_context_tokens', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field
+                    label="单次任务 token 预算"
+                    hint="一次 run 累计消耗上限（prompt+completion，后端默认 400000，≈20 轮满上下文）。与上面的单请求预算不是一回事：这个管「这次任务一共能花多少」"
+                  >
+                    <input
+                      type="number"
+                      min={1000}
+                      max={100000000}
+                      className="ui-input"
+                      value={num(draft.ai.max_run_tokens) || 400000}
+                      onChange={(e) => setField('ai', 'max_run_tokens', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field
+                    label="工作层保留条数"
+                    hint="上下文四层里「工作层」保留最近多少条消息原文（后端默认 14），更早的折叠成摘要"
+                  >
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      className="ui-input"
+                      value={num(draft.ai.context_working_keep) || 14}
+                      onChange={(e) => setField('ai', 'context_working_keep', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field
                     label="审批策略"
                     hint="分级（默认）：只读工具直接执行，查询/影响类先问你；全部确认：任何工具都要你同意；全自动：直接执行（危险，等价旧 auto）"
                     style={{ gridColumn: '1 / -1' }}

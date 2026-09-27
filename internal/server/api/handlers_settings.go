@@ -113,12 +113,16 @@ type settingsAIUpdate struct {
 	Timeout  *int    `json:"timeout"`
 	MaxTurns *int    `json:"max_turns"`
 	// v1.4.0 S2：控制循环的另外两处硬上限 + 分级审批策略
-	MaxToolCalls      *int      `json:"max_tool_calls"`    // 一次 run 内最多工具调用数（默认 40）
-	MaxWallclockSec   *int      `json:"max_wallclock_sec"` // 一次 run 最长墙钟时间（秒，默认 900）
-	ConsentPolicy     *string   `json:"consent_policy"`    // graded(默认) / all / off（旧值 auto/normal 兼容）
-	ConsentMode       *string   `json:"consent_mode"`      // 旧键，保留兼容：auto=全自动 / normal=影响会话操作需用户同意
-	AgentConcurrency  *int      `json:"agent_concurrency"`
-	DownloadAllowlist *[]string `json:"download_allowlist"`
+	MaxToolCalls    *int `json:"max_tool_calls"`    // 一次 run 内最多工具调用数（默认 40）
+	MaxWallclockSec *int `json:"max_wallclock_sec"` // 一次 run 最长墙钟时间（秒，默认 900）
+	// v1.4.0 S2：上下文四层装配与 token 预算（新增可选字段，老前端不传即不改动）
+	MaxContextTokens   *int      `json:"max_context_tokens"`   // 单次请求上下文预算（近似 token，默认 32000）
+	MaxRunTokens       *int      `json:"max_run_tokens"`       // 一次 run 累计 token 预算（默认 400000）
+	ContextWorkingKeep *int      `json:"context_working_keep"` // 工作层保留最近 N 条原文（默认 14）
+	ConsentPolicy      *string   `json:"consent_policy"`       // graded(默认) / all / off（旧值 auto/normal 兼容）
+	ConsentMode        *string   `json:"consent_mode"`         // 旧键，保留兼容：auto=全自动 / normal=影响会话操作需用户同意
+	AgentConcurrency   *int      `json:"agent_concurrency"`
+	DownloadAllowlist  *[]string `json:"download_allowlist"`
 }
 
 type settingsListenerUpdate struct {
@@ -254,6 +258,11 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			// v1.4.0 S2：长任务挂起阈值（预估超时 ≥ 该值的工具会改走"提交→挂起→事件恢复"，
 			// 释放并发槽位）。回传**生效值**（0/负数→默认），与循环里的判定同源。
 			"long_task_threshold_sec": ai.LongTaskThresholdFromConfig(cfg.AI),
+			// v1.4.0 S2：上下文四层装配与 token 预算。同样回传**生效值**（0/负数→默认），
+			// 免得前端/自动化各自猜默认值（历史上 max_turns 就因此四处不一致）。
+			"max_context_tokens":   ai.EffectiveMaxContextTokens(cfg.AI),
+			"max_run_tokens":       ai.EffectiveMaxRunTokens(cfg.AI),
+			"context_working_keep": ai.EffectiveContextWorkingKeep(cfg.AI),
 		},
 		Web: map[string]interface{}{
 			"basic_auth_enabled": cfg.Web.BasicAuthEnabled,
@@ -623,6 +632,29 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates["ai.max_wallclock_sec"] = *a.MaxWallclockSec
+		}
+		// v1.4.0 S2：token 预算与工作层条数。同样给下限保护——把预算调到极小等于
+		// "每轮都超预算立刻停"，比不限制更糟；上限防止填出一个天文数字。
+		if a.MaxContextTokens != nil {
+			if *a.MaxContextTokens < 1000 || *a.MaxContextTokens > 2000000 {
+				http.Error(w, `{"error":"ai.max_context_tokens 范围 1000-2000000（近似 token）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["ai.max_context_tokens"] = *a.MaxContextTokens
+		}
+		if a.MaxRunTokens != nil {
+			if *a.MaxRunTokens < 1000 || *a.MaxRunTokens > 100000000 {
+				http.Error(w, `{"error":"ai.max_run_tokens 范围 1000-100000000（token）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["ai.max_run_tokens"] = *a.MaxRunTokens
+		}
+		if a.ContextWorkingKeep != nil {
+			if *a.ContextWorkingKeep < 1 || *a.ContextWorkingKeep > 200 {
+				http.Error(w, `{"error":"ai.context_working_keep 范围 1-200（条）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["ai.context_working_keep"] = *a.ContextWorkingKeep
 		}
 		if a.ConsentPolicy != nil {
 			cp := strings.ToLower(strings.TrimSpace(*a.ConsentPolicy))
