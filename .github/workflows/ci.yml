@@ -71,8 +71,11 @@ jobs:
         #   mcp    ：工具注册表形状/分级 fail-closed/默认只放行只读、结果信封与截断标注、
         #            结果外置句柄（含路径穿越拒绝）；MCP 协议层与三道限流闸（httptest，不需植入端）
         #   ai     ：Agent 工具面必须都能在注册表里找到；审批判定 fail-closed（含 delegate 越权回归）
+        #   agentstore：长任务状态落盘（4 张表的 CRUD、step 恢复游标与幂等、tool_call 幂等、
+        #            结果 TTL 清理、同参重复计数）—— 用临时 sqlite，Linux runner 可跑
         # 这些测试用桩函数替代 WinVerifyTrust、用假 Executor 替代真实会话，Linux runner 可跑。
         run: |
           go test ./internal/common/... ./internal/server/config/... \
                   ./internal/server/builder/... ./internal/server/drivers/... \
-                  ./internal/server/mcp/... ./internal/server/ai/...
+                  ./internal/server/mcp/... ./internal/server/ai/... \
+                  ./internal/server/agentstore/...

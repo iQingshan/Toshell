@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/viper"
 	"toshell/internal/common/types"
+	"toshell/internal/server/agentstore"
 	"toshell/internal/server/api"
 	"toshell/internal/server/auth"
 	"toshell/internal/server/avdetect"
@@ -68,6 +69,9 @@ type Server struct {
 	// 它自带监听器（默认 127.0.0.1:18082）与鉴权/限流/审计，执行能力通过 Executor 注入，
 	// 因此本包不需要给它加路由。
 	mcpServer *mcpsrv.Server
+	// agentStore 是 Agent 长任务状态（run/step/tool_call/result）的 sqlite 持久化层；
+	// 数据库不可用时为 nil（此时 Agent 仍可跑，但状态不落盘、重启不恢复）。
+	agentStore *agentstore.Store
 }
 
 func main() {
@@ -209,6 +213,24 @@ func NewServer(cfgPath string) (*Server, error) {
 
 	sessMgr := session.New()
 	taskMgr := task.New(sessMgr)
+
+	// ── Agent 存储 + 任务 id 计数器校准（v1.4.0 S2 前置项）──
+	// 任务 id 来自内存 atomic 计数器（task.go:143），进程重启即归零 → 会与 tasks 表里的
+	// 历史任务撞号（前端/Agent 按 id 查任务就会串到旧记录）。这里把计数器抬到历史最大值之上。
+	var agentStore *agentstore.Store
+	if db != nil {
+		if st, serr := agentstore.New(db.SQL()); serr != nil {
+			logging.Warn("server", "Agent 存储初始化失败（长任务状态将不落盘）：%v", serr)
+		} else {
+			agentStore = st
+			if maxID, merr := st.MaxTaskID(); merr != nil {
+				logging.Warn("server", "读取历史最大任务 id 失败：%v", merr)
+			} else if maxID > 0 {
+				taskMgr.SeedTaskCounter(maxID)
+				logging.Info("server", "任务 id 计数器已校准到历史最大值 %d（避免重启后撞号）", maxID)
+			}
+		}
+	}
 
 	// 会话心跳超时来自监听器配置（默认 60s）。这里**强制留出余量**（ROADMAP P0-1）：
 	// 阈值至少取 MarginFactor(3) 倍植入端心跳间隔。历史上 interval=60s 与
@@ -387,6 +409,7 @@ func NewServer(cfgPath string) (*Server, error) {
 		apiServer:    apiServer,
 		logger:       logger,
 		mcpServer:    mcpServer,
+		agentStore:   agentStore,
 	}, nil
 }
 

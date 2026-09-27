@@ -51,6 +51,19 @@ func Get() *Database {
 	return db
 }
 
+// SQL 暴露底层连接，供**同一进程内的专用存储层**使用（当前是 internal/server/agentstore：
+// Agent 的 run/step/tool_call/result 四张表 CRUD）。
+//
+// 约定：调用方**不得**关闭它，也不要在事务外做长耗时操作；连接池与生命周期由本包管理。
+// 之所以不在本包直接写这些 CRUD：Agent 存储逻辑有自己的一套状态机语义与测试，
+// 放在专用包里既能单独测（`go test ./internal/server/agentstore/`），也不会把本文件撑成几千行。
+func (d *Database) SQL() *sql.DB {
+	if d == nil {
+		return nil
+	}
+	return d.db
+}
+
 func (d *Database) initTables() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS sessions (
@@ -142,6 +155,10 @@ func (d *Database) initTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_implants_created ON implants(created_at)`,
 	}
+
+	// v1.4.0：Agent 长任务可靠性的四张表（DDL 见 agent_schema.go）。
+	// 全部 CREATE ... IF NOT EXISTS，对既有库幂等，不做破坏性 DDL。
+	queries = append(queries, AgentSchemaStatements...)
 
 	for _, query := range queries {
 		if _, err := d.db.Exec(query); err != nil {

@@ -129,6 +129,27 @@ func Get() *Manager {
 	return manager
 }
 
+// SeedTaskCounter 把内存任务 id 计数器抬到 >= persistedMax。
+//
+// 为什么需要：taskCounter 是纯内存 atomic（见 Create 里的 AddUint64），进程重启即归零，
+// 于是新任务会从 1 开始编号，与 sqlite `tasks` 表里的历史任务**撞号**——按 id 查任务
+// （前端任务列表、Agent 的 internal_task_id 对齐）就会串到旧记录。
+// 由 cmd/server 在建库之后用 `MAX(tasks.id)` 调用一次；只在更大的方向抬升，幂等且并发安全。
+func (m *Manager) SeedTaskCounter(persistedMax uint64) {
+	if m == nil || persistedMax == 0 {
+		return
+	}
+	for {
+		cur := atomic.LoadUint64(&m.taskCounter)
+		if cur >= persistedMax {
+			return
+		}
+		if atomic.CompareAndSwapUint64(&m.taskCounter, cur, persistedMax) {
+			return
+		}
+	}
+}
+
 func (m *Manager) Create(sessionID string, params TaskParams) (*types.TaskInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

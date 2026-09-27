@@ -21,7 +21,18 @@
 - **CI**：单元测试范围增加 `./internal/server/mcp/...` 与 `./internal/server/ai/...`（注册表形状与分级 fail-closed、信封与截断标注、结果外置句柄与路径穿越拒绝、Agent 工具面必须都能在注册表找到、`delegate` 越权回归）。
 
 ### 🤖 S2 内置 Agent：长任务可靠性
-- （待填）
+
+**目标**：把「单轮同步阻塞 + 状态全在内存 + 长结果整段灌上下文」换成可恢复、有预算、可回放的长任务执行。
+
+- **状态落盘：4 张新表 + 专用存储层**（`internal/server/database/agent_schema.go`、新包 `internal/server/agentstore`）
+  - `agent_runs`（run 级状态机与预算：status/stop_reason/**waiting_on**/三处上限/token 用量/trace_id）、
+    `agent_steps`（步骤级 checkpoint：`UNIQUE(run_id, step_no)` 作恢复游标、每步指标、压缩摘要）、
+    `agent_tool_calls`（工具调用：**correlation_id 幂等**、审批结论、内部 task id、attempt）、
+    `tool_results`（结果外置索引：句柄、sha256、**截断显式标注**、TTL、redacted）。
+  - 全部 `CREATE TABLE/INDEX IF NOT EXISTS`：**对既有库幂等**，不动既有表、无破坏性 DDL，回滚只是多几张没人查的空表；DDL 抽成导出的 `AgentSchemaStatements`，让存储层的测试与生产共用同一份定义（schema 不会漂移）。
+  - 存储层提供：run 的 upsert/状态机推进/用量累加/可恢复列表、step 的 next-cursor 与幂等 append、tool_call 的幂等 upsert 与待决列表、result 的索引与 TTL 清理（清理时回传外置文件路径供调用方删除）、以及 **`CountArgsHash`（同工具同参数计数，供防死循环）**。
+- **修掉「重启后任务 id 撞号」**：任务 id 来自内存 atomic 计数器（`task/task.go`），进程重启即归零 → 新任务会与 `tasks` 表里的历史任务撞号（按 id 查任务会串到旧记录）。新增 `Manager.SeedTaskCounter()`，启动时用 `MAX(tasks.id)` 校准（只在更大方向抬升、CAS 幂等），`cmd/server` 在数据库就绪后调用并写日志。
+- （进行中）控制循环三处硬上限（轮次/工具调用数/总时长）、防死循环（同工具同参数重复检测）、分级审批（`ai.consent_policy: graded|all|off`，按注册表 read/confirm/danger 分级）、trace id 全链路。
 
 ### 🥷 S3 免杀：分层治理（落地 / 动态 / 静态）
 - （待填）

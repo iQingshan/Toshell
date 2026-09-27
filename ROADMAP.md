@@ -53,14 +53,18 @@
 
 ### S2 内置 Agent：长任务可靠性
 
-- **异步任务状态机**：工具调用改成「提交 → 立即返回 `task_id`/句柄 → 由事件/轮询驱动恢复」，**禁止在调用线程里 sleep 轮询**（现状 `pushAndAwait` 就是 sleep 500ms 轮询到超时）；状态显式建模 `submitted/running/succeeded/failed/timeout`。
-- **状态落盘与恢复**：run、步骤、工具句柄、提交参数、进度全部落 sqlite，支持重启/断线后恢复（现状 run 与任务句柄**全在内存**，重启即失忆；`tasks.id` 还是内存计数器）。
-- **长结果外置 + 句柄内联 + 分页回读**：上下文只放摘要 + 句柄；**任何截断必须显式告知模型**；顺带修掉"截图 base64 被截断成非法 JSON"。
-- **上下文分层与预算**：常驻 / 任务 / 工作 / 历史四层，各设 token 预算，压缩优先于扩窗，稳定前缀做缓存。
-- **控制循环三处硬上限** + 防死循环（相同工具+参数重复调用检测）+ 防目标漂移 + 错误传播隔离。
-- **审批分级**：`auto/normal` 二元 → 按风险分级（只读免审批、影响会话需确认、不可逆每次确认），并与 S1 的注册表共用同一套风险级。
-- **可观测性**：trace id 全链路、SSE `id` + `Last-Event-ID` 断点续传（现状通道满会静默丢事件）、失败可 replay。
-- **验收**：断线/重启后 run 可续跑；长结果不再进上下文；`delegate` 越权修复生效；任一上限触发即中断且可回放。
+- **进行中**。已完成：
+  - **状态落盘**：4 张表（`agent_runs`/`agent_steps`/`agent_tool_calls`/`tool_results`，见 `internal/server/database/agent_schema.go`）+ 专用存储层 `internal/server/agentstore`（run 状态机推进、step 恢复游标、tool_call 幂等 upsert、result TTL 清理、同参重复计数）；全部 `IF NOT EXISTS`，对既有库幂等。
+  - **任务 id 计数器校准**：`task.Manager.SeedTaskCounter(MAX(tasks.id))`，修掉进程重启后新任务与历史任务撞号。
+  - 顺带确认：`ai` 事件通道**已是 8192**（无需再改），SSE 满通道丢弃策略仍待改成"可续传"。
+- 待做（按依赖顺序）：
+  1. **异步任务状态机**：工具调用改成「提交 → 立即返回句柄 → 由事件/轮询驱动恢复」，禁止在调用线程 sleep 轮询（现状 `pushAndAwait` 就是 sleep 500ms 轮询到超时）；恢复时按 `agent_tool_calls` 的 `internal_task_id` 对齐 `tasks` 表。
+  2. **长结果外置 + 句柄内联 + 分页回读**：把 `truncate(out, 4000)` 换成统一信封 + `tool_results` 句柄；**任何截断显式告知模型**（顺带修掉"截图 base64 被截断成非法 JSON"）。
+  3. **上下文分层与 token 预算**：常驻 / 任务 / 工作 / 历史四层，压缩优先于扩窗，稳定前缀做缓存。
+  4. **控制循环三处硬上限 + 防死循环 + 防漂移 + 错误隔离**（进行中：上限与 loop 检测由本轮的 `ai.max_tool_calls`/`ai.max_wallclock_sec`/同参重复检测落地）。
+  5. **审批分级**：`auto/normal` 二元 → 按注册表 read/confirm/danger 分级（`ai.consent_policy: graded|all|off`，旧值 `auto→off`、`normal→graded` 兼容）。
+  6. **可观测性**：trace id 全链路 + SSE `id`/`Last-Event-ID` 断点续传 + 失败可 replay。
+  7. **评估门禁**：离线黄金集（输入→期望工具序列→期望结论）+ 在线指标 + 回归门禁。
 
 ### S3 免杀：分层治理（先解决"起不来"，再谈"藏得深"）
 
