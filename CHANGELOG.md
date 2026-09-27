@@ -94,6 +94,7 @@
 
 ### 🩹 其它
 
+- **修掉"恢复过的 run 事件缓冲缩水"**：`AgentManager.NewRun` 的事件通道是 8192，而 `ResetForResume`（审批/长任务挂起后恢复、续接指令走的路径）单独写死 **256** —— 恢复后的 run 事件缓冲只有新 run 的 1/32，一旦 thinking/message 事件密集，最先被丢的恰恰是 `final`/`done` 这类**终态事件**，前端表现为收不到最终答复（network error）。现收敛成唯一常量 `agentEventBuffer=8192`，并加 `TestResumeKeepsEventBufferSize` 钉住"两侧容量必须一致"。顺带把 HEAD 上本就没过 gofmt 的 `internal/server/ai/playbook.go` 格式化干净。
 - **会话不存在返回 404 而不是 500（e2e 冒烟长期挂着的观察项，已全量铺开）**：`task.Manager.Create` 在会话不存在时返回 `session not found: <id>`，而 handler 一律当 500 返回 —— **客户端输入错误被报成服务端故障**：调用方会重试而不是修正会话 id，监控也会把它计入服务端错误率（掩盖真问题）。新增 `internal/server/api/handlers_session_guard.go` 作为这一约定的唯一出处（会话不存在→404 `session_not_found`、listener 未就绪→503 `listener_unavailable`、其余框架错误→保持 500），提供 `requireSession`/`requireSessionFromPath`/`requireListener` 三个薄封装。
   - **17 处下发类 handler 全部改走 helper**：files（list/download/delete）、processes（list/kill/bof）、screenshot、credentials、fileless-exec、edr（blind/kill/byovd load/unload/kill/ppl_kill）、relay、screen-stream、persistence 与 injection（execute/spawn）、privesc（UAC，本身已有 404 只改 listener 档）。真实服务端实测 7 条代表性路由（files/screenshot/credentials/relay/edr-blind/screen-stream/fileless-exec）在会话不存在时**全部 404**。
   - **防回归**：`handlers_session_guard_scan_test.go` 用**源码扫描**把这一类错误码钉住（出现 `Listener not available` + 500、或 `session not found` + 500 即失败，并提示改用哪个 helper）—— 已用"临时插入违规代码→用例确实红→删除后转绿"验证守卫真的会响。行为用例只能覆盖被点名的路由，源码扫描能覆盖整个类。

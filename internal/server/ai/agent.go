@@ -409,6 +409,16 @@ func (m *AgentManager) Release() {
 	}
 }
 
+// agentEventBuffer 事件通道容量（**唯一出处**，NewRun 与 ResetForResume 都用它）。
+//
+// 为什么是 8192：SSE 流式 thinking/message 事件密集，通道过小会让 final/done 这类
+// **终态事件**被丢弃，前端表现为 network error（收不到最终答复）。
+//
+// ⚠️ 曾经的坑：`ResetForResume`（审批/长任务挂起后恢复、续接指令）单独写死 256，
+// 于是"恢复过的 run"事件缓冲只有新 run 的 1/32 —— 恢复后一旦 thinking 密集，最先被丢的
+// 恰恰是 final/done。同一个坑的另一种形态，只是更难复现，所以收敛成一个常量。
+const agentEventBuffer = 8192
+
 // NewRun 创建一个 run（不启动；由调用方 Start）。
 func (m *AgentManager) NewRun(history []Message, maxTurns int) *AgentRun {
 	run := &AgentRun{
@@ -419,10 +429,8 @@ func (m *AgentManager) NewRun(history []Message, maxTurns int) *AgentRun {
 		UpdatedAt: time.Now(),
 		MaxTurns:  maxTurns,
 		TraceID:   newTraceID(),
-		// 事件通道缓冲放大到 8192：SSE 流式 thinking/message 事件密集，
-		// 通道过小会导致 final/done 等终态事件被丢弃，前端收不到最终答复（表现 network error）。
-		events: make(chan AgentEvent, 8192),
-		Traces: []ToolTrace{},
+		events:    make(chan AgentEvent, agentEventBuffer),
+		Traces:    []ToolTrace{},
 	}
 	m.mu.Lock()
 	m.runs[run.ID] = run
@@ -706,7 +714,7 @@ func (r *AgentRun) ResetForResume() {
 	r.cancel = nil
 	r.StopReason = ""
 	r.TraceID = newTraceID()
-	r.events = make(chan AgentEvent, 256)
+	r.events = make(chan AgentEvent, agentEventBuffer)
 	r.once = sync.Once{}
 	r.tokenUsage = RunTokenUsage{}
 	r.PromptTokens = 0

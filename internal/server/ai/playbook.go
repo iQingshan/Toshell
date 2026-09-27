@@ -16,20 +16,20 @@ import (
 
 // Playbook 一个可执行的攻击/侦察剧本。
 type Playbook struct {
-	ID       string        `json:"id"`
-	Name     string        `json:"name"`
-	Desc     string        `json:"desc"`
+	ID       string         `json:"id"`
+	Name     string         `json:"name"`
+	Desc     string         `json:"desc"`
 	Steps    []PlaybookStep `json:"steps"`
-	Fallback string        `json:"fallback"` // step 失败动作：continue / abort / report
+	Fallback string         `json:"fallback"` // step 失败动作：continue / abort / report
 }
 
 // PlaybookStep 剧本中的一步。
 type PlaybookStep struct {
 	Name     string            `json:"name"`
-	Tool     string            `json:"tool"`     // 工具名（file_list/process_list/screenshot/credentials/task_submit...）
-	Args     map[string]string `json:"args"`     // 预填参数（session_id 运行时注入，${session_id} 占位）
-	Wait     bool              `json:"wait"`     // 是否 task_wait 等结果
-	Timeout  int               `json:"timeout"`  // task_wait 超时（秒），默认 60
+	Tool     string            `json:"tool"`      // 工具名（file_list/process_list/screenshot/credentials/task_submit...）
+	Args     map[string]string `json:"args"`      // 预填参数（session_id 运行时注入，${session_id} 占位）
+	Wait     bool              `json:"wait"`      // 是否 task_wait 等结果
+	Timeout  int               `json:"timeout"`   // task_wait 超时（秒），默认 60
 	ExpectOK bool              `json:"expect_ok"` // 结果应为成功（exit 0）
 }
 
