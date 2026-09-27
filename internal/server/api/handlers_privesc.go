@@ -29,8 +29,7 @@ func (s *Server) privescUACHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Session not found"}`, http.StatusNotFound)
 		return
 	}
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	if !s.requireListener(w) {
 		return
 	}
 	if sess.OS != "windows" {

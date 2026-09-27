@@ -2,6 +2,8 @@ package api
 
 import (
 	"net/http"
+
+	"github.com/gorilla/mux"
 )
 
 // sessionGuard 会话存在性预检（v1.4.0 工程质量修复）。
@@ -32,6 +34,26 @@ func (s *Server) requireSession(w http.ResponseWriter, id string) bool {
 		return false
 	}
 	return true
+}
+
+// requireSessionFromPath 从 URL 路径参数（mux 变量名固定为 `id`）取会话 id 并做存在性预检。
+//
+// 存在意义：本项目的会话级路由**全部**是 `/sessions/{id}/...` 形态，散落的
+// `if _, err := s.sessionMgr.Get(id); err != nil { 500 }` 很容易写漏或写错状态码。
+// 统一走这个薄封装，新 handler 只要一行即可获得正确的 404 语义。
+func (s *Server) requireSessionFromPath(w http.ResponseWriter, r *http.Request) bool {
+	return s.requireSession(w, sessionIDFromPath(r))
+}
+
+// sessionIDFromPath 取路径里的会话 id（无 mux 变量时返回空串）。
+func sessionIDFromPath(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if vars := mux.Vars(r); vars != nil {
+		return vars["id"]
+	}
+	return ""
 }
 
 // requireListener listener 未就绪 → 503（此前是 500：这是"暂时不可用"，不是"内部错误"）。

