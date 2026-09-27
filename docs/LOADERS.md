@@ -1,7 +1,7 @@
 # 加载器链（落地链）使用说明
 
 > 本文档面向**已获授权的红队测试**：仅在你拥有书面授权的目标上使用。
-> 适用版本：**v1.3.5（FINAL，版本号不再变更）**。
+> 适用版本：**v1.4.0（开发中；上一发布版 v1.3.5）**。
 > 生成逻辑在 `internal/server/api/oneliner.go`（`loaderChainVariants` / `LoaderAdvice`），
 > 建议生成入口是「生成载荷」页返回的 `one_liners` 数组（每条变体带 `note` 字段）。
 >

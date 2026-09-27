@@ -1,12 +1,12 @@
 # =====================================================================
-#  ToShell v1.3.5 local packaging: mirrors .github/workflows/release.yml
+#  ToShell v1.4.0 local packaging: mirrors .github/workflows/release.yml
 #  Output: release/release-zips/toshell-server-<os>-<arch>.zip (6 targets)
 # =====================================================================
 $ErrorActionPreference = 'Stop'
 $base = Split-Path -Parent $PSScriptRoot
 Set-Location $base
 
-$version = '1.3.5'
+$version = '1.4.0'
 $commit = (git rev-parse --short HEAD)
 $buildTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ldflags = "-s -w -X main.version=$version -X main.commit=$commit -X main.buildTime=$buildTime"

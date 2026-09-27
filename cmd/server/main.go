@@ -25,6 +25,7 @@ import (
 	"toshell/internal/server/database"
 	"toshell/internal/server/listener"
 	"toshell/internal/server/logging"
+	mcpsrv "toshell/internal/server/mcp"
 	"toshell/internal/server/plugin"
 	"toshell/internal/server/session"
 	"toshell/internal/server/task"
@@ -33,7 +34,7 @@ import (
 
 var (
 	// version/commit/buildTime 由构建时 -ldflags 注入（默认 dev 构建）。
-	version   = "1.3.5"
+	version   = "1.4.0"
 	commit    = "dev"
 	buildTime = "unknown"
 )
@@ -63,6 +64,10 @@ type Server struct {
 	httpListener *listener.HTTPListener
 	apiServer    *api.Server
 	logger       *logging.Logger
+	// mcpServer 对外 MCP（Model Context Protocol）服务端；仅当 config.MCP.Enabled 时非 nil。
+	// 它自带监听器（默认 127.0.0.1:18082）与鉴权/限流/审计，执行能力通过 Executor 注入，
+	// 因此本包不需要给它加路由。
+	mcpServer *mcpsrv.Server
 }
 
 func main() {
@@ -342,6 +347,36 @@ func NewServer(cfgPath string) (*Server, error) {
 		logging.Info("server", "检测到配置文件变化，已自动热重载 (mimicry=%s)", cfg.Listener.MimicryProfile)
 	})
 
+	// ── 对外 MCP 服务端（默认关闭；开启时只绑回环 + 必须有 token + 默认只放行只读工具）──
+	// 说明：这里**只构造**，真正监听在 Start() 里启动。构造失败不阻断服务端启动
+	// （MCP 是可选能力），但会把原因写进日志，避免"配了却没生效"这种最难查的情况。
+	var mcpServer *mcpsrv.Server
+	if cfg.MCP.Enabled {
+		mcpCfg := mcpsrv.Config{
+			Enabled:           true,
+			Bind:              cfg.MCP.Bind,
+			Token:             cfg.MCP.Token,
+			AllowedTools:      cfg.MCP.AllowedTools,
+			AllowedOrigins:    cfg.MCP.AllowedOrigins,
+			AllowedCIDRs:      cfg.MCP.AllowedCIDRs,
+			MaxRPM:            cfg.MCP.MaxRPM,
+			MaxConcurrent:     cfg.MCP.MaxConcurrent,
+			MaxPendingHandles: cfg.MCP.MaxPendingHandles,
+			InlineLimit:       cfg.MCP.InlineLimit,
+			ResultDir:         cfg.MCP.ResultDir,
+			ResultTTL:         cfg.MCP.ResultTTL,
+			AuditPath:         cfg.MCP.AuditPath,
+			FailClosed:        cfg.MCP.FailClosed,
+		}
+		if s, err := mcpsrv.New(mcpCfg, apiServer); err != nil {
+			logging.Error("mcp", "MCP 服务端初始化失败，本次不启动 MCP：%v", err)
+		} else {
+			mcpServer = s
+			logging.Info("mcp", "MCP 服务端已就绪：bind=%s，放行工具 %d 个（危险级默认不放行）",
+				cfg.MCP.Bind, len(s.AllowedTools()))
+		}
+	}
+
 	return &Server{
 		config:       cfg,
 		db:           db,
@@ -351,6 +386,7 @@ func NewServer(cfgPath string) (*Server, error) {
 		httpListener: httpListener,
 		apiServer:    apiServer,
 		logger:       logger,
+		mcpServer:    mcpServer,
 	}, nil
 }
 
@@ -386,6 +422,17 @@ func (s *Server) Start() error {
 		} else {
 			s.apiServer.RegisterRuntimeListener(s.config.Listener.ID, s.httpListener, s.httpListener.Stop)
 		}
+	}
+
+	// ── 对外 MCP 服务端（可选）──
+	// 独立监听器 + 独立 token，不与管理 API 共用鉴权；失败只记日志，不影响 C2 主功能。
+	if s.mcpServer != nil {
+		mcpSrv := s.mcpServer
+		go func() {
+			if err := mcpSrv.Start(context.Background()); err != nil {
+				logging.Error("mcp", "MCP 服务端退出：%v", err)
+			}
+		}()
 	}
 
 	// 自动恢复 Web 界面创建且标记为 running 的监听器：
@@ -457,6 +504,13 @@ func (s *Server) Shutdown() error {
 	if s.httpListener != nil {
 		logging.Info("server", "Shutting down HTTP listener...")
 		s.httpListener.Stop()
+	}
+
+	if s.mcpServer != nil {
+		logging.Info("server", "Shutting down MCP server...")
+		if err := s.mcpServer.Close(); err != nil {
+			logging.Error("server", "Error stopping MCP server: %v", err)
+		}
 	}
 
 	logging.Info("server", "Shutting down API server...")

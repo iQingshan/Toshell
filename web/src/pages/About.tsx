@@ -260,7 +260,7 @@ export function About() {
           <Shell size={56} />
           <h1>ToShell</h1>
           <div className="about-version-row">
-            <Badge tone="accent">v1.3.5</Badge>
+            <Badge tone="accent">v1.4.0</Badge>
             <Badge tone="info">MIT License</Badge>
             <Badge>自托管部署</Badge>
           </div>
@@ -295,7 +295,7 @@ export function About() {
               k: '版本',
               v: (
                 <>
-                  v1.3.5 <Badge tone="accent" style={{ marginLeft: 4 }}>当前</Badge>
+                  v1.4.0 <Badge tone="accent" style={{ marginLeft: 4 }}>当前</Badge>
                 </>
               ),
             },

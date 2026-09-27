@@ -19,6 +19,7 @@ import (
 
 	"toshell/internal/server/config"
 	"toshell/internal/server/logging"
+	"toshell/internal/server/mcp"
 )
 
 // consentSeq 审批令牌序号（atomic 保证唯一）。
@@ -35,9 +36,9 @@ type Message struct {
 }
 
 type ToolCall struct {
-	ID       string         `json:"id"`
-	Type     string         `json:"type"`
-	Function ToolCallFunc   `json:"function"`
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function ToolCallFunc `json:"function"`
 }
 
 type ToolCallFunc struct {
@@ -47,8 +48,8 @@ type ToolCallFunc struct {
 
 // ToolSchema OpenAI function calling 工具描述。
 type ToolSchema struct {
-	Type     string              `json:"type"`
-	Function ToolSchemaFunction  `json:"function"`
+	Type     string             `json:"type"`
+	Function ToolSchemaFunction `json:"function"`
 }
 
 type ToolSchemaFunction struct {
@@ -937,8 +938,8 @@ func (c *Copilot) completeStreamOpts(ctx context.Context, messages []Message, op
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					ReasoningContent string          `json:"reasoning_content"`
-					Content          string          `json:"content"`
+					ReasoningContent string           `json:"reasoning_content"`
+					Content          string           `json:"content"`
 					ToolCalls        []streamToolCall `json:"tool_calls"`
 				} `json:"delta"`
 			} `json:"choices"`
@@ -991,8 +992,8 @@ func (c *Copilot) completeStreamOpts(ctx context.Context, messages []Message, op
 			continue
 		}
 		ag.ToolCalls = append(ag.ToolCalls, ToolCall{
-			ID:   t.id,
-			Type: "function",
+			ID:       t.id,
+			Type:     "function",
 			Function: ToolCallFunc{Name: t.name, Arguments: t.args},
 		})
 	}
@@ -1411,8 +1412,6 @@ func (c *Copilot) waitForConsent(ctx context.Context, run *AgentRun, tc ToolCall
 	run.emit(AgentEventConsent, req, "")
 }
 
-
-
 // ToolTrace 一次工具调用的执行轨迹（前端展示）。
 type ToolTrace struct {
 	Name   string            `json:"name"`
@@ -1421,67 +1420,46 @@ type ToolTrace struct {
 	Error  string            `json:"error,omitempty"`
 }
 
-// toolSchemas 将 MCP 工具清单映射为 OpenAI function calling schema。
-// 注意：agent 工具面刻意**不暴露 task_submit/task_result/task_wait/run_command**——
-// 所有命令/读类工具都已原子化（一次调用直接返回最终结果），保留 task_wait 只会诱导
-// 模型猜测 task_id 导致 task not found 死循环。
+// agentToolNames 是**暴露给内置 Agent 的工具子集**（有意为之，不是全量）：
+// 刻意不含 `task_submit`/`task_result`/`task_wait`/`run_command` —— 命令与读取类工具都已
+// "原子化"（一次调用直接返回最终结果），保留 `task_wait` 只会诱导模型去猜 `task_id`，
+// 进而陷入 task not found 的死循环。
+//
+// ⚠️ 这里只保留**名字清单**；每个工具的 description 与参数 schema 一律从工具注册表
+// （`internal/server/mcp`，全项目唯一元数据来源）取，避免再维护第二份 schema。
+var agentToolNames = []string{
+	"intel_query", "session_context", "session_list", "exec",
+	"file_list", "file_download", "process_list", "process_kill",
+	"screenshot", "credentials", "session_kill",
+	"delegate", "playbook_status", "attack_suggest",
+	"plugin_list", "plugin_load",
+	"tunnel_start", "tunnel_list", "tunnel_stop",
+	"web_search", "remote_download", "tool_download_status", "tool_list",
+	"plugin_upload", "fileless_exec",
+	"user_info", "system_info", "service_list", "check_av",
+	"net_info", "net_connections", "env_vars", "scheduled_tasks",
+}
+
+// toolSchemas 将工具注册表映射为 OpenAI function calling schema。
+//
+// v1.4.0 起 schema 由注册表生成（此前这里是**第三份**硬编码元数据，与 REST 清单、
+// 执行分支的参数名长期不一致）。若某个名字不在注册表里，这里会**打日志并跳过**，
+// 同时 `copilot_test.go` 的用例会直接失败——不允许"静默少给模型一个工具"。
 func toolSchemas() []ToolSchema {
-	defs := []struct {
-		name, desc string
-		params     []string // 参数名（全部字符串）
-	}{
-		{"intel_query", "查询跨会话情报库（IP/账号/哈希/共享/域名）", []string{"kind"}},
-		{"session_context", "获取指定会话的上下文摘要（OS/权限/监听器/最近任务）", []string{"session_id"}},
-		{"session_list", "列出所有活跃会话（ID/主机名/OS/监听器/状态）", nil},
-		{"exec", "【命令执行首选】在会话原子执行命令并**直接返回最终结果**（服务端自动等待，无需也不存在 task_wait）。参数: session_id, command 或 kind(user_info/system_info/check_av/service_list/net_info/net_connections/env_vars/scheduled_tasks/process_list 等内置命令), timeout_sec(可选，默认120)", []string{"session_id", "command", "kind", "timeout_sec"}},
-		{"file_list", "列出会话上的目录内容（原子执行，直接返回结果）", []string{"session_id", "path"}},
-		{"file_download", "从会话下载文件到服务器（原子执行，直接返回结果）", []string{"session_id", "path"}},
-		{"process_list", "列出会话上的进程（原子执行，直接返回结果）", []string{"session_id"}},
-		{"process_kill", "结束会话上的进程（原子执行，直接返回结果）", []string{"session_id", "pid"}},
-		{"screenshot", "对会话截屏（原子执行，直接返回结果，含 base64 图片）", []string{"session_id"}},
-		{"credentials", "收集会话上的凭据（all/browser/wifi/rdp/lsa，原子执行直接返回）", []string{"session_id", "action"}},
-		{"session_kill", "终止会话（植入端退出）", []string{"session_id"}},
-		{"delegate", "子代理：在指定会话执行剧本（确定性多步链路），支持多会话并行。参数: playbook_id + session_id 或 session_ids", []string{"playbook_id", "session_id", "session_ids"}},
-		{"playbook_status", "查询剧本运行进度（delegate 返回 run_id 后查询）", []string{"run_id"}},
-		{"attack_suggest", "基于会话上下文给出下一步操作建议（提权/注入/凭据等）", []string{"session_id"}},
-		{"plugin_list", "列出已上传的插件（ID/名称/类型 exe/dll/shellcode/bof）", nil},
-		{"plugin_load", "把插件加载到指定会话执行（原子执行直接返回结果）。参数: session_id, plugin_id, args(可选)", []string{"session_id", "plugin_id", "args"}},
-		{"tunnel_start", "为指定会话启动 SOCKS5 隧道代理（本地端口转发，代理横向访问内网）。参数: session_id, local_port(可选默认1080)", []string{"session_id", "local_port"}},
-		{"tunnel_list", "列出当前所有隧道代理（会话 ID/本地端口/隧道数）", nil},
-		{"tunnel_stop", "停止指定会话的隧道代理。参数: session_id", []string{"session_id"}},
-		{"web_search", "联网搜索：查询情报/工具/漏洞/用法。参数: query", []string{"query"}},
-		{"remote_download", "从 URL 下载工具到服务端本地 data/tools/ 持久保存（可重复使用）。异步：立即返回 dl_id，用 tool_download_status 查询进度。参数: url", []string{"url"}},
-		{"tool_download_status", "查询一次远程下载的进度/结果（remote_download 返回 dl_id 后调用）。参数: dl_id", []string{"dl_id"}},
-		{"tool_list", "列出服务端 data/tools/ 已下载的可复用工具", nil},
-		{"plugin_upload", "把 data/tools/ 下的工具上传为插件（BOF/DLL/EXE/shellcode），之后用 plugin_load 加载到会话。参数: source, name(可选), description(可选)", []string{"source", "name", "description"}},
-		{"fileless_exec", "把 data/tools/ 下的工具按 kind(bof/shellcode/dll/exe) 内存加载执行（不落盘，原子执行直接返回结果）。参数: session_id, source, kind(可选), args(可选)", []string{"session_id", "source", "kind", "args"}},
-		{"user_info", "获取会话当前用户/权限/本机用户（原子执行，直接返回结果）", []string{"session_id"}},
-		{"system_info", "获取会话系统信息（systeminfo，原子执行直接返回）", []string{"session_id"}},
-		{"service_list", "枚举会话上的 Windows 服务（原子执行直接返回）", []string{"session_id"}},
-		{"check_av", "检测会话上的杀软/EDR 相关进程（原子执行直接返回）", []string{"session_id"}},
-		{"net_info", "获取会话网络配置（ipconfig /all，原子执行直接返回）", []string{"session_id"}},
-		{"net_connections", "列出会话上的网络连接（netstat -ano，原子执行直接返回）", []string{"session_id"}},
-		{"env_vars", "获取会话环境变量（原子执行直接返回）", []string{"session_id"}},
-		{"scheduled_tasks", "列出会话上的计划任务（原子执行直接返回）", []string{"session_id"}},
-	}
-	schemas := make([]ToolSchema, 0, len(defs))
-	for _, d := range defs {
-		props := map[string]interface{}{}
-		required := []string{}
-		for _, p := range d.params {
-			props[p] = map[string]interface{}{"type": "string", "description": p}
-			required = append(required, p)
+	reg := mcp.Default()
+	schemas := make([]ToolSchema, 0, len(agentToolNames))
+	for _, name := range agentToolNames {
+		d, ok := reg.Get(name)
+		if !ok || d.Deprecated {
+			logging.Warn("ai", "tool %q 未在工具注册表（internal/server/mcp）中登记，Agent 将看不到它", name)
+			continue
 		}
 		schemas = append(schemas, ToolSchema{
 			Type: "function",
 			Function: ToolSchemaFunction{
-				Name:        d.name,
-				Description: d.desc,
-				Parameters: map[string]interface{}{
-					"type":       "object",
-					"properties": props,
-					"required":   required,
-				},
+				Name:        d.Name,
+				Description: d.Description,
+				Parameters:  d.JSONSchema(),
 			},
 		})
 	}
@@ -1496,18 +1474,29 @@ func truncate(s string, n int) string {
 }
 
 // isRiskyTool 判定一个工具是否影响目标会话（需要在「正常」权限模式下获用户同意）。
-// 读取/查询类（session_list/session_context/intel_query/attack_suggest/plugin_list/tunnel_list）
-// 与任务流（delegate/playbook_status）除外。
+//
+// ⚠️ v1.4.0 修正了这里的**安全默认值**。旧实现是一份"危险工具允许列表"+ `default: false`，
+// 有两个后果：
+//  1. **fail-open**：以后新增任何工具，只要忘了登记，默认就是"免审批"；
+//  2. **`delegate` 越权**：它不在旧列表里，但 `delegate` 会跑含 `task_submit`/`credentials`
+//     等目标侧动作的剧本（`handlers_mcp.go` 的 delegate → `playbook.go`），于是
+//     "需用户同意"模式可以被它整个绕过。
+//
+// 现在改成**白名单式**：只有明确"只读、不接触被控主机"的工具免审批，其余一律需要同意；
+// 而且优先使用工具注册表的风险分级（`internal/server/mcp`）——那是全项目唯一的工具元数据来源，
+// 避免这里再维护第二份清单。
 func isRiskyTool(name string) bool {
+	if reg := mcp.Default(); reg.IsRegistered(name) {
+		// 注册表里标了 LevelRead 的才免审批；confirm/danger 都要用户同意。
+		return reg.LevelOf(name) != mcp.LevelRead
+	}
+	// 注册表尚未覆盖该名字（例如旧客户端传来的历史工具名）：退回保守白名单。
 	switch name {
-	case "task_submit", "task_kill", "run_command", "exec",
-		"user_info", "system_info",
-		"service_list", "check_av", "net_info", "net_connections", "env_vars", "scheduled_tasks",
-		"file_list", "file_download", "process_list", "process_kill",
-		"screenshot", "credentials", "session_kill", "plugin_load", "fileless_exec",
-		"tunnel_start", "tunnel_stop":
-		return true
-	default:
+	case "session_list", "session_context", "intel_query", "attack_suggest",
+		"plugin_list", "tunnel_list", "task_result", "task_wait", "result_read":
 		return false
+	default:
+		// 未知工具一律按危险处理（fail-closed）。
+		return true
 	}
 }

@@ -96,3 +96,8 @@ release/USAGE.md
 
 # 构建临时文件（Go 在 Windows 上覆盖 exe 时的残留）
 *.exe~
+
+# 本地迭代方案文档（内容已合并进 ROADMAP.md，不入库）
+docs/PLAN-NEXT-ROUND.md
+docs/plan/
+agent优化方案.md

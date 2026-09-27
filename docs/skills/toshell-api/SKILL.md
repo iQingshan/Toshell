@@ -5,7 +5,7 @@ description: 通过 REST API 远程驱动 ToShell C2 团队服务器 —— 认�
 
 # ToShell C2 — REST API 调用参考（AI Skill）
 
-**适用版本：v1.3.5（FINAL，勿写其它版本号）。** 端点与字段取自源码：路由见 `internal/server/api/api.go` 的 `setupRoutes`，响应形状见 `handlers_*.go`/`json_response.go`，配置键见 `configs/server.yaml.example`。
+**适用版本：v1.4.0（开发中；上一发布版 v1.3.5）。** 端点与字段取自源码：路由见 `internal/server/api/api.go` 的 `setupRoutes`，响应形状见 `handlers_*.go`/`json_response.go`，配置键见 `configs/server.yaml.example`。
 
 > ⚠️ **授权纪律**：只操作**用户明确授权**的服务器与目标会话；命令执行、凭据收集、注入、内存/驱动加载等影响会话的操作先确认用户意图，`ai.consent_mode=normal` 时还需走审批端点。
 
@@ -46,7 +46,7 @@ curl -s -X POST "$BASE/mcp/tools/exec" -H "X-API-Key: $KEY" -H 'Content-Type: ap
   -d '{"session_id":"<SID>","command":"whoami /groups","timeout_sec":"60"}'
 ```
 
-`GET /mcp/tools` 返回 **37 个工具**（源码 `mcpToolList`）：原子执行/侦察 `exec`、`run_command`、`user_info`、`system_info`、`service_list`、`check_av`、`net_info`、`net_connections`、`env_vars`、`scheduled_tasks`；异步编排 `task_submit`（返回 task_id）、`task_result`（当前状态）、`task_wait`（轮询至终态，1–300s）——**三者真实存在**；会话 `session_list`、`session_context`、`session_kill`、`attack_suggest`；剧本 `delegate`（`playbook_id`+`session_id` 或逗号分隔 `session_ids`）、`playbook_status`；文件/进程/凭据 `file_list`、`file_download`、`process_list`、`process_kill`、`screenshot`、`credentials`；插件/隧道 `plugin_list`、`plugin_load`、`plugin_upload`、`tunnel_start`、`tunnel_list`、`tunnel_stop`；内存加载/工具管理 `fileless_exec`、`remote_download`、`tool_download_status`、`tool_list`；情报 `intel_query`、`web_search`。
+`GET /mcp/tools` 返回 **38 个工具**（v1.4.0 起元数据唯一来源是 `internal/server/mcp/registry_tools.go` 的工具注册表，REST 清单、内置 AI 的 function schema 与对外 MCP 的 `tools/list` 三处同源；每条带 `level`=read/confirm/danger 与完整 JSON Schema）：原子执行/侦察 `exec`、`run_command`、`user_info`、`system_info`、`service_list`、`check_av`、`net_info`、`net_connections`、`env_vars`、`scheduled_tasks`；异步编排 `task_submit`（返回 task_id）、`task_result`（当前状态）、`task_wait`（轮询至终态，1–300s）——**三者真实存在**；会话 `session_list`、`session_context`、`session_kill`、`attack_suggest`；剧本 `delegate`（`playbook_id`+`session_id` 或逗号分隔 `session_ids`）、`playbook_status`；文件/进程/凭据 `file_list`、`file_download`、`process_list`、`process_kill`、`screenshot`、`credentials`；插件/隧道 `plugin_list`、`plugin_load`、`plugin_upload`、`tunnel_start`、`tunnel_list`、`tunnel_stop`；内存加载/工具管理 `fileless_exec`、`remote_download`、`tool_download_status`、`tool_list`；情报 `intel_query`、`web_search`；大结果回读元工具 `result_read`（`handle` + `offset`/`limit`，用于 `meta.truncated=true` 时取回原文）。
 
 原子读类结果：`{session_id,task_id,task_type,command,status:"completed|failed|timeout",output,exit_code,error}`；`timeout:true` = 等待超时但任务仍在跑。会话不存在或非 `active` 时**立即**报错，不空等满超时。
 

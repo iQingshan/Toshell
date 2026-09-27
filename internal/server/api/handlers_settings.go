@@ -12,6 +12,7 @@ import (
 	"toshell/internal/server/auth"
 	"toshell/internal/server/config"
 	"toshell/internal/server/logging"
+	"toshell/internal/server/mcp"
 	"toshell/internal/server/mimicry"
 	"toshell/internal/server/webhook"
 )
@@ -26,6 +27,7 @@ type SettingsResponse struct {
 	Security      map[string]interface{} `json:"security"`
 	AI            map[string]interface{} `json:"ai"`
 	Web           map[string]interface{} `json:"web"`
+	MCP           map[string]interface{} `json:"mcp"`
 }
 
 // SettingsUpdate 设置页 PUT 请求体（均为可选，缺省不修改）。
@@ -38,6 +40,28 @@ type SettingsUpdate struct {
 	Security      *settingsSecurityUpdate `json:"security"`
 	AI            *settingsAIUpdate       `json:"ai"`
 	Web           *settingsWebUpdate      `json:"web"`
+	MCP           *settingsMCPUpdate      `json:"mcp"`
+}
+
+// settingsMCPUpdate 对外 MCP 服务端段（v1.4.0）。
+//
+// 约定：token **只写不回显** —— 传空串＝保持不变，传 "clear" ＝清空，其它值＝覆盖。
+// 全部字段改完都需要**重启服务端**才生效（MCP 监听器在启动时创建，不做动态重绑）。
+type settingsMCPUpdate struct {
+	Enabled           *bool     `json:"enabled"`
+	Bind              *string   `json:"bind"`
+	Token             *string   `json:"token"`
+	AllowedTools      *[]string `json:"allowed_tools"`
+	AllowedOrigins    *[]string `json:"allowed_origins"`
+	AllowedCIDRs      *[]string `json:"allow_cidrs"`
+	MaxRPM            *int      `json:"max_rpm"`
+	MaxConcurrent     *int      `json:"max_concurrent"`
+	MaxPendingHandles *int      `json:"max_pending_handles"`
+	InlineLimit       *int      `json:"inline_limit"`
+	ResultDir         *string   `json:"result_dir"`
+	ResultTTL         *string   `json:"result_ttl"`
+	AuditPath         *string   `json:"audit_path"`
+	FailClosed        *bool     `json:"fail_closed"`
 }
 
 // settingsGeneralUpdate 通用/服务段（此前只读，v1.3.5 起可写；改端口/主机需重启生效）。
@@ -229,8 +253,48 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"stealth_key_set": strings.TrimSpace(cfg.Web.StealthKey) != "",
 			"stealth_entry":   "/__gate?k=<密钥>",
 		},
+		MCP: map[string]interface{}{
+			"enabled": cfg.MCP.Enabled,
+			"bind":    cfg.MCP.Bind,
+			// token 只回传"是否已设置"，绝不回传明文
+			"token_set":           strings.TrimSpace(cfg.MCP.Token) != "",
+			"allowed_tools":       cfg.MCP.AllowedTools,
+			"allowed_origins":     cfg.MCP.AllowedOrigins,
+			"allow_cidrs":         cfg.MCP.AllowedCIDRs,
+			"max_rpm":             cfg.MCP.MaxRPM,
+			"max_concurrent":      cfg.MCP.MaxConcurrent,
+			"max_pending_handles": cfg.MCP.MaxPendingHandles,
+			"inline_limit":        cfg.MCP.InlineLimit,
+			"result_dir":          cfg.MCP.ResultDir,
+			"result_ttl":          cfg.MCP.ResultTTL,
+			"audit_path":          cfg.MCP.AuditPath,
+			"fail_closed":         cfg.MCP.FailClosed,
+			// 供前端展示：白名单留空时实际生效的是"只读工具"集合，这里直接给出
+			"effective_allowed": effectiveMCPAllowedTools(cfg.MCP.AllowedTools),
+			"read_only_tools":   mcp.Default().DefaultAllowed(),
+			"tool_levels": map[string]int{
+				"read":    len(mcp.Default().ByLevel(mcp.LevelRead)),
+				"confirm": len(mcp.Default().ByLevel(mcp.LevelConfirm)),
+				"danger":  len(mcp.Default().ByLevel(mcp.LevelDanger)),
+			},
+		},
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// effectiveMCPAllowedTools 计算"实际生效的 MCP 工具白名单"：
+// 配置里留空时取注册表的只读集合（默认最小权限：只放行不接触被控主机的工具）。
+func effectiveMCPAllowedTools(configured []string) []string {
+	out := make([]string, 0, len(configured))
+	for _, raw := range configured {
+		if n := strings.TrimSpace(raw); n != "" {
+			out = append(out, n)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return mcp.Default().DefaultAllowed()
 }
 
 // maskSecret 脱敏展示密钥类配置（保留首尾各 4 字符，其余掩码）。
@@ -645,6 +709,148 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if bd.SignFailClosed != nil {
 			updates["builder.sign_fail_closed"] = *bd.SignFailClosed
+		}
+	}
+
+	// ── 对外 MCP 服务端段（v1.4.0；全部字段改完都需重启，监听器不做动态重绑）──
+	if mu := upd.MCP; mu != nil {
+		if mu.Enabled != nil {
+			updates["mcp.enabled"] = *mu.Enabled
+			hot = false
+		}
+		if mu.Bind != nil {
+			bind := strings.TrimSpace(*mu.Bind)
+			if bind == "" {
+				http.Error(w, `{"error":"mcp.bind 不能为空（示例: 127.0.0.1:18082）"}`, http.StatusBadRequest)
+				return
+			}
+			if _, _, err := net.SplitHostPort(bind); err != nil {
+				http.Error(w, `{"error":"mcp.bind 需为 host:port（示例: 127.0.0.1:18082）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["mcp.bind"] = bind
+			hot = false
+		}
+		if mu.Token != nil {
+			// 与 pfx 密码同一约定：空串=保持、"clear"=清空、其它=覆盖。
+			// 开启 MCP 但没有 token 时服务端会拒绝启动（fail-closed），这里提前拦一下更友好。
+			tk := *mu.Token
+			switch {
+			case tk == "clear":
+				updates["mcp.token"] = ""
+				if mu.Enabled == nil {
+					if cur := config.Get(); cur != nil && cur.MCP.Enabled {
+						http.Error(w, `{"error":"MCP 正在启用，清空 token 后服务端将拒绝启动；请先关闭 mcp.enabled"}`, http.StatusBadRequest)
+						return
+					}
+				}
+			case strings.TrimSpace(tk) != "" && !strings.Contains(tk, "****"):
+				updates["mcp.token"] = strings.TrimSpace(tk)
+			}
+			hot = false
+		}
+		if mu.AllowedTools != nil {
+			// 逐个校验工具名：拼错的名字会让"以为放行了"变成"其实没放行"，直接拦掉。
+			reg := mcp.Default()
+			names := make([]string, 0, len(*mu.AllowedTools))
+			for _, raw := range *mu.AllowedTools {
+				n := strings.TrimSpace(raw)
+				if n == "" {
+					continue
+				}
+				if !reg.IsRegistered(n) {
+					http.Error(w, fmt.Sprintf(`{"error":"allowed_tools 含未注册的工具 %q（可用 GET /api/v1/mcp/tools 查看）"}`, n), http.StatusBadRequest)
+					return
+				}
+				if reg.LevelOf(n) == mcp.LevelDanger {
+					logging.Warn("settings", "MCP 白名单里加入了危险级工具 %s：它会绕过分级审批，请确认这是有意的", n)
+				}
+				names = append(names, n)
+			}
+			updates["mcp.allowed_tools"] = names
+			hot = false
+		}
+		if mu.AllowedOrigins != nil {
+			origins := make([]string, 0, len(*mu.AllowedOrigins))
+			for _, raw := range *mu.AllowedOrigins {
+				if o := strings.TrimSpace(raw); o != "" {
+					origins = append(origins, o)
+				}
+			}
+			updates["mcp.allowed_origins"] = origins
+			hot = false
+		}
+		if mu.AllowedCIDRs != nil {
+			// 逐个校验 CIDR/IP 是否可解析：写错了会导致"以为限制了来源、其实一个都进不来"。
+			cidrs := make([]string, 0, len(*mu.AllowedCIDRs))
+			for _, raw := range *mu.AllowedCIDRs {
+				c := strings.TrimSpace(raw)
+				if c == "" {
+					continue
+				}
+				if _, _, err := net.ParseCIDR(c); err != nil {
+					if net.ParseIP(c) == nil {
+						http.Error(w, fmt.Sprintf(`{"error":"allow_cidrs 里的 %q 既不是 CIDR 也不是 IP"}`, c), http.StatusBadRequest)
+						return
+					}
+				}
+				cidrs = append(cidrs, c)
+			}
+			updates["mcp.allow_cidrs"] = cidrs
+			hot = false
+		}
+		if mu.MaxRPM != nil {
+			if *mu.MaxRPM < 0 {
+				http.Error(w, `{"error":"mcp.max_rpm 不能为负（留 0 或负数表示用默认 60）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["mcp.max_rpm"] = *mu.MaxRPM
+			hot = false
+		}
+		if mu.MaxConcurrent != nil {
+			if *mu.MaxConcurrent <= 0 || *mu.MaxConcurrent > 64 {
+				http.Error(w, `{"error":"mcp.max_concurrent 需在 1~64 之间"}`, http.StatusBadRequest)
+				return
+			}
+			updates["mcp.max_concurrent"] = *mu.MaxConcurrent
+			hot = false
+		}
+		if mu.MaxPendingHandles != nil {
+			if *mu.MaxPendingHandles <= 0 || *mu.MaxPendingHandles > 4096 {
+				http.Error(w, `{"error":"mcp.max_pending_handles 需在 1~4096 之间"}`, http.StatusBadRequest)
+				return
+			}
+			updates["mcp.max_pending_handles"] = *mu.MaxPendingHandles
+			hot = false
+		}
+		if mu.InlineLimit != nil {
+			if *mu.InlineLimit < 512 {
+				http.Error(w, `{"error":"mcp.inline_limit 太小（建议 >= 2048）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["mcp.inline_limit"] = *mu.InlineLimit
+			hot = false
+		}
+		if mu.ResultDir != nil {
+			updates["mcp.result_dir"] = strings.TrimSpace(*mu.ResultDir)
+			hot = false
+		}
+		if mu.ResultTTL != nil {
+			d, err := time.ParseDuration(strings.TrimSpace(*mu.ResultTTL))
+			if err != nil || d <= 0 {
+				http.Error(w, `{"error":"mcp.result_ttl 非法（示例: 24h）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["mcp.result_ttl"] = d.String()
+			hot = false
+		}
+		if mu.AuditPath != nil {
+			updates["mcp.audit_path"] = strings.TrimSpace(*mu.AuditPath)
+			hot = false
+		}
+		if mu.FailClosed != nil {
+			updates["mcp.fail_closed"] = *mu.FailClosed
+			hot = false
 		}
 	}
 

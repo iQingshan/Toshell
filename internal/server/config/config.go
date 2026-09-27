@@ -24,6 +24,47 @@ type Config struct {
 	Webhook  WebhookConfig  `mapstructure:"webhook" json:"webhook"`
 	AI       AIConfig       `mapstructure:"ai" json:"ai"`
 	Web      WebConfig      `mapstructure:"web" json:"web"`
+	MCP      MCPConfig      `mapstructure:"mcp" json:"mcp"`
+}
+
+// MCPConfig 对外 MCP（Model Context Protocol）服务端配置。
+//
+// ⚠️ 安全前置：**MCP 客户端一旦连上，就等于拿到调用内部工具的能力**（与内置 AI 副驾驶同一张
+// 工具表，其中包含命令执行、注入、载荷构建等）。因此本段默认 `enabled: false`，开启后也
+// **只绑回环地址**、**必须配置 token**，且默认**只放行只读工具**（`allowed_tools` 留空即取
+// 注册表里的 LevelRead 集合）。不要把 MCP 端点暴露到公网；跨机访问请走堡垒机/SSH 端口转发。
+type MCPConfig struct {
+	// Enabled 是否启动 MCP 服务端（默认 false）。
+	Enabled bool `mapstructure:"enabled" json:"enabled"`
+	// Bind 监听地址（默认 127.0.0.1:18082；**不要**设成 0.0.0.0 除非你清楚风险）。
+	Bind string `mapstructure:"bind" json:"bind"`
+	// Token 访问令牌（必需）。走 `Authorization: Bearer <token>` 或 `X-MCP-Token`；
+	// 留空时即使 enabled=true 也会拒绝启动（fail-closed，不允许无鉴权裸奔）。
+	Token string `mapstructure:"token" json:"token"`
+	// AllowedTools 允许通过 MCP 调用的工具白名单；留空 = 仅只读工具（注册表 LevelRead）。
+	AllowedTools []string `mapstructure:"allowed_tools" json:"allowed_tools"`
+	// AllowedOrigins 允许的浏览器 Origin（留空 = 拒绝所有带 Origin 的跨域请求）。
+	AllowedOrigins []string `mapstructure:"allowed_origins" json:"allowed_origins"`
+	// AllowedCIDRs 允许访问 MCP 的来源网段（CIDR 或裸 IP；留空 = 不限制来源）。
+	// 注意：**不读 X-Forwarded-For**，避免被伪造绕过；跨机访问请配合堡垒机/端口转发。
+	AllowedCIDRs []string `mapstructure:"allow_cidrs" json:"allow_cidrs"`
+	// MaxRPM 每 token 每分钟请求上限（**<=0 取默认 60，不是"不限制"**，符合 fail-closed 口径）。
+	MaxRPM int `mapstructure:"max_rpm" json:"max_rpm"`
+	// MaxConcurrent 同时执行的工具调用上限（<=0 取默认 4）。
+	MaxConcurrent int `mapstructure:"max_concurrent" json:"max_concurrent"`
+	// MaxPendingHandles 每 token 未读完的外置结果句柄上限（<=0 取默认 32）。
+	// 客户端拿了句柄不读、又继续调用，会先撞这道闸（429），不会无上限占盘。
+	MaxPendingHandles int `mapstructure:"max_pending_handles" json:"max_pending_handles"`
+	// InlineLimit 结果内联上限（字节，默认 8192；超出则外置成句柄）。
+	InlineLimit int `mapstructure:"inline_limit" json:"inline_limit"`
+	// ResultDir 大结果外置目录（默认 ./data/mcp-results）。
+	ResultDir string `mapstructure:"result_dir" json:"result_dir"`
+	// ResultTTL 外置结果保留时长（默认 24h，支持 Go duration 字符串）。
+	ResultTTL string `mapstructure:"result_ttl" json:"result_ttl"`
+	// AuditPath 审计日志路径（JSONL，默认 ./logs/mcp-audit.jsonl）。
+	AuditPath string `mapstructure:"audit_path" json:"audit_path"`
+	// FailClosed 出错时是否直接拒绝（默认 true；关掉只会放宽，不建议）。
+	FailClosed bool `mapstructure:"fail_closed" json:"fail_closed"`
 }
 
 // BuilderConfig 构建工具链配置（C 植入端编译所需的 mingw gcc、构建后代码签名等）。
@@ -567,6 +608,22 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("ai.timeout", 60)
 	viper.SetDefault("ai.max_turns", 20)
 	viper.SetDefault("ai.agent_concurrency", 2)
+
+	// ── 对外 MCP 服务端（默认整体关闭；开启后也只绑回环 + 需 token + 只放行只读工具）──
+	viper.SetDefault("mcp.enabled", false)
+	viper.SetDefault("mcp.bind", "127.0.0.1:18082")
+	viper.SetDefault("mcp.token", "")
+	viper.SetDefault("mcp.allowed_tools", []string{})
+	viper.SetDefault("mcp.allowed_origins", []string{})
+	viper.SetDefault("mcp.allow_cidrs", []string{})
+	viper.SetDefault("mcp.max_rpm", 120)
+	viper.SetDefault("mcp.max_concurrent", 4)
+	viper.SetDefault("mcp.max_pending_handles", 32)
+	viper.SetDefault("mcp.inline_limit", 8192)
+	viper.SetDefault("mcp.result_dir", "./data/mcp-results")
+	viper.SetDefault("mcp.result_ttl", "24h")
+	viper.SetDefault("mcp.audit_path", "./logs/mcp-audit.jsonl")
+	viper.SetDefault("mcp.fail_closed", true)
 
 	viper.SetEnvPrefix("TOSHELL")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))

@@ -36,7 +36,7 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 # ─── 基础工具 ────────────────────────────────────────────────────────
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
-$Version = 'v1.3.5'
+$Version = 'v1.4.0'
 $Results = New-Object System.Collections.ArrayList   # @{Name;Level;Detail}
 function Add-Result($name, $level, $detail) {
   [void]$Results.Add([pscustomobject]@{ Name = $name; Level = $level; Detail = $detail })

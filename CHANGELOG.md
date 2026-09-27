@@ -3,6 +3,41 @@
 本项目采用 [语义化版本](https://semver.org/lang/zh-CN/)。所有值得注意的改动都会记录在本文件。
 后续优化方向（含驱动能力分档、内存执行加固、屏幕流跨平台、平台工具库与远程加载型红队能力等）见 [ROADMAP.md](ROADMAP.md)。
 
+## [v1.4.0] - 2026-09（开发中）
+
+当前版本。本版主题：**把 C2 从"能用"推到"能长期稳定用"** —— 开放标准 MCP 接口、Agent 长任务可靠性（异步状态机 + 状态落盘 + 大结果外置）、免杀分层治理（先解决"起不来"再谈"藏得深"）、植入端体积分档与内存加载、杀软对抗能力分级、新增低特征通道。
+
+> 状态：**进行中**。分阶段落地，每阶段完成即本地验证；具体条目见 [ROADMAP.md](ROADMAP.md) 的「v1.4.0 迭代计划」。
+
+### 🧩 S1 开放 MCP 服务接口 + 公共执行基础设施
+- **工具元数据单源化（消除三处硬编码）**：新增 `internal/server/mcp` 包，工具定义集中在 `registry_tools.go`（**38 个工具**：37 个原工具 + 新增回读元工具 `result_read`），每个工具带**类型化参数**与 **JSON Schema**，并按风险分为 **read 13 / confirm 14 / danger 11**。REST `GET /api/v1/mcp/tools`、内置 AI 的 function schema、对外 MCP 的 `tools/list` **三处同源**；此前它们是三份各自维护的清单（`handlers_mcp.go` 的 `mcpToolList`、`copilot.go` 的 33 条 schema、命令映射），已删掉其中两份重复数据。
+- **参数与描述纠正**（都是"代码早就这么读、清单没写对"）：`task_id`/`pid`/`local_port`/`timeout_sec` 由 string 改为 **integer**；补上一直被漏掉的 `timeout_sec`（exec/内置命令）、`fileless_exec` 的 `wait_ms` 与 `entry`；`session_ids` 改为 **array**；`exec.kind` 枚举剔除实际不存在的 `process_list`；`intel_query.kind` 补上真实入库的 `hash_sha1`/`url`；把旧描述里"结果通过 task_wait 获取"（其实早已原子化直接返回）等过期说法改正。
+- **统一结果信封 + 大结果外置**（`envelope.go`/`resultstore.go`）：所有工具返回 `{status,data,error,meta}`，`meta` 带 `call_id`/`truncated`/`truncation_note`/`total_bytes`/`returned_bytes`/`handle`/`untrusted`；**超出内联上限的结果外置落盘**（`data/mcp-results/<日期>/<hex>`）并只回摘要 + 句柄，模型/客户端可用 `result_read`（`handle`+`offset`/`limit`）分页取回。**截断一律显式标注**——旧实现是静默 `truncateStr`，模型会把"部分"当"全部"；句柄做了严格白名单与目录逃逸双重校验（防路径穿越）。
+- **安全默认值修正（两个真实缺陷）**：
+  1. `internal/server/ai/copilot.go` 的审批判定 `isRiskyTool()` 原是**允许列表 + fail-open**（未登记的工具默认免审批），且**未包含 `delegate`** —— 于是"需用户同意"模式可以被 `delegate`（内部会提交任务、跑含 `credentials` 的剧本）整个绕过。现改为**默认危险、只有只读白名单免审批**，并直接以工具注册表的等级为准；未登记的工具一律按危险处理。
+  2. `handlers_mcp.go` 的 `plugin_upload`/`fileless_exec` 直接 `filepath.Join("data","tools", src)` 后 `os.ReadFile`，`src` 来自 LLM/外部调用 → **路径穿越可读任意文件并入库/送去执行**。新增 `resolveToolPath()`：拒绝对路径/盘符/`..` 逃逸，拼接后 `Abs` 与 `EvalSymlinks` 双重确认仍在 `data/tools` 内。
+- **对外 MCP 服务端**：新增配置段（`mcp.*`，默认 `enabled: false`、只绑回环、必须有 token、默认只放行只读工具），配置样例与 `release/configs` 同步更新；**设置页可直接改**（`GET/PUT /api/v1/settings` 的新 `mcp` 段，token 只写不回显：空串=保持、`clear`=清空；白名单里的工具名会逐个校验是否登记在案，写错直接 400）。服务端启动日志会打印 bind、放行工具数与三道闸参数；关闭服务端时优雅停掉 MCP 监听。
+- **本地端到端冒烟 `scripts/mcp_smoke.ps1`**：不需要任何植入端，起一个临时服务端（独立端口 + 独立 token + 只读白名单 + 低 RPM），跑 15 项权限/协议矩阵——无 token/错 token 401、initialize 下发会话、缺/错会话头 400、tools/list 工具数、只读工具可调用且带统一信封、危险工具默认 403、未注册工具 403、resources/list、**resources/read 路径穿越被拒**、超 RPM 429、审计落盘；有 ❌ 即非 0 退出。**当前实测 15/15 通过**。
+- **CI**：单元测试范围增加 `./internal/server/mcp/...` 与 `./internal/server/ai/...`（注册表形状与分级 fail-closed、信封与截断标注、结果外置句柄与路径穿越拒绝、Agent 工具面必须都能在注册表找到、`delegate` 越权回归）。
+
+### 🤖 S2 内置 Agent：长任务可靠性
+- （待填）
+
+### 🥷 S3 免杀：分层治理（落地 / 动态 / 静态）
+- （待填）
+
+### 📦 S4 植入端体积分档与内存加载
+- （待填）
+
+### 🛰 S5 新增低特征通道
+- （待填）
+
+### 🛡 S6 杀软对抗能力分级
+- （待填）
+
+### 🩹 其它
+- （待填）
+
 ## [v1.3.5] - 2026-09-15
 
 重点：**直击"开了国产杀软就起不来"** —— 构建后 **Authenticode 代码签名**（实测已签上、可复核）、**8 条加载器链**（白加黑/计划任务/LOLBin/内存加载，不落地未签名 PE）、**真 DLL 载荷**（c-shared + mingw，加载即启动、导出名可配，白加黑/rundll32 真正可用）、**BOF 改为按需编译**（默认载荷 `beacon*` 归零）、**Go 构建期指纹擦除**（buildinfo 魔数 / build ID）；同时做了**一次 Web 控制台 UI 全面优化**。

@@ -58,7 +58,7 @@ jobs:
 
       - name: Build server (tags webui)
         run: |
-          LDFLAGS="-s -w -X main.version=1.3.5 -X main.commit=$(git rev-parse --short HEAD) -X main.buildTime=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-s -w -X main.version=1.4.0 -X main.commit=$(git rev-parse --short HEAD) -X main.buildTime=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           go build -tags webui -ldflags "$LDFLAGS" -o toserver ./cmd/server
 
       - name: Vet
@@ -68,7 +68,11 @@ jobs:
         # 除既有基础包外，跑本版新增的纯逻辑测试：
         #   builder：构建标签矩阵 / 启动延迟模板渲染 / 默认模板不得含进程枚举 / PE 预检
         #   drivers：manifest sha256 比对、自检结论合并、JSON 字段、列表携带自检
-        # 这些测试用桩函数替代 WinVerifyTrust，不依赖本机证书链与联网，Linux runner 可跑。
+        #   mcp    ：工具注册表形状/分级 fail-closed/默认只放行只读、结果信封与截断标注、
+        #            结果外置句柄（含路径穿越拒绝）；MCP 协议层与三道限流闸（httptest，不需植入端）
+        #   ai     ：Agent 工具面必须都能在注册表里找到；审批判定 fail-closed（含 delegate 越权回归）
+        # 这些测试用桩函数替代 WinVerifyTrust、用假 Executor 替代真实会话，Linux runner 可跑。
         run: |
           go test ./internal/common/... ./internal/server/config/... \
-                  ./internal/server/builder/... ./internal/server/drivers/...
+                  ./internal/server/builder/... ./internal/server/drivers/... \
+                  ./internal/server/mcp/... ./internal/server/ai/...

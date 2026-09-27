@@ -23,7 +23,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")" || exit 1
 ROOT="$(pwd)"
-VERSION="v1.3.5"
+VERSION="v1.4.0"
 
 CHECK=0; YES=0; NO_START=0; DAEMON=0; WITH_GARBLE=0; GO_VERSION=""
 while [ $# -gt 0 ]; do

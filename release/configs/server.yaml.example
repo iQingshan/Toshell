@@ -187,3 +187,38 @@ web:
     # 入口路径 /__gate 是否返回 401 挑战（便于浏览器弹框）。设为 false 则只能用密钥链接进入，
     # 线上不会出现任何 401 响应。
     entry_challenge: true
+# ─── 对外 MCP（Model Context Protocol）服务端 ───────────────────────────────
+# 让外部 MCP 客户端（Claude Desktop / Cursor / 自研 Agent）用标准协议调用本项目的工具。
+# 安全前置：MCP 客户端一旦连上，就等于拿到调用内部工具的能力（与内置 AI 副驾驶同一张工具表）。
+#   因此默认关闭；开启后也只绑回环地址、必须配置 token，且默认只放行只读工具。
+#   不要把 MCP 端点暴露到公网；跨机访问请走堡垒机 / SSH 端口转发。
+mcp:
+    # 是否启动 MCP 服务端（默认 false）。
+    enabled: false
+    # 监听地址（默认只绑回环；改成 0.0.0.0 前请确认风险与访问控制）。
+    bind: 127.0.0.1:18082
+    # 访问令牌：请求头 Authorization: Bearer <token> 或 X-MCP-Token。
+    # 留空时即使 enabled=true 也会拒绝启动（fail-closed，不允许无鉴权裸奔）。
+    token: ""
+    # 允许通过 MCP 调用的工具白名单；留空 = 仅只读工具（注册表 read 级）。
+    # 危险级（exec/credentials/fileless_exec/plugin_load/delegate 等）不建议放进来。
+    allowed_tools: []
+    # 允许的浏览器 Origin（留空 = 拒绝所有带 Origin 的跨域请求）。
+    allowed_origins: []
+    # 允许访问 MCP 的来源网段（CIDR 或裸 IP；留空 = 不限制来源）。不读 X-Forwarded-For，避免伪造绕过。
+    allow_cidrs: []
+    # 每 token 每分钟请求上限（<=0 取默认 60，不是不限；符合 fail-closed 口径）。
+    max_rpm: 120
+    # 同时执行的工具调用上限（<=0 取默认 4）。
+    max_concurrent: 4
+    # 每 token 未读完的外置结果句柄上限（<=0 取默认 32）：拿了句柄不读又继续调用会先撞这道闸。
+    max_pending_handles: 32
+    # 结果内联上限（字节）：超出则外置到 result_dir，只回句柄 + 摘要（截断会显式标注）。
+    inline_limit: 8192
+    # 大结果外置目录与保留时长。
+    result_dir: ./data/mcp-results
+    result_ttl: 24h
+    # 审计日志（JSONL；参数只记摘要，不记原文）。
+    audit_path: ./logs/mcp-audit.jsonl
+    # 出错即拒（默认 true）。
+    fail_closed: true

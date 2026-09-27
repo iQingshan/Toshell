@@ -23,6 +23,7 @@ import (
 	"toshell/internal/server/config"
 	"toshell/internal/server/intel"
 	"toshell/internal/server/logging"
+	"toshell/internal/server/mcp"
 	"toshell/internal/server/plugin"
 	"toshell/internal/server/task"
 )
@@ -31,207 +32,47 @@ import (
 // 暴露会话上下文 / 情报查询 / 任务下发等工具，供 LLM 或外部 MCP 客户端调用。
 // 简化实现：GET /api/v1/mcp/tools 返回工具清单；POST /api/v1/mcp/tools/{name} 执行。
 
-type mcpTool struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Parameters  []string `json:"parameters"`
-}
-
-var mcpToolList = []mcpTool{
-	{
-		Name:        "intel_query",
-		Description: "查询跨会话情报库（IP/账号/哈希/共享/域名）。参数: kind=ip|account|hash_ntlm|share|domain|all（默认 all）",
-		Parameters:  []string{"kind"},
-	},
-	{
-		Name:        "session_context",
-		Description: "获取指定会话的上下文摘要（OS/权限/监听器/最近任务）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "task_submit",
-		Description: "向会话下发命令任务。参数: session_id, command",
-		Parameters:  []string{"session_id", "command"},
-	},
-	{
-		Name:        "task_result",
-		Description: "查询单个任务的状态与输出（立即返回当前状态，不等待）。参数: task_id",
-		Parameters:  []string{"task_id"},
-	},
-	{
-		Name:        "task_wait",
-		Description: "轮询等待任务完成（下发后调用），返回最终输出/退出码。参数: task_id, timeout_sec",
-		Parameters:  []string{"task_id", "timeout_sec"},
-	},
-	{
-		Name:        "file_list",
-		Description: "列出会话上的目录内容（结果通过 task_wait 获取）。参数: session_id, path",
-		Parameters:  []string{"session_id", "path"},
-	},
-	{
-		Name:        "file_download",
-		Description: "从会话下载文件到服务器（结果含 transfer_id，通过 task_wait 获取）。参数: session_id, path",
-		Parameters:  []string{"session_id", "path"},
-	},
-	{
-		Name:        "process_list",
-		Description: "列出会话上的进程（结果通过 task_wait 获取）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "process_kill",
-		Description: "结束会话上的进程。参数: session_id, pid",
-		Parameters:  []string{"session_id", "pid"},
-	},
-	{
-		Name:        "screenshot",
-		Description: "对会话截屏（结果通过 task_wait 获取，含 base64 图片数据）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "credentials",
-		Description: "收集会话上的凭据（浏览器/系统凭据，结果通过 task_wait 获取）。参数: session_id, action",
-		Parameters:  []string{"session_id", "action"},
-	},
-	{
-		Name:        "session_kill",
-		Description: "终止会话（植入端退出）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "delegate",
-		Description: "子代理：在指定会话执行剧本（确定性多步链路），支持多会话并行。参数: playbook_id, session_id 或 session_ids(逗号分隔)",
-		Parameters:  []string{"playbook_id", "session_id", "session_ids"},
-	},
-	{
-		Name:        "playbook_status",
-		Description: "查询剧本运行进度（delegate 返回 run_id 后用）。参数: run_id",
-		Parameters:  []string{"run_id"},
-	},
-	{
-		Name:        "session_list",
-		Description: "列出所有活跃会话（ID/主机名/OS/监听器/状态）",
-		Parameters:  []string{},
-	},
-	{
-		Name:        "attack_suggest",
-		Description: "基于会话上下文给出下一步操作建议（按 OS 返回可用的提权/注入/凭据选项）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "plugin_list",
-		Description: "列出已上传的插件（ID/名称/类型 exe/dll/shellcode/bof）。无参数",
-		Parameters:  []string{},
-	},
-	{
-		Name:        "plugin_load",
-		Description: "把插件加载到指定会话执行。参数: session_id, plugin_id, args(可选，传给插件的参数)",
-		Parameters:  []string{"session_id", "plugin_id", "args"},
-	},
-	{
-		Name:        "tunnel_start",
-		Description: "为指定会话启动 SOCKS5 隧道代理（本地端口转发，可代理横向访问内网）。参数: session_id, local_port(可选，默认1080)",
-		Parameters:  []string{"session_id", "local_port"},
-	},
-	{
-		Name:        "tunnel_list",
-		Description: "列出当前所有隧道代理（会话 ID / 本地端口 / 隧道数）。无参数",
-		Parameters:  []string{},
-	},
-	{
-		Name:        "tunnel_stop",
-		Description: "停止指定会话的隧道代理。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "web_search",
-		Description: "联网搜索：查询情报/工具/漏洞/用法。参数: query",
-		Parameters:  []string{"query"},
-	},
-	{
-		Name:        "remote_download",
-		Description: "从 URL 下载工具到服务端本地 data/tools/ 持久保存（可重复使用）。异步：立即返回 dl_id，用 tool_download_status 查询进度。参数: url",
-		Parameters:  []string{"url"},
-	},
-	{
-		Name:        "tool_download_status",
-		Description: "查询一次远程下载的进度/结果（remote_download 返回 dl_id 后调用）。参数: dl_id",
-		Parameters:  []string{"dl_id"},
-	},
-	{
-		Name:        "tool_list",
-		Description: "列出服务端 data/tools/ 已下载的可复用工具（名称/大小/路径）",
-		Parameters:  []string{},
-	},
-	{
-		Name:        "plugin_upload",
-		Description: "把 data/tools/ 下的工具上传为插件（BOF/DLL/EXE/shellcode），之后可用 plugin_load 加载到会话。参数: source, name(可选), description(可选)",
-		Parameters:  []string{"source", "name", "description"},
-	},
-	{
-		Name:        "fileless_exec",
-		Description: "把 data/tools/ 下的工具按 kind(bof/shellcode/dll/exe) 内存加载执行（不落盘）。参数: session_id, source, kind(可选), args(可选)",
-		Parameters:  []string{"session_id", "source", "kind", "args"},
-	},
-	{
-		Name:        "exec",
-		Description: "【原子执行】在会话下发命令并直接返回最终结果（服务端自动等待完成，无需 task_wait）。比 task_submit+task_wait 更可靠，避免任务 id 引用错误。参数: session_id, command 或 kind(user_info/system_info/check_av/process_list 等), timeout_sec(可选)",
-		Parameters:  []string{"session_id", "command", "kind", "timeout_sec"},
-	},
-	{
-		Name:        "run_command",
-		Description: "向会话下发任意命令并返回待轮询任务（task_wait 取结果）。参数: session_id, command",
-		Parameters:  []string{"session_id", "command"},
-	},
-	{
-		Name:        "user_info",
-		Description: "获取会话当前用户/权限/本机用户（whoami+whoami /priv+net user）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "system_info",
-		Description: "获取会话系统信息（systeminfo）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "service_list",
-		Description: "枚举会话上的 Windows 服务（sc queryex）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "check_av",
-		Description: "检测会话上的杀软/EDR 相关进程（tasklist /v）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "net_info",
-		Description: "获取会话网络配置（ipconfig /all）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "net_connections",
-		Description: "列出会话上的网络连接（netstat -ano）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "env_vars",
-		Description: "获取会话环境变量（set）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-	{
-		Name:        "scheduled_tasks",
-		Description: "列出会话上的计划任务（schtasks /query）。参数: session_id",
-		Parameters:  []string{"session_id"},
-	},
-}
-
 // mcpToolsHandler 返回工具清单。
+//
+// v1.4.0 起清单**由工具注册表派生**（`internal/server/mcp` 是唯一元数据来源），不再维护
+// 本文件里的 `mcpToolList`。输出保持向后兼容：仍是 `{tools:[{name,description,parameters}],count,notice}`，
+// 每条额外补 `level`（read/confirm/danger 风险等级）与 `schema`（JSON Schema，可选），
+// 客户端可据此渲染风险提示或做参数校验。
 func (s *Server) mcpToolsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	type toolView struct {
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		Parameters  []string               `json:"parameters"`
+		Required    []string               `json:"required,omitempty"`
+		Level       string                 `json:"level"`
+		Schema      map[string]interface{} `json:"schema,omitempty"`
+	}
+
+	reg := mcp.Default()
+	defs := reg.All()
+	views := make([]toolView, 0, len(defs))
+	for _, d := range defs {
+		views = append(views, toolView{
+			Name:        d.Name,
+			Description: d.Description,
+			Parameters:  d.ParamNames(),
+			Required:    d.RequiredNames(),
+			Level:       d.Level.String(),
+			Schema:      d.JSONSchema(),
+		})
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"tools":  mcpToolList,
-		"count":  len(mcpToolList),
-		"notice": "AI 副驾驶工具端点：POST /api/v1/mcp/tools/{name} 调用",
+		"tools": views,
+		"count": len(views),
+		"levels": map[string]int{
+			"read":    len(reg.ByLevel(mcp.LevelRead)),
+			"confirm": len(reg.ByLevel(mcp.LevelConfirm)),
+			"danger":  len(reg.ByLevel(mcp.LevelDanger)),
+		},
+		"notice": "AI 副驾驶工具端点：POST /api/v1/mcp/tools/{name} 调用；对外 MCP 协议服务见配置 mcp 段（默认关闭，仅回环 + 只读白名单）",
 	})
 }
 
@@ -338,7 +179,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 			"task_id": t.ID, "task_type": t.TaskType, "command": t.Command,
 			"session_id": t.SessionID, "status": t.Status,
 			"output": truncateStr(t.Output, 4000), "error": t.Error,
-			"exit_code": t.ExitCode,
+			"exit_code":  t.ExitCode,
 			"created_at": t.CreatedAt, "completed_at": t.CompletedAt,
 		}, nil
 	case "task_wait":
@@ -600,7 +441,10 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if name == "" {
 			name = src
 		}
-		toolPath := filepath.Join("data", "tools", src)
+		toolPath, terr := resolveToolPath(src)
+		if terr != nil {
+			return nil, terr
+		}
 		data, rerr := os.ReadFile(toolPath)
 		if rerr != nil {
 			return nil, fmt.Errorf("read tool failed: %w", rerr)
@@ -623,7 +467,10 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if kind == "" {
 			kind = guessToolKind(src)
 		}
-		toolPath := filepath.Join("data", "tools", src)
+		toolPath, terr := resolveToolPath(src)
+		if terr != nil {
+			return nil, terr
+		}
 		data, rerr := os.ReadFile(toolPath)
 		if rerr != nil {
 			return nil, fmt.Errorf("read tool failed: %w", rerr)
@@ -887,7 +734,7 @@ func reindexTools() {
 		idx = append(idx, map[string]interface{}{
 			"name": e.Name(), "size": info.Size(), "path": p,
 			"sha256": hex.EncodeToString(sum[:]),
-			"kind": guessToolKind(e.Name()), "platform": guessToolPlatform(e.Name()),
+			"kind":   guessToolKind(e.Name()), "platform": guessToolPlatform(e.Name()),
 			"arch": guessToolArch(e.Name()), "usage": guessToolUsage(e.Name()),
 		})
 	}
@@ -895,8 +742,6 @@ func reindexTools() {
 		_ = os.WriteFile(filepath.Join(dir, "index.json"), b, 0o644)
 	}
 }
-
-
 
 func uPath(s string) string {
 	if u, err := url.Parse(s); err == nil {
@@ -938,10 +783,10 @@ func listServerTools() interface{} {
 			"size":     info.Size(),
 			"path":     p,
 			"sha256":   hex.EncodeToString(sum[:]),
-			"kind":     guessToolKind(e.Name()),       // bof/shellcode/dll/exe
-			"platform": guessToolPlatform(e.Name()),   // windows / linux / macos / 通用
-			"arch":     guessToolArch(e.Name()),       // amd64 / 386 / arm64 / 通用
-			"usage":    guessToolUsage(e.Name()),      // 用途（凭据收集/载荷/插件等）
+			"kind":     guessToolKind(e.Name()),     // bof/shellcode/dll/exe
+			"platform": guessToolPlatform(e.Name()), // windows / linux / macos / 通用
+			"arch":     guessToolArch(e.Name()),     // amd64 / 386 / arm64 / 通用
+			"usage":    guessToolUsage(e.Name()),    // 用途（凭据收集/载荷/插件等）
 		})
 	}
 	return map[string]interface{}{"dir": dir, "tools": items, "count": len(items)}
@@ -1020,6 +865,53 @@ func guessToolUsage(name string) string {
 }
 
 // guessToolKind 按扩展名推测内存加载类型（供 fileless_exec 缺省 kind）。
+// resolveToolPath 把"工具名"解析成 `data/tools` 下的安全绝对路径。
+//
+// ⚠️ `src` 来自 LLM/外部 MCP 客户端，属**不可信输入**。旧实现直接
+// `filepath.Join("data", "tools", src)` 再 `os.ReadFile`，于是 `src = "../../../<任意文件>"`
+// 就能读到工作目录外的文件（`plugin_upload`/`fileless_exec` 还会把它入库或送去执行）——
+// 这是一条完整的**路径穿越 → 任意文件读取/执行**链。这里做四道校验：
+//  1. 非空、非绝对路径（Unix `/` 与 Windows `\`、盘符 `C:` 都拒）；
+//  2. `filepath.Clean` 后不得为 `.`/`..`/以 `..` 开头；
+//  3. 拼接后 `Abs` 结果必须仍在 `data/tools` 内（防编码/分隔符花招）；
+//  4. 若文件存在，`EvalSymlinks` 后仍须在目录内（防符号链接逃逸）。
+func resolveToolPath(src string) (string, error) {
+	name := strings.TrimSpace(src)
+	if name == "" {
+		return "", fmt.Errorf("source (file in data/tools) required")
+	}
+	if filepath.IsAbs(name) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, `\`) {
+		return "", fmt.Errorf("source must be a relative path under data/tools")
+	}
+	if len(name) >= 2 && name[1] == ':' {
+		return "", fmt.Errorf("source must be a relative path under data/tools")
+	}
+	clean := filepath.Clean(name)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("source escapes data/tools")
+	}
+	base, err := filepath.Abs(filepath.Join("data", "tools"))
+	if err != nil {
+		return "", fmt.Errorf("resolve data/tools: %w", err)
+	}
+	full, err := filepath.Abs(filepath.Join(base, clean))
+	if err != nil {
+		return "", fmt.Errorf("resolve source: %w", err)
+	}
+	sep := string(os.PathSeparator)
+	if full != base && !strings.HasPrefix(full, base+sep) {
+		return "", fmt.Errorf("source escapes data/tools")
+	}
+	if real, rerr := filepath.EvalSymlinks(full); rerr == nil {
+		if rbase, berr := filepath.EvalSymlinks(base); berr == nil {
+			if real != rbase && !strings.HasPrefix(real, rbase+sep) {
+				return "", fmt.Errorf("source escapes data/tools (symlink)")
+			}
+		}
+	}
+	return full, nil
+}
+
 func guessToolKind(src string) string {
 	ext := strings.ToLower(filepath.Ext(src))
 	switch ext {
