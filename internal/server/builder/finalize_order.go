@@ -18,8 +18,8 @@ import (
 // 约定（新增任何"改字节"的步骤时照做）：
 //  1. 步骤名登记在下面的常量里，并按实际执行顺序出现在 finalizeSteps 的返回里；
 //  2. StepSign 必须且只能是最后一个（signOrderWarning 会在运行时拦截）；
-//  3. 新增的 PE 资源/图标/版本信息/时间戳修补必须排在 StepUPX 与 StepSign **之前**
-//     （UPX 之后再补资源等于把压缩结果改坏；签名之后再动就是白签）。
+//  3. 新增的 PE 节规范化 / 资源/图标/版本信息/时间戳修补必须排在 StepUPX 与 StepSign **之前**，
+//     且节规范化要排在资源修补**之前**（先清 Go 残留节，再追加 `.rsrc`，让 `.rsrc` 永远是最后一节）。
 //
 // 这份顺序与 ROADMAP/docs/EVASION.md 的 §"静态降特征"、§"签名顺序约束"一致。
 const (
@@ -27,6 +27,17 @@ const (
 	StepScrubFingerprint = "scrub_fingerprint"
 	// StepScrubVersion 全文件 Go 版本串（runtime.buildVersion，锚定窗口扫不到的那一份）。
 	StepScrubVersion = "scrub_version_string"
+	// StepSectionNormalize PE 节规范化（v1.4.0 S3 第三批）：删掉 Go 链接器残留的非典型
+	// `.symtab` 节 + 把 PointerToSymbolTable/NumberOfSymbols 置 0（见 pe_sections.go）。
+	//
+	// 顺序：排在 StepResourcePatch **之前** —— 先清掉 Go 的残留节，再追加 `.rsrc`，
+	// 这样 `.rsrc` 永远是最后一节；也排在 StepUPX 与 StepSign 之前（改字节的步骤
+	// 一律不许排到它们后面）。
+	//
+	// 与 StepResourcePatch 的区别：这一步**默认执行**（只要交付格式是 Windows PE），
+	// 因为它只做减法、不写入任何操作员选定的身份 —— 与 StepScrubFingerprint /
+	// StepScrubVersion 同级；而资源修补写的是"这份样本长什么样"的产品决策，必须显式开启。
+	StepSectionNormalize = "section_normalize"
 	// StepResourcePatch PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）。
 	// 只做原地/追加式的 .rsrc 后处理（见 patch_resources.go），**必须**排在 StepUPX 与
 	// StepSign 之前：UPX 之后再补资源等于把压缩结果改坏，签名之后再动就是白签。
@@ -45,16 +56,22 @@ const (
 // 纯函数：只看入参，不做 IO —— 这样顺序契约能在 CI 里被表驱动地钉住，
 // 而不是靠人读 builder.go 的调用顺序。
 //
-//	language="c"（mingw C 植入端）→ 没有 Go 运行时指纹可擦，也不打 PE 资源（见 shouldPatchResources）
+//	language="c"（mingw C 植入端）→ 没有 Go 运行时指纹可擦，也不做节规范化/PE 资源（见 isWindowsPEDeliveryFormat）
 //	format=shellcode/shellcode_bin → 交付物是文本/原始字节，不是 PE，不签名也不打资源
-//	其余 Windows PE 格式（exe/bin/dll）→ 可能打资源、可能签名
-func finalizeSteps(language, targetOS, format string, resourcePatch, upxEnabled, signEnabled bool) []string {
-	steps := make([]string, 0, 6)
+//	其余 Windows PE 格式（exe/bin/dll）→ 默认做节规范化，可能打资源、可能签名
+func finalizeSteps(language, targetOS, format string, sectionNormalize, resourcePatch, upxEnabled, signEnabled bool) []string {
+	steps := make([]string, 0, 7)
 	if language != "c" {
 		steps = append(steps, StepScrubFingerprint, StepScrubVersion)
 	}
-	// 资源修补紧跟指纹擦除之后（擦除是等长置零，与资源写入互不干扰），
-	// 且在 UPX 与签名之前 —— 顺序理由见本文件顶部与 patch_resources.go 顶部注释。
+	// 节规范化紧跟指纹擦除之后（擦除是等长置零，与"删节/截断"互不干扰），
+	// **在资源修补之前**：先把 Go 的残留节清掉，再追加 `.rsrc`，这样 `.rsrc` 永远是最后一节。
+	// 默认执行（只要交付格式是 Windows PE）——理由见 pe_sections.go 顶部与 StepSectionNormalize 注释。
+	if sectionNormalize {
+		steps = append(steps, StepSectionNormalize)
+	}
+	// 资源修补紧跟节规范化之后，且在 UPX 与签名之前 —— 顺序理由见本文件顶部与
+	// patch_resources.go 顶部注释。
 	if resourcePatch {
 		steps = append(steps, StepResourcePatch)
 	}
@@ -122,6 +139,7 @@ func (b *Builder) finalizePipelineSteps(opts BuildOptions, targetOS string) []st
 	upx := b.useUPX && opts.UPXEnable && targetOS == "windows" &&
 		(opts.Format == "exe" || opts.Format == "bin")
 	return finalizeSteps(opts.Language, targetOS, opts.Format,
+		shouldNormalizeSections(&opts, targetOS),
 		shouldPatchResources(&opts, targetOS), upx, ResolveSignConfig(opts.SignEnabled).Enabled)
 }
 

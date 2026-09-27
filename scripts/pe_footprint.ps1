@@ -4,6 +4,11 @@
 # v1.4.0 S3 第二批追加：打印 .rsrc 里的**资源细节**（公司名/产品名/文件描述/文件版本/
 # 图标个数/时间戳可读形式），口径与 internal/server/builder/patch_resources.go 的
 # ReadPEResourceInfo 一致（同一份目录树与 VS_VERSIONINFO 结构）。
+# v1.4.0 S3 第三批追加：打印 COFF 符号表指针/符号数（`PointerToSymbolTable` 应为 0），
+# 并把**非标准节名**标出来（`.symtab` 是 Go 链接器残留，正常 Windows PE 没有；修复后
+# 交付物里不该再出现它）。判定口径见 docs/EVASION.md §2.3：节熵看的是"有没有接近 7.8
+# 的节"，`.text` 6.08 / `.rdata` 5.68 / `.data` 5.60 / `.idata` 4.65 / `.reloc` 6.70
+# 就是**正常编译产物**的区间，不要当成可疑去"优化"。
 # 注意：本文件是 UTF-8 **带 BOM**（PS 5.1 不带 BOM 会按 ANSI 解析中文而乱码）——
 # 改完务必确认首三字节仍是 EF BB BF。
 [CmdletBinding()]
@@ -27,6 +32,12 @@ $secOff = $pe + 24 + $optSize
 $opt = $pe + 24
 $is64 = ((Get-U16 $opt) -eq 0x20B)
 $ddOff = if ($is64) { $opt + 112 } else { $opt + 96 }
+
+# 标准节名（MSVC / mingw / Go 通用）。名单外的会被标出来；`.symtab` 故意不在名单里 ——
+# 它是 Go 链接器残留（COFF 时代的节名），v1.4.0 S3 第三批起由构建流水线删除。
+$StandardSections = @('.text', '.rdata', '.data', '.idata', '.reloc', '.rsrc', '.bss', '.tls',
+    '.edata', '.pdata', '.xdata', '.debug', '.sdata', '.gfids', '.00cfg', '.eh_fram', '.CRT',
+    '.didat', '.mrdata', '.rodata')
 
 function Get-Entropy([byte[]]$data) {
     if (-not $data -or $data.Length -eq 0) { return 0.0 }
@@ -92,18 +103,41 @@ $tsText = if ($ts -eq 0) { '0（链接器置零/未覆盖）' } else {
     '{0}（{1} UTC）' -f $ts, ([DateTimeOffset]::FromUnixTimeSeconds($ts).UtcDateTime.ToString('yyyy-MM-dd HH:mm:ss'))
 }
 Write-Host ("TimeDateStamp = {0}" -f $tsText)
+# COFF 符号表指针 / 符号数（v1.4.0 S3 第三批）：strip 过的 Windows PE 应当两者都是 0。
+# Go 链接器会把 PointerToSymbolTable 留在非 0 上却把 NumberOfSymbols 置 0 —— 自相矛盾，
+# 是明确的工具链指纹（判定与修复见 internal/server/builder/pe_sections.go）。
+$ptrSym = Get-U32 ($pe + 12)
+$numSym = Get-U32 ($pe + 16)
+$ptrNote = if ($ptrSym -eq 0) { '（0 = 正常）' } else { '  <== 非 0：Go 链接器残留，节规范化应当已清掉' }
+Write-Host ("PointerToSymbolTable = {0}{1}" -f $ptrSym, $ptrNote)
+$numNote = if ($ptrSym -ne 0 -and $numSym -eq 0) { '  <== 自相矛盾（声明有符号表却说 0 个符号）' } else { '' }
+Write-Host ("NumberOfSymbols      = {0}{1}" -f $numSym, $numNote)
 Write-Host '节表（名称 / 虚拟大小 / 原始大小 / 熵）:'
 $end = 0
 $hasRsrc = $false
+$nonStandard = @()
+$maxEntropy = 0.0
 for ($i = 0; $i -lt $nSec; $i++) {
     $s = $secOff + $i * 40
     $name = [Text.Encoding]::ASCII.GetString($b, $s, 8).TrimEnd([char]0)
     $vsize = Get-U32 ($s + 8); $rsize = Get-U32 ($s + 16); $rptr = Get-U32 ($s + 20)
     if ($name -eq '.rsrc') { $hasRsrc = $true }
     $body = if ($rsize -gt 0 -and ($rptr + $rsize) -le $b.Length) { $b[$rptr..($rptr + $rsize - 1)] } else { @() }
-    Write-Host ("  {0,-9} {1,10} {2,10}   {3:N2}" -f $name, $vsize, $rsize, (Get-Entropy $body))
+    $ent = Get-Entropy $body
+    if ($ent -gt $maxEntropy) { $maxEntropy = $ent }
+    $flag = ''
+    if ($StandardSections -notcontains $name) { $flag = '  <== 非标准节名'; $nonStandard += $name }
+    Write-Host ("  {0,-9} {1,10} {2,10}   {3:N2}{4}" -f $name, $vsize, $rsize, $ent, $flag)
     if (($rptr + $rsize) -gt $end) { $end = $rptr + $rsize }
 }
+if ($nonStandard.Count -gt 0) {
+    Write-Host ("非标准节名: {0}（Go 链接器的 .symtab 残留由构建期节规范化删除；其它名字只报告、不改名）" -f ($nonStandard -join ', '))
+} else {
+    Write-Host '非标准节名: 无'
+}
+$entVerdict = if ($maxEntropy -ge 7.8) { "有节熵 {0:N2} ≥ 7.8 —— 与 UPX/加密壳的特征区间重叠，值得人工看一眼" -f $maxEntropy }
+else { "最高节熵 {0:N2} < 7.8 —— 与正常编译产物一致（基线 .text 6.08 / .rdata 5.68 / .data 5.60 / .idata 4.65 / .reloc 6.70）" -f $maxEntropy }
+Write-Host ("节熵口径: {0}" -f $entVerdict)
 Write-Host ("overlay = {0} 字节（配置块等追加数据；0 表示没有）" -f ($b.Length - $end))
 Write-Host ("含 .rsrc（版本信息/图标/manifest）: {0}" -f $hasRsrc)
 

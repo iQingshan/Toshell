@@ -119,24 +119,24 @@ sleep mask 具体做了什么（便于自查与排错）：
 
 #### 实测：PE 节表 / 熵 / 资源现状（口径与下一步验收）
 
-对 `windows/386` 默认档案产物逐节测量（脚本：`scripts/pe_footprint.ps1`，见 §4 的 ⓪；这组数字是"节名/节熵口径"的基线）：
+对 `windows/386` 默认档案产物逐节测量（脚本：`scripts/pe_footprint.ps1`，见 §4 的 ⓪；这组数字是"节名/节熵口径"的基线，实测于 v1.4.0 S3 第三批**修复前**，与 `.tmp-verify/notes-sections.md` 的独立解析器读数一致）：
 
-| 节 | 虚拟大小 | 原始大小 | 熵 |
-|---|---|---|---|
-| `.text` | 1716024 | 1716224 | 6.08 |
-| `.rdata` | 1556184 | 1556480 | 5.69 |
-| `.data` | 285352 | 110592 | 5.59 |
-| `.idata` | 988 | 1024 | 4.58 |
-| `.reloc` | 81202 | 81408 | 6.70 |
-| `.symtab` | 4 | 512 | 0.02 |
+| 节 | 虚拟大小 | 原始大小 | RVA | 熵 |
+|---|---|---|---|---|
+| `.text` | 1716760 | 1717248 | 0x1000 | 6.08 |
+| `.rdata` | 1557160 | 1557504 | 0x1A5000 | 5.68 |
+| `.data` | 285352 | 110592 | 0x322000 | 5.60 |
+| `.idata` | 988 | 1024 | 0x368000 | 4.65 |
+| `.reloc` | 81286 | 81408 | 0x369000 | 6.70 |
+| `.symtab`（**修复前才有**） | 4 | 512 | 0x37D000 | 0.02 |
 
-另有：`TimeDateStamp = 0`（Go 链接器置零，**不是**指纹漏点）、overlay **245 字节**（就是被 XOR 过的配置块，符合预期）、**没有 `.rsrc` 节**。
+另有：`PointerToSymbolTable = 3468800`（**非 0**）、`NumberOfSymbols = 0`、`TimeDateStamp = 0`（Go 链接器置零，**不是**指纹漏点）、overlay **245 字节**（就是被 XOR 过的配置块，符合预期）、文件 3,469,557 字节。修复后的对照见下方「实测：Go 残留节 `.symtab` 与 COFF 符号表指针」。
 
-判读：
+判读（**这份判读本身就是"口径"**，写在这里避免以后有人拿 5.68 当"可疑"去优化）：
 
-- 熵都在 4.5~6.7 之间，是"未加壳的 Go 产物"的正常区间；一旦上 UPX 会整体升到 7.9+ —— 所以**熵本身不能当"是否可疑"的判据**，只能当"加壳前后是否如预期"的对照。
-- `.symtab` 是 Go 在 PE 上自带的符号表节（`-s -w` 也保留），不是我们的疏漏。
-- **没有 `.rsrc` 是目前最扎眼的"非典型 PE"信号**：正常商业/系统程序几乎都带版本信息（公司名/产品名/文件描述/版本/原始文件名）、图标与 manifest，而我们交付的载荷一样都没有；这也正是计划里"PE 版本资源 / 图标 / 公司信息 / 时间戳"那一项要补的东西，且**必须插在 UPX 与签名之前**（顺序契约见 §2.4，`builder/finalize_order.go` 会拦住"sign 不在最后"的改动）。
+- 熵都在 4.6~6.7 之间，是"未加壳的 Go 产物"的正常区间；一旦上 UPX 会整体升到 7.8+ —— 所以**判定口径是"有没有接近 7.8 的节 / 有没有非标准节名"，不是"有没有高熵节"**。正常编译产物本来就不会有"高熵节"以外的可疑点，反过来"某个节熵掉到 5.6"也**不是**需要修的缺陷。
+- `.symtab` 是 **Go 链接器在 PE 上留下的非典型节**（`.symtab` 是 **COFF 时代**的节名，正常 Windows PE 没有；`-s -w` 也照样保留），配合非 0 的 `PointerToSymbolTable` 与非 0/0 自相矛盾的 `NumberOfSymbols`，是一组明确的工具链指纹。**v1.4.0 S3 第三批已修**（见下方小节）：交付物里不该再出现 `.symtab`，`PointerToSymbolTable`/`NumberOfSymbols` 必须都是 0。用 `scripts/pe_footprint.ps1` 现在会直接把非标准节名标出来。
+- **没有 `.rsrc` 是当时最扎眼的"非典型 PE"信号**：正常商业/系统程序几乎都带版本信息（公司名/产品名/文件描述/版本/原始文件名）、图标与 manifest，而我们交付的载荷一样都没有；这一项已由下面的"PE 版本资源 / 图标 / 公司信息 / 时间戳"（v1.4.0 S3 第二批）补上，且**必须插在 UPX 与签名之前**（顺序契约见 §2.4，`builder/finalize_order.go` 会拦住"sign 不在最后"的改动）。
 - 该项的验收口径（写在这里，落地时按它验）：① 产物出现 `.rsrc` 节；② `Get-ItemProperty <载荷> | Select-Object -ExpandProperty VersionInfo` 能读出我们写入的公司名/产品名/文件描述/版本；③ 资源查看器能看到图标；④ **顺序正确时签名仍有效**（签名在最后一步，改资源在它之前）—— 最后一条是整项的意义所在。
 
 #### 实测：PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批，已实现）
@@ -174,7 +174,56 @@ sleep mask 具体做了什么（便于自查与排错）：
 - 图标只从**服务端本地路径**读（配置 `implant.icon_path` 或请求字段 `resource_icon_path`），四道校验（存在/是文件/`.ico` 后缀/≤1 MiB）+ ICO 结构校验；**不接受客户端上传字节**（否则等于接了一条"任意文件读取 + 攻击者可控字节进 `.rsrc`"的链）。
 - **一键中性预设 `resource_preset="neutral"`**：套用一套**自有品牌**的外观（公司名/产品名 `ToShell Ops Toolkit` + 文件描述/版权 + `InternalName=toshell-agent` + 原始文件名 `.exe`/`.dll` + `fixed` 时间戳），语义是"只填操作员没显式给的字段"（显式优先），**不猜版本号**（留空 → `1.0.0.0`），预设名拼错**直接构建报错**。**它不冒充任何真实厂商/系统组件**，所以别指望它在"看起来像系统文件"上有什么收益 —— 那是品牌冒充，需要时由操作员显式填公司名/描述（工具不替你做这个决定，也不把冒充字符串留在公开仓库里）。
 
-#### 实测发现的指纹漏点（v1.4.0 S3，已修）
+#### 实测：Go 残留节 `.symtab` 与 COFF 符号表指针（v1.4.0 S3 第三批，已实现）
+
+**要解决什么**（这两个是**同一个根因**的两种表现，都来自 Go 链接器的 strip 产物）：
+
+| 字段 / 节 | 修复前的值 | 为什么是"非典型 PE" |
+|---|---|---|
+| `IMAGE_FILE_HEADER.PointerToSymbolTable` | **3468800（非 0）** | 正常 strip 过的 Windows PE（MSVC/mingw）这里应当是 0。Go 链接器留了这个指针，是明确的工具链指纹 |
+| `IMAGE_FILE_HEADER.NumberOfSymbols` | 0 | 与上面非 0 的指针**自相矛盾**（"声明有符号表，却说 0 个符号"）。顺带一提：这个指针指向的位置（`0x34EB00`）落在 `.reloc` 的原始数据里，那里根本不是合法的 COFF 字符串表 —— 也就是说这个指针**连自洽都不是**，只会让任何解析器判"拼接/畸形产物" |
+| `.symtab` 节 | vsize=4 / rawsize=512 / chars=0x42000000 / 熵 0.02，是**最后一节** | `.symtab` 是 **COFF 时代**的节名；正常 Windows PE 不会有。内容是 4 字节 COFF 字符串表长度（`04 00 00 00`）+ 508 字节对齐填充（这也是它熵只有 0.02 的原因） |
+
+**怎么修**（`internal/server/builder/pe_sections.go`，复用 `patch_resources.go` 已有的 `parsePEPatchImage` / `pePatchSection` / `VerifyPELayout`，不重复实现 PE 解析）：
+
+- `.symtab` 是**最后一节**（本仓库的 Go 载荷都是）→ 只把 `NumberOfSections` 减一 + 把节表末尾多出来的 40 字节清零；**节表其余部分一个字节都不动**（最安全）。
+- `.symtab` 是**中间节**（少见）→ 把后续节头整体前移 40 字节（`copy` 自带 memmove 语义）并清零末尾 40 字节。节表变短，`SizeOfHeaders` 天然仍覆盖它，不需要改小（它还要覆盖 DOS/PE 头）。
+- **顺带截断**只在可证明安全时做：该节的原始数据正好在**文件末尾**（`PointerToRawData + SizeOfRawData == 文件长度`）、没有别的节在自己的原始数据里覆盖这一段、且**没有任何数据目录指向它的 RVA 区间**。真实载荷在 `compile()` 阶段正好满足（`appendConfigBlock` 是在 `compile()` 返回**之后**才追加 245 字节配置块的），所以实测**载荷反而小了 512 字节**。不满足（例如拿已经追加过配置块的最终产物再跑一遍）就**保留文件长度、只删节头**，绝不冒险重排。
+- `PointerToSymbolTable` 与 `NumberOfSymbols` **一律置 0**。
+- 找不到 `.symtab`、或两个字段本来就是 0 → **原样返回、不报错**（幂等：对已处理过的 PE 再跑一次逐字节一致）。
+
+**适用范围**：只对 Windows 的 PE 交付格式（`exe`/`bin`/`dll`）生效；`shellcode*`/`raw`/`so`、非 Windows 目标、`language=c`（mingw 管线）显式跳过 —— 与 `shouldPatchResources` **共用同一个判定函数** `isWindowsPEDeliveryFormat`（避免两处口径漂移）。顺带一个实测结论：**mingw 链接出来的 `format=dll` 产物本来就没有 `.symtab`，两个字段也已经是 0**（见下表），所以这一步在 DLL 上是纯 no-op（幂等、不报错）；跳过 C 植入端是"没有可删的"，不是"漏了"。
+
+**与资源修补的关键区别（默认执行 vs 显式开启）**：`pe_resource_patch` 写的是**操作员选定的身份**（公司名/产品名/图标），那是"这份样本长什么样"的产品决策，所以默认关闭、零值不触发；节规范化只做**减法**（删一个标准 Windows PE 不该有的节 + 清两个自相矛盾的字段），不写入任何"冒充"内容，因此**默认执行** —— 与既有的 `scrub_fingerprint` / `scrub_version_string`（同样默认执行、同样"只擦不写"）同级。不删反而是一个稳定的家族特征。
+
+**顺序**：新步骤 `StepSectionNormalize = "section_normalize"` 排在 `pe_resource_patch` **之前**（先清掉 Go 的残留节，再追加 `.rsrc`，这样 `.rsrc` 永远是最后一节），并排在 `upx` 与 `sign` 之前。实测带资源的产物：节规范化把文件从 3,469,312 收到 3,468,800（-512）后，`.rsrc` 追加在 `rawPtr=0x34EE00`（正好是被截断的位置）成为**第 6/6 节**、`DataDirectory[2]=0x37E000+0x728`，`PointerToSymbolTable=0`。
+
+**修复前后对照**（`windows/386`、`full` 档、`tcp`、`-s -w -buildid= -H windowsgui -trimpath`、go1.20.14；数字由**独立 PowerShell/Python PE 解析器**读出，不经过仓库代码）：
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| 文件字节数（默认档 exe） | 3,469,557 | **3,469,045（-512）** |
+| 节数 | 6 | **5** |
+| 最后一节 | `.symtab`（vsize 4 / rawsize 512 / 熵 0.02） | `.reloc`（不变） |
+| `PointerToSymbolTable` | 3468800 | **0** |
+| `NumberOfSymbols` | 0 | 0 |
+| `.text`/`.rdata`/`.data`/`.idata`/`.reloc` 的 vsize / RVA / rawsize / rawptr / chars / 熵 | 6.08 / 5.68 / 5.60 / 4.65 / 6.70 | **逐字段一致**（一个字节没动） |
+| 数据目录（16 项）、`SizeOfImage`、`SizeOfHeaders`、`CheckSum` | — | **完全一致** |
+| overlay | 245 字节 | 245 字节（配置块原样保留） |
+| `format=dll`（mingw，基线 3,513,856） | 无 `.symtab`、两字段已是 0 | 3,513,856，**no-op** |
+
+头部区域 [0, 0x400) 的逐字节比对只有 17 个字节不同，且全部落在预期位置：`NumberOfSections`（1 字节）、`PointerToSymbolTable`（其中 2 字节，另 2 字节本来就是 0）、以及被清零的 40 字节 `.symtab` 节头中原本非 0 的那 14 个字节。**没有任何其它字节被改动**（`.text`/`.rdata` 的内容在两次独立构建之间本就不同 —— 每构建随机的配置块魔数/XOR 密钥/xd 基准是 P0-1 的既定行为，所以跨构建的逐字节比对只看头部与结构字段）。
+
+**取舍（明确不做的）**：
+
+- **不改名任何标准节**：`.text`/`.rdata`/`.data`/`.idata`/`.reloc` 是 MSVC/mingw/Go 通用的节名，改名是纯装饰（loader 不读节名），却会把"这份 PE 是哪个链接器产的"从"常见"推到"独一份"，还可能与加壳/签名工具对不上。
+- **不动 `.bss`/`.tls`/`.edata`/`.eh_fram`**：它们是 mingw/ld 的**合法**节名（实测 `format=dll` 产物里就有 `.eh_fram`/`.bss`/`.edata`/`.tls`），不是 Go 特有。这两个名字与 `scripts/pe_footprint.ps1` 的"标准节名"白名单一致；白名单外的节名只会被**报告**（`logging.Info` 一行 + 脚本标出），既不改名也不删除。
+- **不零填充保留下来的孤儿原始数据**：不满足截断条件时，`.symtab` 的原始字节作为"无人引用的填充"留在文件里（熵 0.02，不是高熵信号），只删节头 —— 这是"最小改动、不冒险重排"的直接体现。
+- **数据目录仍引用该节 RVA 区间时不删节**（只清零字段并打 `WARN`）：删了会让加载器解析不到那个目录。真实载荷不会走到这一支（单测用合成 PE 覆盖）。
+
+**验证**：单测覆盖"最后一节删除含截断 / 中间节删除并前移 / 无 `.symtab` 时幂等 / 删除后 `VerifyPELayout` 通过 / 数据目录与节 RVA 一个字节没被改坏 / 两个字段被置 0 / 数据目录引用时不删 / 尾部还有数据时不截断 / 非法输入中文报错"（`pe_sections_test.go`）；顺序契约用例遍历"平台 × 格式 × 节规范化 × 资源 × UPX × 签名"（`finalize_order_test.go`）。运行期验证：`scripts/e2e_smoke.ps1` 真实构建并执行 Windows 载荷（上线 + `whoami` 回执），结果见 CHANGELOG 的 v1.4.0 S3 小节。
+
+
 
 构建 `windows/386` 产物后逐字节计数（`\xff Go buildinf:` / `Go build ID:` / 正则 `go1\.[0-9]`）：
 
@@ -199,8 +248,8 @@ sleep mask 具体做了什么（便于自查与排错）：
 
 - 顺序契约集中在 `internal/server/builder/finalize_order.go`：步骤名常量 + `finalizeSteps()`（纯函数）+ `signOrderWarning()`（守卫）。
 - 每次构建开始打一行 `交付流水线（字节加工顺序，签名必须是最后一步）：步骤 → 步骤 → 签名`；一旦顺序被改坏（签名之后还有改字节的步骤）立刻打 **error 级**日志并点名违规步骤。
-- 当前顺序（`format=exe`，全开）：`scrub_fingerprint → scrub_version_string → pe_resource_patch → upx → sign`。其中 `pe_resource_patch`（PE 版本资源/图标/公司信息/时间戳，v1.4.0 S3 第二批）**只在本次构建真的配置了资源字段时才出现**；实测日志里默认档不会出现它，因此"默认构建与改动前逐字节一致"这条也顺带被这行日志守着。
-- 新增"会改字节"的步骤时必须：① 登记步骤名常量（例如 `StepResourcePatch = "pe_resource_patch"`）；② 插到 `upx` 与 `sign` **之前**；③ 让 `finalize_order_test.go` 的表驱动用例继续通过（该用例遍历"平台 × 格式 × 资源 × UPX × 签名"，断言"只要出现 sign 就必在最后"，并额外断言"资源修补必在 upx/sign 之前"）。
+- 当前顺序（`format=exe`，全开）：`scrub_fingerprint → scrub_version_string → section_normalize → pe_resource_patch → upx → sign`。其中 `section_normalize`（PE 节规范化：删 Go 残留节 `.symtab` + 清零 COFF 符号表指针，v1.4.0 S3 第三批）**默认执行**（只做减法，与指纹擦除同级），且必须排在 `pe_resource_patch` **之前**（先清残留节再追加 `.rsrc`，让 `.rsrc` 永远是最后一节）；`pe_resource_patch`（PE 版本资源/图标/公司信息/时间戳，v1.4.0 S3 第二批）**只在本次构建真的配置了资源字段时才出现**；实测日志里默认档不会出现它，因此"默认构建与改动前逐字节一致"这条也顺带被这行日志守着。
+- 新增"会改字节"的步骤时必须：① 登记步骤名常量（例如 `StepSectionNormalize = "section_normalize"`）；② 插到 `upx` 与 `sign` **之前**（并与相关步骤的相对顺序写进契约）；③ 让 `finalize_order_test.go` 的表驱动用例继续通过（该用例遍历"平台 × 格式 × 节规范化 × 资源 × UPX × 签名"，断言"只要出现 sign 就必在最后"，并额外断言"节规范化必在资源修补与 upx/sign 之前、资源修补必在 upx/sign 之前"）。
 - 另外确认过：`sign_timestamp_url` 在两条签名路径上都真的传给了签名命令（`signWithSigntool` 用 `/tr <url> /td sha256`，PowerShell 路径走 `-TimestampServer`）—— 计划里"待确认"的那一项到此闭环。启用真实证书时**务必**配时间戳，否则证书过期后签名一次性全废。
 
 ### 2.5 已知做不到的（写在这里省得反复试）
@@ -280,7 +329,8 @@ AV 的判定里权重很大的是**文件哈希信誉 / 云端结果 / 母进程
 
 ```powershell
 # ⓪ PE 结构体检（节表 / 熵 / 时间戳 / 资源 / overlay）——纯 PowerShell，无需 strings/toolchain
-#    基线数字与判读见 §2.3；重点看：TimeDateStamp 是否为 0、是否含 .rsrc、overlay 是否只是配置块。
+#    基线数字与判读见 §2.3；重点看：TimeDateStamp 是否为 0、是否含 .rsrc、overlay 是否只是配置块、
+#    PointerToSymbolTable/NumberOfSymbols 是否都为 0、有没有"非标准节名"（修复后的产物不该再出现 .symtab）。
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pe_footprint.ps1 -Path .\release\implants\payload.exe
 ```
 

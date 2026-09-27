@@ -644,10 +644,24 @@ func (b *Builder) compile(opts BuildOptions) ([]byte, error) {
 		logging.Info("builder", "go version string scrubbed: %s", strings.Join(removed, "；"))
 	}
 
+	// PE 节规范化（v1.4.0 S3 第三批）：删掉 Go 链接器残留的非典型 `.symtab` 节 + 把
+	// PointerToSymbolTable/NumberOfSymbols 置 0。位置是**契约**——在资源修补**之前**
+	// （先清 Go 残留节，再追加 `.rsrc`，这样 `.rsrc` 永远是最后一节）、UPX 与代码签名
+	// 之前（UPX 之后再改字节会把压缩结果改坏；签名之后再动一个字节就是"白签"）。
+	// **默认执行**（只要交付格式是 Windows PE）：它只做减法，与两道指纹擦除同级；
+	// 与需要显式开启的资源修补不是一回事。见 pe_sections.go 与 finalize_order.go。
+	if normalized, err := b.normalizeSections(binary, &opts, targetOS); err != nil {
+		return nil, err
+	} else {
+		binary = normalized
+	}
+
 	// PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）：位置是**契约**——
-	// 必须在两道指纹擦除之后（擦除只做等长置零，先擦后写不会互相干扰）、UPX 与代码签名
-	// 之前（UPX 之后再补资源会把压缩结果改坏；签名之后再动一个字节就是"白签"）。
-	// 顺序契约见 finalize_order.go 的 StepResourcePatch，文档见 docs/EVASION.md §2.4。
+	// 必须在两道指纹擦除与节规范化之后（擦除只做等长置零、节规范化只删残留节，先做完
+	// 再往追加的 `.rsrc` 里写，互不干扰）、UPX 与代码签名之前（UPX 之后再补资源会把
+	// 压缩结果改坏；签名之后再动一个字节就是"白签"）。
+	// 顺序契约见 finalize_order.go 的 StepSectionNormalize/StepResourcePatch，
+	// 文档见 docs/EVASION.md §2.4。
 	if patched, err := b.patchResources(binary, &opts, targetOS); err != nil {
 		return nil, err
 	} else {
@@ -723,10 +737,19 @@ func (b *Builder) compileLibrary(opts BuildOptions) ([]byte, error) {
 		bin = scrubbed
 		logging.Info("builder", "DLL go version string scrubbed: %s", strings.Join(removed, "；"))
 	}
+	// PE 节规范化（v1.4.0 S3 第三批）：与 exe 路径同一位置 —— 指纹擦除之后、资源修补/签名
+	// 之前。**默认执行**。实测 mingw 链接出来的 `format=dll` 产物没有 `.symtab` 且两个 COFF
+	// 字段本来就是 0，所以这一步在 DLL 上通常是 no-op（幂等，不报错）；仍然接在这里是为了
+	// "换个工具链/换个 Go 版本后 DLL 也开始留残留"时不用再改一遍流水线。
+	if normalized, err := b.normalizeSections(bin, &opts, targetOS); err != nil {
+		return nil, err
+	} else {
+		bin = normalized
+	}
 	// PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）：与 exe 路径同一位置 ——
-	// 指纹擦除之后、签名之前（DLL 不走 UPX，所以这里没有 UPX 这一步）。
+	// 指纹擦除与节规范化之后、签名之前（DLL 不走 UPX，所以这里没有 UPX 这一步）。
 	// DLL 是白加黑链交付的那个文件，资源信息对齐后"版本信息里写着公司名/产品名/图标"
-	// 不再只有宿主 EXE 才有。顺序契约见 finalize_order.go 的 StepResourcePatch。
+	// 不再只有宿主 EXE 才有。顺序契约见 finalize_order.go 的 StepSectionNormalize/StepResourcePatch。
 	if patched, err := b.patchResources(bin, &opts, targetOS); err != nil {
 		return nil, err
 	} else {

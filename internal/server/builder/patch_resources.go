@@ -304,6 +304,11 @@ type pePatchImage struct {
 	sizeOfImageOff   int
 	sizeOfHeadersOff int
 	checkSumOff      int
+	// COFF 符号表指针 / 符号数（v1.4.0 S3 第三批）：Go 链接器的 strip 产物里
+	// PointerToSymbolTable 仍是非 0 而 NumberOfSymbols=0（自相矛盾的组合），
+	// 处置逻辑见 pe_sections.go。这两个偏移只在这里解析一次，别处不再重算。
+	symTabPtrOff int
+	symCountOff  int
 }
 
 // isDLL 是否 IMAGE_FILE_DLL（决定 VS_FIXEDFILEINFO 的 dwFileType = VFT_DLL/VFT_APP）。
@@ -343,6 +348,10 @@ func parsePEPatchImage(data []byte) (*pePatchImage, error) {
 	m.sizeOptHdr = int(binary.LittleEndian.Uint16(data[m.fileHdrOff+16 : m.fileHdrOff+18]))
 	m.numSectionsOff = m.fileHdrOff + 2
 	m.timeStampOff = m.fileHdrOff + 4
+	// IMAGE_FILE_HEADER：Machine(0) / NumberOfSections(2) / TimeDateStamp(4) /
+	// PointerToSymbolTable(8) / NumberOfSymbols(12) / SizeOfOptionalHeader(16) / Characteristics(18)。
+	m.symTabPtrOff = m.fileHdrOff + 8
+	m.symCountOff = m.fileHdrOff + 12
 
 	if m.numSections <= 0 {
 		return nil, fmt.Errorf("PE 资源注入：文件头声明 0 个节，无法追加 .rsrc 节（这种 PE 本身也不可加载）")
@@ -1638,31 +1647,14 @@ func ResourceConfigForOptions(opts *BuildOptions) (PEResourceConfig, error) {
 //  2. `finalize_order.go` 的步骤列表里要不要出现 `pe_resource_patch`
 //     （"仅当本次构建真的要打资源时出现"，否则日志会报一个没发生的步骤）。
 //
-// 显式跳过的三类（都在代码里注明原因，不静默）：
-//   - **非 Windows 目标**：Linux/macOS 产物（ELF/Mach-O）根本不是 PE，没有 .rsrc 这回事；
-//   - **shellcode / shellcode_bin / raw / so**：交付物要么是文本/裸字节，要么不按 PE 交付。
-//     shellcode 路径会先编译 PE 再经 donut 转成位置无关 shellcode —— 资源节在转换后只会
-//     变成几 KB 垃圾数据，毫无"外观"收益，纯属体积负担；
-//   - **language=c（C 植入端，mingw）**：它走的是独立的 `buildCExecutable` 管线（不是
-//     compile/compileLibrary），本次改造**没有**接到那条链上。留待后续（C 档主打"体积极小"，
-//     要不要塞图标属于产品取舍），在报告与 CHANGELOG 里如实标注"未做"。
+// 适用范围（Windows PE 交付格式、四类显式跳过及其原因）统一由
+// `isWindowsPEDeliveryFormat` 判定，与 v1.4.0 S3 第三批的 `shouldNormalizeSections`
+// **共用同一口径**（两处判断将来不许漂移）。
+//
+// 与节规范化的区别：资源修补写的是操作员选定的身份（公司名/图标），所以**默认关闭**、
+// 零值不触发；节规范化只做减法，**默认执行**（见 pe_sections.go 顶部注释）。
 func shouldPatchResources(opts *BuildOptions, targetOS string) bool {
-	if opts == nil {
-		return false
-	}
-	os := strings.ToLower(strings.TrimSpace(targetOS))
-	if os == "" {
-		os = "windows" // 与 Build/compile 的默认目标一致
-	}
-	if os != "windows" {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(opts.Format)) {
-	case "exe", "bin", "dll":
-	default:
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(opts.Language), "c") {
+	if !isWindowsPEDeliveryFormat(opts, targetOS) {
 		return false
 	}
 	// 未知预设也必须走修补分支：只有真的进去，patchResources 才能把"预设名不认识"
