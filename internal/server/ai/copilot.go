@@ -1299,8 +1299,18 @@ func (c *Copilot) completeStreamOpts(ctx context.Context, messages []Message, op
 		if t.name == "" {
 			continue
 		}
+		// 上游可能**不给 id**（部分模型/代理只回 name+arguments）：此时必须由我们补一个稳定的
+		// 非空 id。否则回给上游的 assistant.tool_calls 会带 "id":""，而它的 tool 回执也带
+		// tool_call_id:""，上游按 id 配对时会认为"没有回执应答这次调用"并以 400 拒绝：
+		//   An assistant message with 'tool_calls' must be followed by tool messages
+		//   responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)
+		// 这正是"工具都执行成功、最后一轮却报 400"的成因之一（实测）。
+		id := t.id
+		if id == "" {
+			id = fmt.Sprintf("call_auto_%d", idx)
+		}
 		ag.ToolCalls = append(ag.ToolCalls, ToolCall{
-			ID:       t.id,
+			ID:       id,
 			Type:     "function",
 			Function: ToolCallFunc{Name: t.name, Arguments: t.args},
 		})

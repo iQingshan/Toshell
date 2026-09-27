@@ -626,8 +626,96 @@ func assembleCore(resident string, taskFn func(aggressive bool) string, convo []
 
 	stats.Compressed = stats.Aggressive || stats.CollapsedMessages > 0
 	stats.OverBudget = stats.UsableTokens > 0 && stats.CalibratedTokens > stats.UsableTokens
+	// 最后一道结构修复：绝不让"assistant.tool_calls 没有被 tool 回执应答"的序列发出去。
+	msgs = sanitizeToolPairs(msgs)
 	return msgs, stats
 }
+
+// sanitizeToolPairs 保证"assistant.tool_calls ↔ tool 回执"始终成对（v1.4.0 实测事故的修复）。
+//
+// 上游的硬要求（实测收到的 400 原文）：
+//
+//	An assistant message with 'tool_calls' must be followed by tool messages responding to
+//	each 'tool_call_id'. (insufficient tool messages following tool_calls message)
+//
+// 为什么历史里会出现"孤儿 tool_calls"：agent 循环有几条**早退分支**（打转停止、
+// 连续失败收敛、长任务挂起、审批挂起）会在"assistant 消息已经写进 run.Messages"之后
+// 直接 return，而没有为那一次 / 那几次调用补 tool 回执。run 是跨轮复用的（续接同一
+// run 保持记忆），于是**下一次**把历史整段发给上游时就必然 400 —— 症状正是"第一轮好好的、
+// 第二轮（或下一句）报 400"，而且与问题内容无关。
+//
+// 修复位置刻意放在装配出口（而不是逐个早退分支）：早退分支以后还会增加，装配出口只有一处；
+// 而且它同时能修好**历史里已经存下的**孤儿（老 run 的 Messages）。
+//
+// 处理规则：
+//  1. 每个 assistant.tool_calls 之后，按声明顺序紧跟它的 tool 回执；
+//     缺哪条就补一条 `（该工具调用未完成：<中止说明>）` —— **保留 assistant 原文**，
+//     不改写模型历史（把 tool_calls 删掉会让模型以为自己没调用过工具，更容易反复调）。
+//  2. 被其它消息（system 纠偏提示等）挤在中间的 tool 回执会被**并到** assistant 之后，
+//     因为"紧跟"是上游的判定方式。
+//  3. 找不到声明者的孤儿 tool 回执**原地保留**（上游的 400 只针对"声明了却没回执"；
+//     真实 run 里也不会出现孤儿：循环总是先写 assistant 再写回执）。
+//  4. 输出永远是入参的副本；不修改调用方的切片。
+func sanitizeToolPairs(msgs []Message) []Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+	// 建立 call_id → 回执 的索引（同一个 call_id 只有第一条算数）。
+	replies := make(map[string]Message, 4)
+	for _, m := range msgs {
+		if m.Role != "tool" {
+			continue
+		}
+		if m.ToolCallID != "" {
+			if _, dup := replies[m.ToolCallID]; !dup {
+				replies[m.ToolCallID] = m
+			}
+		}
+	}
+	hasCalls := false
+	for _, m := range msgs {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			hasCalls = true
+			break
+		}
+	}
+	if !hasCalls {
+		// 没有 assistant.tool_calls 的历史（含只有裸 tool 消息的旧数据/测试夹具）：
+		// **原样返回**。上游的 400 只针对"声明了却没回执"，孤儿回执不在本函数的职责内，
+		// 改写它只会动到历史语义（真实 run 里也不会出现孤儿：循环总是先写 assistant）。
+		return msgs
+	}
+
+	used := make(map[string]bool, len(replies))
+	out := make([]Message, 0, len(msgs)+2)
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			if m.ToolCallID != "" && used[m.ToolCallID] {
+				continue // 已在它的 assistant 之后输出过
+			}
+			out = append(out, m) // 孤儿回执：原地保留
+			continue
+		}
+		out = append(out, m)
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if rep, ok := replies[tc.ID]; ok && !used[tc.ID] {
+				used[tc.ID] = true
+				out = append(out, rep)
+				continue
+			}
+			// 补一条"未完成"回执：上游只要求"每个 call_id 都有应答"，内容由我们定。
+			// 文案如实写"未完成"，不伪造结果 —— 模型据此知道该动作没有产出，可自行重试。
+			out = append(out, Message{Role: "tool", ToolCallID: tc.ID, Content: missingToolReplyNote})
+		}
+	}
+	return out
+}
+
+// missingToolReplyNote 补出来的"未完成回执"文案（见 sanitizeToolPairs）。
+const missingToolReplyNote = "（该工具调用未完成：上一轮在此处中止或挂起，没有拿到结果。需要的话请重新调用。）"
 
 // fillStats 把单次装配的计数写进统计（TotalTokens/CalibratedTokens 同步重算）。
 func fillStats(stats *ContextStats, c contextCounts, calib TokenCalibration) {
