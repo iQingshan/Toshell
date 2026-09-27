@@ -810,6 +810,22 @@ export function Settings() {
                       />
                     </div>
                   </Field>
+                  {/* 载荷图标（implant.icon_path）：构建 Windows exe/dll/bin 时写进 .rsrc 的默认图标。
+                      只吃**服务端本机**的 .ico 路径（后端校验存在/是文件/.ico 后缀/≤1 MiB），
+                      不接受上传字节；生成载荷页可用 resource_icon_path 单次覆盖。
+                      留空即不打图标 —— 这也解释了为什么"设置里没配图标时产物里没有图标"。 */}
+                  <Field
+                    label="载荷图标（服务端本地 .ico 路径）"
+                    hint="构建 Windows exe/dll/bin 时默认写进 PE 的图标；只能填服务端本机上的 .ico 文件路径（不是上传），留空 = 不打图标。生成载荷页可用资源图标字段单次覆盖；改静态外观而已，不解决未签名 PE 被创建进程阶段拦截的问题。"
+                    style={{ gridColumn: '1 / -1' }}
+                  >
+                    <input
+                      className="ui-input ui-input--mono"
+                      value={draft.implant.icon_path || ''}
+                      onChange={(e) => setField('implant', 'icon_path', e.target.value)}
+                      placeholder="留空 = 不打图标"
+                    />
+                  </Field>
                 </div>
               </Section>
             )}

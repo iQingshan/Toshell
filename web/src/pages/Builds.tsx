@@ -21,6 +21,53 @@ interface StoredImplant {
   created_at: number
 }
 
+/**
+ * PE 资源注入（v1.4.0 S3 第二批）的请求字段清单 —— **空值处理的唯一收敛点**。
+ *
+ * 为什么要有这份清单：后端口径是"`resource_*` 全零值 = 不注入资源，产物与改动前逐字节
+ * 一致"。前端输入框天然会产生 `''`（用户没填），把 `''` 发过去虽然目前也等价于零值，
+ * 但"我没配置"这件事不该交给后端猜；而且 `resource_preset` 明确要求"空串也别发"。
+ * 所以只列一次字段名，`withoutEmptyResourceFields()` 按它统一剔除。
+ *
+ * 类型上它是 `keyof BuildRequest` 的字面量联合：写错字段名会直接编译失败，
+ * 后端新增/改名字段时这里也会跟着报错（比"静默发一个后端不认识的键"好）。
+ */
+const RESOURCE_REQUEST_FIELDS = [
+  'resource_preset',
+  'resource_icon_path',
+  'resource_company_name',
+  'resource_product_name',
+  'resource_file_description',
+  'resource_file_version',
+  'resource_product_version',
+  'resource_legal_copyright',
+  'resource_original_filename',
+  'resource_internal_name',
+  'resource_timestamp_mode',
+  'resource_timestamp',
+] as const
+
+/**
+ * 「空值不发送」：把没填 / 只填了空白的 PE 资源字段从请求体里删掉（外加 `resource_timestamp`
+ * 只在 `fixed` 策略下才有意义）。
+ *
+ * 非资源字段一律不动 —— 它们本来就有"0 / 空 = 跟随服务端配置"的既有语义。
+ */
+function withoutEmptyResourceFields(req: BuildRequest): BuildRequest {
+  const out: BuildRequest = { ...req }
+  // 时间戳取值只在 fixed 策略下有意义：用户填了值又把策略切回"不改"时，别把它捎带发出去。
+  if ((out.resource_timestamp_mode || '').trim() !== 'fixed') delete out.resource_timestamp
+  for (const field of RESOURCE_REQUEST_FIELDS) {
+    const raw = out[field]
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      delete out[field]
+    } else if (raw !== raw.trim()) {
+      out[field] = raw.trim() // 首尾空白（多是粘贴带进来的）不算内容
+    }
+  }
+  return out
+}
+
 export function Builds() {
   const [activeTab, setActiveTab] = useState<'builder' | 'list'>('builder')
   const [builderInfo, setBuilderInfo] = useState<BuilderInfo | null>(null)
@@ -286,7 +333,42 @@ export function Builds() {
     // 启动随机延迟：默认沿用服务端配置（implant.startup_delay_min/max）
     startup_delay_min: 0,
     startup_delay_max: 0,
+    // PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）：
+    // **全部留空 = 不注入资源**（产物与以前逐字节一致）。留空值在提交前会被
+    // withoutEmptyResourceFields() 从请求体里剔除，见该函数注释。
+    // 图标路径留空时后端会兜底用设置里的 implant.icon_path。
+    resource_preset: '',
+    resource_icon_path: '',
+    resource_company_name: '',
+    resource_product_name: '',
+    resource_file_description: '',
+    resource_file_version: '',
+    resource_product_version: '',
+    resource_legal_copyright: '',
+    resource_original_filename: '',
+    resource_internal_name: '',
+    resource_timestamp_mode: '',
+    resource_timestamp: '',
   })
+
+  /* ── PE 资源注入：能力对象来自 GET /builders 的 evasion（v1.4.0 S3 第二批）──
+     老版本服务端没有这一组字段：`resource_presets` 缺失或为空数组时**不渲染预设下拉**
+     （只留"不使用预设"这条语义，即什么都不选），手填字段照旧可用 —— 不能因此崩掉，
+     也不能把 "neutral" 硬编码进前端（预设名是服务端契约，将来加预设要能自动出现）。 */
+  const evasion = builderInfo?.evasion
+  const resourcePresets: string[] = Array.isArray(evasion?.resource_presets) ? evasion.resource_presets : []
+  /** 服务端声明的默认状态（"off" = 不带 resource_* 字段时产物逐字节不变） */
+  const resourceDefaultOff = (evasion?.resource_default ?? 'off').toLowerCase() === 'off'
+  // 格式/系统门控：资源注入只对 Windows 的 exe/bin/dll 生效，且 C 植入端（mingw 管线）
+  // 未接入（服务端 shouldPatchResources 会把这三类都跳过）。不满足时**只显示一句说明、
+  // 不显示控件** —— 让操作员填半天却拿到"构建成功但没资源"的哑结果是最坏的选择。
+  const osFormatOkForResource = formData.os === 'windows' && ['exe', 'bin', 'dll'].includes(formData.format)
+  const resourceSupported = osFormatOkForResource && (formData.language || 'go') !== 'c'
+  const resourceUnsupportedReason = !osFormatOkForResource
+    ? formData.os !== 'windows'
+      ? `目标系统是 ${formData.os}：Linux/macOS 产物是 ELF/Mach-O，没有 .rsrc 节可写`
+      : `交付格式是 ${formData.format}：shellcode / raw / so 不按 PE 交付，资源节在转换后只会变成几 KB 垃圾数据`
+    : '植入端语言是 C（mingw 管线）：该链路本次未接入资源注入，服务端会跳过这组参数'
 
   const fetchData = async () => {
     setLoading(true)
@@ -404,7 +486,8 @@ export function Builds() {
 
     setBuilding(true)
     try {
-      const response = await builderApi.create(formData)
+      // 资源字段留空＝不发送（后端据此走"不注入资源"分支，产物逐字节不变）。
+      const response = await builderApi.create(withoutEmptyResourceFields(formData))
       const result = {
         id: response.data.id,
         name: response.data.name,
@@ -1337,6 +1420,242 @@ export function Builds() {
                     </div>
                   </div>
                 </div>
+              </Section>
+
+              {/* ── PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）──
+                  定位必须先说清楚：这一组改的是**静态外观**（"这份 PE 有没有公司名/图标/版本信息"），
+                  它**解决不了**"未签名 PE 被国产杀软在创建进程阶段拦下"（那是签名/信誉层，见上面
+                  的代码签名说明）。控件只在服务端真的会处理的组合下渲染：Windows × exe/bin/dll ×
+                  非 C 植入端（服务端 shouldPatchResources 的判定口径），其余组合只给一句说明，
+                  免得操作员填了半天却拿到"构建成功但没资源"的哑结果。 */}
+              <Section
+                title="PE 版本资源与图标（可选，静态降特征）"
+                desc={
+                  <>
+                    往 PE 的 <code>.rsrc</code> 里写 VS_VERSIONINFO（公司名/产品名/描述/版本/版权/
+                    原始文件名/内部名）、图标与 COFF 时间戳，让产物看起来像一份正经软件，
+                    而不是一个"未命名的新 PE"。
+                    <strong>它改的是静态特征，不是免杀</strong>：解决不了"未签名 PE 被 360/电脑管家
+                    在创建进程阶段拦下"这类签名/信誉层拦截 —— 那一层得先把代码签名配好，
+                    这组参数只能让静态信息不再明显可疑。
+                    {evasion?.resource_note ? (
+                      <>
+                        <br />
+                        服务端口径：{evasion.resource_note}
+                        {evasion?.resource_order ? `（写入位置：${evasion.resource_order}）` : ''}
+                      </>
+                    ) : null}
+                  </>
+                }
+                badge={
+                  resourceSupported ? (
+                    <Badge tone="accent">{resourceDefaultOff ? '可选 · 默认不注入' : '可选'}</Badge>
+                  ) : (
+                    <Badge tone="warn">当前选择不生效</Badge>
+                  )
+                }
+                defaultOpen={false}
+              >
+                {!resourceSupported ? (
+                  <Callout tone="info" title="当前这组参数不会被服务端处理，所以不显示控件">
+                    {resourceUnsupportedReason}。把「目标系统 + 输出格式」切到 Windows 的
+                    <code>exe</code> / <code>dll</code> / <code>bin</code> 且植入端语言为 Go 时，
+                    这些控件才会出现。
+                  </Callout>
+                ) : (
+                  <>
+                    {/* 预设：选项来自 GET /builders 的 evasion.resource_presets（不硬编码）；
+                        服务端返回空数组（老版本）时这里退化成"只说明、不显示下拉"。 */}
+                    <div className="form-group">
+                      {resourcePresets.length > 0 ? (
+                        <>
+                          <label>资源预设</label>
+                          <select
+                            name="resource_preset"
+                            value={formData.resource_preset || ''}
+                            onChange={handleInputChange}
+                          >
+                            <option value="">不使用预设</option>
+                            {resourcePresets.map((p) => (
+                              <option key={p} value={p}>
+                                {p}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="form-hint">
+                            预设<strong>只填你没显式给的字段</strong>，下面手填的值永远优先（预设不覆盖你填的内容）。
+                            当前服务端提供：{resourcePresets.join(' / ')}。
+                            {resourcePresets.includes('neutral') ? (
+                              <>
+                                其中 <code>neutral</code> 是自有品牌「ToShell Ops Toolkit」（公司名/产品名/描述/版权 +
+                                <code>toshell-agent.exe|dll</code> + 固定时间戳），<strong>不冒充任何真实厂商/系统组件</strong>，
+                                也不替你猜版本号（版本留空 → 服务端用 1.0.0.0）。
+                              </>
+                            ) : null}
+                            预设名由服务端校验，填错会让构建失败。
+                            {formData.resource_preset
+                              ? ` 已选「${formData.resource_preset}」：只有留空的字段由它补齐。`
+                              : ''}
+                          </p>
+                        </>
+                      ) : (
+                        <Callout tone="default" title="当前服务端未提供资源预设">
+                          <code>GET /builders</code> 的 <code>evasion.resource_presets</code> 为空
+                          （多为老版本服务端）：预设下拉不显示，下面的字段与时间戳仍可手填，
+                          由服务端做校验。
+                        </Callout>
+                      )}
+                    </div>
+
+                    <div className="form-row form-row-3">
+                      <div className="form-group">
+                        <label>公司名</label>
+                        <input
+                          type="text"
+                          name="resource_company_name"
+                          value={formData.resource_company_name || ''}
+                          onChange={handleInputChange}
+                          placeholder="留空 = 不写该字段"
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>产品名</label>
+                        <input
+                          type="text"
+                          name="resource_product_name"
+                          value={formData.resource_product_name || ''}
+                          onChange={handleInputChange}
+                          placeholder="留空 = 不写该字段"
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>文件描述</label>
+                        <input
+                          type="text"
+                          name="resource_file_description"
+                          value={formData.resource_file_description || ''}
+                          onChange={handleInputChange}
+                          placeholder="留空 = 不写该字段"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="form-row form-row-3">
+                      <div className="form-group">
+                        <label>文件版本</label>
+                        <input
+                          type="text"
+                          name="resource_file_version"
+                          value={formData.resource_file_version || ''}
+                          onChange={handleInputChange}
+                          placeholder="1.4.0.0"
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>产品版本</label>
+                        <input
+                          type="text"
+                          name="resource_product_version"
+                          value={formData.resource_product_version || ''}
+                          onChange={handleInputChange}
+                          placeholder="1.4.0.0"
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>版权信息</label>
+                        <input
+                          type="text"
+                          name="resource_legal_copyright"
+                          value={formData.resource_legal_copyright || ''}
+                          onChange={handleInputChange}
+                          placeholder="留空 = 不写该字段"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="form-row">
+                      <div className="form-group">
+                        <label>原始文件名</label>
+                        <input
+                          type="text"
+                          name="resource_original_filename"
+                          value={formData.resource_original_filename || ''}
+                          onChange={handleInputChange}
+                          placeholder="如 toshell-agent.exe"
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>内部名</label>
+                        <input
+                          type="text"
+                          name="resource_internal_name"
+                          value={formData.resource_internal_name || ''}
+                          onChange={handleInputChange}
+                          placeholder="如 toshell-agent"
+                        />
+                      </div>
+                    </div>
+                    <p className="form-hint">
+                      以上八个字段<strong>留空即不写</strong>（全空 = 完全不注入资源，产物与以前逐字节一致）。
+                      文件/产品版本写成 <code>a.b.c.d</code>（如 <code>1.4.0.0</code>），留空时服务端用
+                      <code>1.0.0.0</code>；原始文件名与交付格式保持一致更像正常软件
+                      （<code>dll</code> 写 <code>.dll</code>，<code>exe</code>/<code>bin</code> 写 <code>.exe</code>）。
+                    </p>
+
+                    <div className="form-group">
+                      <label>载荷图标（.ico）</label>
+                      <input
+                        type="text"
+                        name="resource_icon_path"
+                        value={formData.resource_icon_path || ''}
+                        onChange={handleInputChange}
+                        placeholder="服务端本机 .ico 路径（留空 = 用设置里的 implant.icon_path）"
+                      />
+                      <p className="form-hint">
+                        这里填的是<strong>服务端本机上的 .ico 路径，不是上传文件</strong>：服务端会校验
+                        存在 / 是文件 / <code>.ico</code> 后缀 / 不超过 1 MiB，再做一次 ICO 结构校验。
+                        留空则回退到「设置 → 植入端与载荷」里的 <code>implant.icon_path</code>；
+                        两处都留空 = 不打图标。
+                      </p>
+                    </div>
+
+                    <div className="form-row">
+                      <div className="form-group">
+                        <label>时间戳策略</label>
+                        <select
+                          name="resource_timestamp_mode"
+                          value={formData.resource_timestamp_mode || ''}
+                          onChange={handleInputChange}
+                        >
+                          <option value="">不改（保持链接器原值）</option>
+                          <option value="fixed">固定（用下面的时间）</option>
+                          <option value="random">随机（不晚于构建机当前时间）</option>
+                        </select>
+                        <p className="form-hint">
+                          Go 链接器默认把 COFF 时间戳置 0，这本身就是一个"非正常发布"的信号；
+                          改成一个过去的时间更像真实构建。选「不改」时该字段不发送（等价于旧行为）。
+                          任何策略都<strong>不允许晚于构建机当前时间</strong>（未来时间戳是比 0 更明显的伪造信号）。
+                        </p>
+                      </div>
+                      {formData.resource_timestamp_mode === 'fixed' && (
+                        <div className="form-group">
+                          <label>固定时间戳 (RFC3339)</label>
+                          <input
+                            type="text"
+                            name="resource_timestamp"
+                            value={formData.resource_timestamp || ''}
+                            onChange={handleInputChange}
+                            placeholder="2024-03-15T09:00:00Z"
+                          />
+                          <p className="form-hint">
+                            留空 = 用服务端内置的 <code>2024-03-15T09:00:00Z</code>；填未来时间会被服务端拒绝。
+                            只有「固定」策略才发送这个值（切回「不改」后不会捎带发出去）。
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
               </Section>
             </div>
             <div className="modal-footer">

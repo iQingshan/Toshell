@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Session, Task, TaskStats, LogEntry, TaskRequest, ListenerInfo } from '../types'
+import type { Session, Task, TaskStats, LogEntry, TaskRequest, ListenerInfo, PeResourceRequest } from '../types'
 
 export interface Tunnel {
   id: number
@@ -318,7 +318,7 @@ export const listenerApi = {
   delete: (id: string) => api.delete<{ message: string }>(`/listeners/${id}`),
 }
 
-export interface BuildRequest {
+export interface BuildRequest extends PeResourceRequest {
   name: string
   format: string
   /** 植入端语言：go(默认,全功能) / c(C 植入端,体积极小,仅 Windows) */
@@ -375,6 +375,9 @@ export interface BuildRequest {
   /** 启动随机延迟（秒）：留空用服务端配置（implant.startup_delay_min/max） */
   startup_delay_min?: number
   startup_delay_max?: number
+  // PE 版本资源 / 图标 / 公司信息 / 时间戳（resource_*）见 PeResourceRequest：
+  // 定义放在 types/index.ts，因为它们是"构建请求 → .rsrc 内容"的契约（服务端 builder
+  // 侧是同名字段），前端生成载荷页与设置页都要引用同一份说明。
 }
 
 export interface BuildResponse {
@@ -483,6 +486,18 @@ export interface BuilderInfo {
     dll_message?: string
     /** 按目标架构分别给出 DLL 能力：c-shared 需要与架构一致的 mingw gcc */
     dll_arch?: Record<string, { available: boolean; message: string }>
+    // ─── PE 资源注入能力（v1.4.0 S3 第二批）───
+    /**
+     * 可用的资源预设名（如 ["neutral"]）。**老版本服务端可能整段缺失或返回空数组**
+     * → 前端不渲染预设下拉（不能当成错误，也不能硬编码预设名）。
+     */
+    resource_presets?: string[]
+    /** 默认状态："off" = 不带 resource_* 字段时产物逐字节不变 */
+    resource_default?: string
+    /** 资源写入在交付流水线里的位置（契约：pe_resource_patch = 指纹擦除之后、UPX/签名之前） */
+    resource_order?: string
+    /** 服务端给的中文说明（图标只吃服务端本地 .ico 路径等），有就直接展示 */
+    resource_note?: string
   }
 }
 
