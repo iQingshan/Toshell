@@ -77,9 +77,22 @@
 ### S4 植入端体积分档与内存加载
 
 - ✅ **能力位图（前置阻塞项，v1.4.0 已完成）**：`/sessions/{id}/capabilities` 原来**只按 OS** 推导 —— 用 `light` 档构建的载荷照样点亮注入/截图/凭据/EDR/BYOVD 面板，点下去只得到"未包含在精简构建中"。现在新增 `internal/common/features` 作为**唯一一份纯函数**（档案/tag/OS → 能力集合 + `tabs` + `cap:v1:<hex>` 位图；未知档案 fail-closed 归入 light），构建期把位图烘进载荷（且照旧走字符串混淆），植入端经**已有**的 `Modules` 字段随心跳上报（四条传输一致），服务端 `Resolve()` **上报优先、老载荷按 OS 兜底**并标 `source: reported|os_fallback` + `source_note`。**实测**：light 载荷 11 项能力 / tabs 只有 av·files·info·process·shell；full 载荷 31 项能力、注入/截图/凭据/EDR/BYOVD/插件按真实编译结果点亮。
-- **分档与构建**：`nano / light / full` 三档（含通道维度），给出每档的功能对账表、构建命令、前端提示；**默认档改为 `light`**；目标体积：nano ≤1.8 MB / light ≤2.4 MB / full ≤3.2 MB（TCP、不含 BOF；**Go 档做不到 800 KB 级**，那是 C 植入端的量级）；**UPX 不做默认**（破坏签名、与"去 RWX"冲突）。当前实测体积（windows/386，按 1 MB = 10⁶ 字节计）：light **2.90 MB**、full **3.47 MB** —— **light 档 2.4 MB 目标仍未达标**，需要下一条的 build tag 化。
 - **分档与构建**：`nano / light / full` 三档（含通道维度），给出每档的功能对账表、构建命令、前端提示；**默认档改为 `light`**；目标体积：nano ≤1.8 MB / light ≤2.4 MB / full ≤3.2 MB（TCP、不含 BOF；**Go 档做不到 800 KB 级**，那是 C 植入端的量级）；**UPX 不做默认**（破坏签名、与"去 RWX"冲突）。
-- **内存模块 build tag 化**：`injection / edr / stomp / imgexec` 等按需裁剪（P0-5 待做 3）。
+  - **v1.4.0 实测矩阵**（windows/386，`-s -w -buildid= -H windowsgui -trimpath`，Go 1.20.14；按 1 MB = 10⁶ 字节计）——把计划里"需实测"的合并项拆开了：
+    | 变体 | 字节 | 相对 light/tcp | 说明 |
+    |---|---|---|---|
+    | 空程序（地板） | 801,280 | — | **Go runtime 地板 0.80 MB** |
+    | 空程序 + `net`+`json`+`fmt`+`os`+`time` | 2,010,624 | — | **核心标准库地板 2.01 MB**（已超 nano 目标 1.8 MB） |
+    | V0 light / tcp | 2,895,093 | 基准 | 当前默认档 |
+    | V1 light / tcp + `bof` | 2,895,093 | **0** | light 档本就排除 BOF，tag 无效果（与能力位图一致） |
+    | V2 light / tcp + `evasionscan` | 2,902,261 | +7,168 | 杀软进程枚举 7 KB |
+    | V3 light / **http** | 5,403,894 | **+2,508,801** | 引入 `net/http`+`crypto/tls` |
+    | V4 light / **websocket** | 5,044,475 | +2,149,382 | 再叠 gorilla/websocket |
+    | V5 light / **mqtt** | 5,348,086 | +2,452,993 | 再叠 MQTT 库 |
+    | V6 full / tcp | 3,468,533 | +573,440 | 全部 Windows 可选功能（注入/EDR/凭据/BYOVD/截图/插件/中继） |
+    | V7 full / mqtt | 5,921,526 | +3,026,433 | 最重组合 |
+  - **判读（决定后续优先级）**：① 体积大头是**传输栈**（http/ws/mqtt 各 +2.1~2.5 MB），比所有功能 tag 加起来（+0.57 MB）还大一个量级 —— 要小就核心走极简 socket，重型传输按需模块化；② light/tcp 的 2.90 MB 里，2.01 MB 是**核心标准库地板**（`net`+`json`+`fmt`；nano 目标本身就低于地板），我们的代码只占约 0.89 MB；③ 因此 **`light` ≤2.4 MB 只能靠 stdlib 瘦身**（手写 JSON/精简 fmt、避开 `crypto/tls`），`nano` ≤1.8 MB 在 Go 里**做不到**，要用 C 植入端或换收发层。
+- **内存模块 build tag 化**：`injection / edr / stomp / imgexec` 等按需裁剪（P0-5 待做 3）。✅ 现有 `light` 档已裁掉注入/EDR/凭据/BYOVD/截图/插件/中继（实测 full−light = 573 KB，见上表 V6）。
 - **`exec_module` 契约与 ABI**：复用已有反射式加载底座（`blob_windows.go` 在 light 档也保留、全程无 RWX），补 `tsh_module_ctx` + `tsh_module_main` ABI（现有导出是**零参调用**，拿不到参数/返回值）；传输走一次性 token（取代"内联 base64 塞任务"）；9 步校验链（sha256 硬拦 + 复用 `pecheck.go`）。
 - **工具库与远程加载（P2）**：`data/tools/<os>/<arch>/` + `manifest.json`（sha256/来源/许可），预置自研脚本、第三方按需下载校验；内网探测 / 横向 / 凭据利用 / 规避载荷全部**远程加载**，植入端体积不随能力增长。
 - **验收**：各档体积落到目标区间（构建机实测）；`light` 载荷在界面上不再显示未编译能力；远程模块能完成「下载→校验→内存加载→执行→回传→清理」闭环，哈希不符即拒绝。
