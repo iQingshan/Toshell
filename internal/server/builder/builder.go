@@ -339,6 +339,11 @@ func (b *Builder) Build(opts BuildOptions) (*BuildResult, error) {
 		targetOS = "windows"
 	}
 
+	// 交付流水线的"字节加工顺序"契约（签名必须最后，见 finalize_order.go）：
+	// 构建开始时打一行日志并在顺序被改坏时告警 —— 白签从接口上看仍是 signed=true，
+	// 只能在这里留痕。
+	b.logFinalizePipeline(opts, targetOS)
+
 	// C 植入端：独立编译管线（当前支持 Windows exe，x86/x64）
 	if opts.Language == "c" {
 		if targetOS != "windows" {
@@ -588,6 +593,11 @@ func (b *Builder) compile(opts BuildOptions) ([]byte, error) {
 		binary = scrubbed
 		logging.Info("builder", "go fingerprint scrubbed: %s", strings.Join(removed, "；"))
 	}
+	// 第二遍：全文件版本串（`runtime.buildVersion`，锚定窗口扫不到的那一份）。必须在 UPX 之前。
+	if scrubbed, removed := ScrubGoVersionStrings(binary); len(removed) > 0 {
+		binary = scrubbed
+		logging.Info("builder", "go version string scrubbed: %s", strings.Join(removed, "；"))
+	}
 
 	// UPX 压缩（仅 Windows exe 且 UPX 可用且开启）
 	if b.useUPX && opts.UPXEnable && targetOS == "windows" && (opts.Format == "exe" || opts.Format == "bin") {
@@ -636,7 +646,20 @@ func (b *Builder) compileLibrary(opts BuildOptions) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return b.compileSharedLibrary(tmpDir, targetOS, arch, opts, exportName, opts.DLLAutoStart)
+	bin, err := b.compileSharedLibrary(tmpDir, targetOS, arch, opts, exportName, opts.DLLAutoStart)
+	if err != nil {
+		return nil, err
+	}
+	// DLL 路径的指纹擦除（v1.4.0 S3 补齐）：锚定版擦除（魔数 / Go build ID / 窗口内版本串）
+	// 已经在 compileSharedLibrary 里做过（见 dll.go 的同名日志），这里**只补全文件版本串**——
+	// 实测 c-shared 产物里 `go1.20.14`（`runtime.buildVersion`）落在锚定窗口之外，
+	// 锚定版扫不到，正是这一遍收掉的（修复前 windows/386 DLL 残留 1 次，修复后 0 次）。
+	// 等长置零不影响 PE 节表/重定位，也不影响其后的签名（签名在 Build 里，永远是最后一步）。
+	if scrubbed, removed := ScrubGoVersionStrings(bin); len(removed) > 0 {
+		bin = scrubbed
+		logging.Info("builder", "DLL go version string scrubbed: %s", strings.Join(removed, "；"))
+	}
+	return bin, nil
 }
 
 // 说明：旧的 generateLibraryCode（生成 `//export DllMain {}` + 空 main 的假 DLL 胶水）

@@ -62,7 +62,11 @@
 - **仍未做**（S2 剩余）：异步任务状态机（工具调用改成"提交 → 句柄 → 事件驱动恢复"）、上下文四层与 token 预算、SSE `id`/`Last-Event-ID` 断点续传、评估门禁；`ai/playbook.go` 的步骤输出仍是字符串硬截断（会动到剧本 API 字段语义，留给下一增量）。
 
 ### 🥷 S3 免杀：分层治理（落地 / 动态 / 静态）
-- （待填）
+
+- **签名顺序约束（防"白签"，计划 §3 D3）**：新增 `internal/server/builder/finalize_order.go` —— 把"字节加工顺序"写成**唯一一份可断言的契约**（步骤名常量 + 纯函数 `finalizeSteps` + 守卫 `signOrderWarning`），每次构建打一行 `交付流水线（…签名必须是最后一步）：…`，顺序被改坏（签名之后仍有改字节的步骤）立即打 **error** 日志并点名违规步骤。动机：签名复核发生在签名之后、后处理之前，**白签从接口上看仍是 `signed=true`**，只能靠顺序约束 + 日志留痕。新增 PE 资源/图标/版本信息/时间戳类步骤时必须插在 `upx` 与 `sign` 之前，`finalize_order_test.go` 的表驱动用例（平台 × 格式 × 开关）会拦住"sign 不在最后"的改动。
+- **确认时间戳真的传给了签名命令**（计划里唯一一处"待确认"）：`signWithSigntool` 用 `/tr <url> /td sha256`、PowerShell 路径走 `-TimestampServer`，两条路径都在；同时把"启用真实证书必须开时间戳，否则证书过期后签名一次性全废"写进 `docs/EVASION.md`。
+- **修掉 Go 构建指纹的版本串漏点（实测发现，exe 与 dll 都有）**：构建 `windows/386` 产物后逐字节计数，`format=exe` 与 `format=dll` **都残留 1 次 `go1.20.14`**。原因不是"没擦"，而是**擦的范围不够**：既有擦除的版本窗口是**锚在 buildinfo 魔数之后 512 字节**里的（dll 路径在 `dll.go` 里也已做过这层锚定擦除，所以两种产物的魔数与 `Go build ID:` 本来就是 0），而 `runtime.buildVersion` 那份版本串（`runtime.Version()` 读的）落在**别处的只读数据段**，锚定窗口永远扫不到。新增 `ScrubGoVersionStrings`（全文件扫描，匹配规则与窗口版**完全一致**：`go1.` 必须紧跟数字、回退收尾点号，只清零、长度不变），exe 路径（`compile()`）与 dll 路径（`compileLibrary()`）各接一遍，都排在 UPX 与签名之前。**修复后两种产物的三项标记（魔数 / Go build ID / `go1.x`）全部为 0，且产物字节数完全不变**（exe 3456757、dll 3414528）。安全性已核对：植入端模板不引用 `runtime.Version()`/`Debug.ReadBuildInfo()`，清零只影响运行时崩溃/诊断输出里的版本信息。
+- 文档：`docs/EVASION.md` 新增 §2.4「签名顺序约束（防白签）」，§2.3 补上版本串漏点的实测前后对照表，自查口径加上 `go1.x` 版本串。
 
 ### 📦 S4 植入端体积分档与内存加载
 - （待填）
@@ -74,7 +78,8 @@
 - （待填）
 
 ### 🩹 其它
-- （待填）
+
+- **会话不存在返回 404 而不是 500（e2e 冒烟长期挂着的观察项）**：`task.Manager.Create` 在会话不存在时返回 `session not found: <id>`，而 handler 一律当 500 返回 —— **客户端输入错误被报成服务端故障**：调用方会重试而不是修正会话 id，监控也会把它计入服务端错误率（掩盖真问题）。新增 `internal/server/api/handlers_session_guard.go` 作为这一约定的唯一出处（会话不存在→404 `session_not_found`、listener 未就绪→503 `listener_unavailable`、其余框架错误→保持 500），先落在 e2e 探针实际打到的 `POST /sessions/{id}/screen-stream`（实测：会话不存在 → **404** + `{"error":"session not found: …"}`），并补 3 个 httptest 用例。**仍未做**：其余下发类 handler（files/processes/screenshot/credentials/fileless/edr/relay）仍是"一律 500"，需逐个人工核对语义后套用同一个 helper。
 
 ## [v1.3.5] - 2026-09-15
 

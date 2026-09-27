@@ -114,7 +114,7 @@ func ScrubGoFingerprint(bin []byte) (out []byte, removed []string) {
 			winEnd = len(out)
 		}
 		if winStart < winEnd {
-			removed = append(removed, scrubGoVersions(out, winStart, winEnd)...)
+			removed = append(removed, scrubGoVersions(out, winStart, winEnd, "buildinfo 窗口内")...)
 		}
 
 		search = at + len(magic)
@@ -128,7 +128,8 @@ func ScrubGoFingerprint(bin []byte) (out []byte, removed []string) {
 
 // scrubGoVersions 把 [start,end) 窗口内形如 go1.<数字/点> 的版本串用 0x00 覆盖，
 // 返回中文说明。窗口内可能有多个（版本串 + module 信息区），全部处理。
-func scrubGoVersions(buf []byte, start, end int) []string {
+// where 只用于日志文案（"buildinfo 窗口内" / "全文件"），便于事后区分是谁清掉的。
+func scrubGoVersions(buf []byte, start, end int, where string) []string {
 	var removed []string
 	prefix := []byte("go1.")
 	for i := start; i < end; {
@@ -153,10 +154,36 @@ func scrubGoVersions(buf []byte, start, end int) []string {
 		ver := string(buf[at:k])
 		zeroRange(buf, at, k)
 		removed = append(removed, fmt.Sprintf(
-			"buildinfo 窗口内的 Go 版本串 %q（偏移 0x%x，置零）", ver, at))
+			"%s的 Go 版本串 %q（偏移 0x%x，置零）", where, ver, at))
 		i = k
 	}
 	return removed
+}
+
+// ScrubGoVersionStrings 全文件扫描并清零形如 go1.<数字> 的版本串（长度不变，幂等）。
+//
+// 为什么需要它（v1.4.0 S3 实测发现，exe 与 dll 都有）：`ScrubGoFingerprint` 里版本串的
+// 擦除范围是**锚在 buildinfo 魔数之后 512 字节窗口**内的，而 Go 运行时另有一份版本串
+// （`runtime.buildVersion`，`runtime.Version()` 读的就是它）落在别处的只读数据段里，
+// 锚定窗口扫不到。实测 windows/386 构建产物（擦除前魔数/Build ID 都在，擦除后它们归零）：
+//
+//	format=exe  魔数 0、Go build ID 0、go1.20.14 仍命中 1 次   ← 漏
+//	format=dll  魔数 0、Go build ID 0、go1.20.14 仍命中 1 次   ← 漏（且 dll 路径此前压根没做擦除）
+//
+// 于是补一次"全文件版本串擦除"。匹配规则与窗口版**完全一致**（`go1.` 必须紧跟数字，
+// 且回退收尾的点号），因此不会误伤 "go1.x"、"go1." 这类普通文本；只清零、长度不变，
+// 所以 PE 节表/重定位/校验和全不受影响。
+//
+// 安全性：植入端模板不调用 `runtime.Version()`/`Debug.ReadBuildInfo()`（已核对
+// internal/server/builder/implant 与 release/implant），清零只影响运行时崩溃/诊断输出
+// 里的版本信息 —— 那正是我们要消掉的特征。
+func ScrubGoVersionStrings(bin []byte) (out []byte, removed []string) {
+	out = make([]byte, len(bin))
+	copy(out, bin)
+	if len(out) == 0 {
+		return out, nil
+	}
+	return out, scrubGoVersions(out, 0, len(out), "全文件")
 }
 
 // scrubGoBuildIDs 把 `Go build ID:` 前缀置零。

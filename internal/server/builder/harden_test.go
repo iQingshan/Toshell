@@ -313,3 +313,72 @@ func TestScrubGoBuildIDPrefix(t *testing.T) {
 		t.Errorf("规范形态的记录应说明含 ID，实际：%v", removed2)
 	}
 }
+
+// ─── 全文件版本串擦除（v1.4.0 S3：锚定窗口扫不到的那一份）────────────────────
+
+// TestScrubGoVersionStrings_RemovesOutsideWindow 没有 buildinfo 魔数时，锚定窗口版擦除
+// 完全失效（窗口由魔数反推），而 `runtime.buildVersion` 那份版本串还在 —— 这正是实测里
+// exe 与 dll 都残留 1 次 go1.20.14 的原因。全文件版必须能收掉它。
+func TestScrubGoVersionStrings_RemovesOutsideWindow(t *testing.T) {
+	in := []byte("head\x00\x00go1.20.14\x00\x00middle\x00\x00tail")
+	before := append([]byte(nil), in...)
+
+	out, removed := ScrubGoVersionStrings(in)
+
+	if len(out) != len(in) {
+		t.Fatalf("长度必须不变：in=%d out=%d", len(in), len(out))
+	}
+	if !bytes.Equal(in, before) {
+		t.Fatal("入参被修改：必须是只读的")
+	}
+	if bytes.Contains(out, []byte("go1.20.14")) {
+		t.Error("版本串仍残留")
+	}
+	if !bytes.Contains(out, []byte("head")) || !bytes.Contains(out, []byte("tail")) {
+		t.Error("相邻数据被误擦")
+	}
+	if len(removed) != 1 || !strings.Contains(removed[0], "全文件") {
+		t.Fatalf("记录应说明是全文件扫描，实际：%v", removed)
+	}
+	// 幂等：再擦一次不应有命中。
+	if _, again := ScrubGoVersionStrings(out); len(again) != 0 {
+		t.Fatalf("幂等性被破坏，第二次仍擦到：%v", again)
+	}
+}
+
+// TestScrubGoVersionStrings_KeepsLookalikes 只擦"go1." 紧跟数字的形态：
+// 普通文本 go1.x / go1. / go1 一律不动，避免误伤业务字符串。
+//
+// 注意 `go1.2.3x` 这种"版本号后缀跟着字母"的形态：规则会清掉其中的 `go1.2.3`
+// （数字/点连续段），末尾的 `x` 保留 —— 这与既有的窗口版 scrubGoVersions 行为**完全一致**
+// （见 TestScrubGoFingerprint_VersionOutsideWindow），两条路径必须同规则，否则同一份产物
+// 走 exe 与 dll 两条路径会得到不同的擦除结果。
+func TestScrubGoVersionStrings_KeepsLookalikes(t *testing.T) {
+	in := []byte("go1.x go1. go1 GO1.2 end")
+	out, removed := ScrubGoVersionStrings(in)
+	for _, keep := range []string{"go1.x", "go1. ", "go1 ", "GO1.2", "end"} {
+		if !bytes.Contains(out, []byte(keep)) {
+			t.Errorf("误擦了普通文本 %q：%q", keep, out)
+		}
+	}
+	if len(removed) != 0 {
+		t.Fatalf("这段文本里没有版本串，不该擦到任何东西：%v", removed)
+	}
+
+	// 版本号后缀字母：数字段被清、后缀保留（与窗口版同规则）。
+	out2, removed2 := ScrubGoVersionStrings([]byte("go1.2.3x"))
+	if len(removed2) != 1 {
+		t.Fatalf("应清掉 1 处版本串，实际 %v", removed2)
+	}
+	if !bytes.Equal(out2, []byte("\x00\x00\x00\x00\x00\x00\x00x")) {
+		t.Fatalf("应只清零 go1.2.3 这 7 字节，实际 %q", out2)
+	}
+}
+
+// TestScrubGoVersionStrings_Empty 空输入不 panic、返回空。
+func TestScrubGoVersionStrings_Empty(t *testing.T) {
+	out, removed := ScrubGoVersionStrings(nil)
+	if len(out) != 0 || len(removed) != 0 {
+		t.Fatalf("空输入应原样返回：out=%v removed=%v", out, removed)
+	}
+}

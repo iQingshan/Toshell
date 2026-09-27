@@ -82,14 +82,42 @@ sleep mask 具体做了什么（便于自查与排错）：
 | pclntab 中性化（函数名/文件名改中性名） | `internal/server/builder/implant/` 各模板（`main.go` 等） | ✅ **实测**（字符串体检） |
 | BOF 按需编译（**默认关**） | `internal/server/builder/implant/bof_windows.go`（`//go:build windows && !light && bof`）与默认实现 `bof_stub_windows.go`；门控 `internal/server/builder/builder.go` 的 `buildTagList` | ✅ **实测**（字符串体检）：默认载荷 `beaconAPI=0`，勾选后 22（证明门控生效）；`gate_scan_test.go: TestBOFIsOptIn` |
 | Go 构建指纹擦除（原地置零，长度不变） | `internal/server/builder/harden.go`（`ScrubGoFingerprint`：`\xff Go buildinf:` 魔数 / buildinfo 窗口内 `go1.x.y` / `Go build ID:` 前缀） | ✅ **实测**（字符串体检）：默认载荷 `Go buildinf=0`、`Go build ID:=0`；`harden_test.go` 覆盖擦除/幂等/边界 |
+| **全文件 Go 版本串擦除**（v1.4.0 S3 新增，见下） | `internal/server/builder/harden.go` 的 `ScrubGoVersionStrings`，接入 `builder.go` 的 `compile()`（exe/bin/raw/shellcode）与 `compileLibrary()`（dll） | ✅ **实测**（产物计数）：修复前 exe 与 dll 各残留 `go1.20.14` **1 次**，修复后 **0 次**；`harden_test.go` 覆盖"窗口外命中/普通文本不误伤/幂等/空输入" |
 | 每构建随机化（配置块魔数/密钥、xd 密钥基准、API 哈希种子） | `internal/server/builder/builder.go`、`internal/server/builder/evasion.go`、`internal/server/builder/implant/obfuscate.go` | ✅ **实测**（字符串体检）：默认载荷 `loadShellcode=0`、`kgameprotect/byovd/HVCI=0` |
 | 高信号标识符（`loadShellcode` 等）默认不进载荷 | 同 pclntab 中性化 | ✅ **实测** |
 
-静态体检的完整口径：默认载荷 `beaconAPI=0`、`loadShellcode=0`、`Go buildinf=0`、`Go build ID=0`、`kgameprotect/byovd/HVCI=0`。
+静态体检的完整口径：默认载荷 `beaconAPI=0`、`loadShellcode=0`、`Go buildinf=0`、`Go build ID=0`、`kgameprotect/byovd/HVCI=0`、**`go1.` 版本串=0**。
+
+#### 实测发现的指纹漏点（v1.4.0 S3，已修）
+
+构建 `windows/386` 产物后逐字节计数（`\xff Go buildinf:` / `Go build ID:` / 正则 `go1\.[0-9]`）：
+
+| 产物 | 修复前 | 原因 | 修复后 |
+|---|---|---|---|
+| `format=exe`（Go，CGO_ENABLED=0） | 魔数 0、Build ID 0、**`go1.20.14` 命中 1 次** | `ScrubGoFingerprint` 的版本擦除窗口是**锚在 buildinfo 魔数之后 512 字节**里的；而 `runtime.buildVersion` 那份版本串（`runtime.Version()` 读的）落在别处的只读数据段，锚定窗口扫不到 | 三项全 0 |
+| `format=dll`（c-shared + mingw） | 魔数 0、Build ID 0、**`go1.20.14` 命中 1 次** | 同上：这条路径的锚定擦除**已经在做**（`dll.go` 里对 `ScrubGoFingerprint` 的调用，所以魔数与 Build ID 早已归零），但版本串同样漏在锚定窗口之外 | 三项全 0 |
+
+修法：新增 `ScrubGoVersionStrings`（全文件扫描，规则与窗口版**完全一致** —— `go1.` 必须紧跟数字、回退收尾点号，只清零、长度不变），在 exe 路径（`compile()`）与 dll 路径（`compileLibrary()`）里各接一遍，都排在 UPX 与签名之前。实测修复后两种产物三项标记全为 0，**且字节数完全不变**（exe 3456757、dll 3414528）。安全性已核对：植入端模板不调用 `runtime.Version()`/`Debug.ReadBuildInfo()`（`internal/server/builder/implant` 与 `release/implant` 均无引用），清零只影响运行时崩溃/诊断输出里的版本信息。
+
+> 复现命令：构建产物后跑 `python .tmp-verify/count_fingerprint.py <产物>`（本地验证脚本，不入库），或按 §4 的 `findstr` 口径核对。
 
 可选外部工具（不计入"内置特性"）：UPX 仅对 Windows `exe`/`bin` 生效（`internal/server/builder/builder.go`）；garble 的可用性由一次真实探测构建判定（`internal/server/builder/toolchain.go: GarbleStatus`），版本不匹配时直接判"不可用"。两者对查杀率的影响**未量化**。
 
-### 2.4 已知做不到的（写在这里省得反复试）
+### 2.4 签名顺序约束（防"白签"）
+
+**规则：签名必须是交付流水线的最后一步；签名之后不得再改一个字节。**
+
+为什么单列一条：签名覆盖的是"签名那一刻的字节"，签名后再做 UPX / 资源修补 / 图标 / 版本信息 / 字符串擦除 / 文本编码都会让签名失效。而签名复核（`internal/server/builder/sign.go` 的 `verifyWithPowerShell`）发生在**签名之后、后处理之前**，所以白签**从接口上看仍然是 `signed=true`** —— 目标机上才表现为"签名了还是被拦"，极难回头定位。
+
+实现（v1.4.0 S3）：
+
+- 顺序契约集中在 `internal/server/builder/finalize_order.go`：步骤名常量 + `finalizeSteps()`（纯函数）+ `signOrderWarning()`（守卫）。
+- 每次构建开始打一行 `交付流水线（字节加工顺序，签名必须是最后一步）：步骤 → 步骤 → 签名`；一旦顺序被改坏（签名之后还有改字节的步骤）立刻打 **error 级**日志并点名违规步骤。
+- 当前顺序（`format=exe`，全开）：`scrub_fingerprint → scrub_version_string → upx → sign`。
+- 新增"会改字节"的步骤时必须：① 登记步骤名；② 插到 `upx` 与 `sign` **之前**（例如 PE 资源/图标/版本信息/时间戳修补）；③ 让 `finalize_order_test.go` 的表驱动用例继续通过（该用例遍历"平台 × 格式 × 开关"，断言"只要出现 sign 就必在最后"）。
+- 另外确认过：`sign_timestamp_url` 在两条签名路径上都真的传给了签名命令（`signWithSigntool` 用 `/tr <url> /td sha256`，PowerShell 路径走 `-TimestampServer`）—— 计划里"待确认"的那一项到此闭环。启用真实证书时**务必**配时间戳，否则证书过期后签名一次性全废。
+
+### 2.5 已知做不到的（写在这里省得反复试）
 
 - **加密整个镜像/代码段**：Go 的 GC、调度器与信号栈时刻在跑，加密代码段或 runtime 元数据必崩。
   Ekko/Foliage 那套"整块 ROP 链 + 定时器回调"在 Go 植入端**做不到**（除非把载荷改成 C/C++ 或纯 shellcode）。
@@ -151,6 +179,8 @@ AV 的判定里权重很大的是**文件哈希信誉 / 云端结果 / 母进程
 
 ```bash
 # ① Go 构建指纹：三条都应搜不到（harden.go 擦除是否生效）
+#    注意 `go1.x.y` 这一条不是装饰：v1.4.0 S3 之前 exe/dll 各残留 1 次（runtime.buildVersion），
+#    锚定窗口版擦除扫不到，靠全文件版 ScrubGoVersionStrings 才收掉（见 §2.3）。
 strings -a payload.exe | grep -E 'Go buildinf:|Go build ID:|go1\.[0-9]+\.[0-9]+'
 
 # ② Go 运行时/pclntab 特征：默认应有 gopclntab，但不应出现 C2 组件的函数名
