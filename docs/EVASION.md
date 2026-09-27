@@ -139,6 +139,38 @@ sleep mask 具体做了什么（便于自查与排错）：
 - **没有 `.rsrc` 是当时最扎眼的"非典型 PE"信号**：正常商业/系统程序几乎都带版本信息（公司名/产品名/文件描述/版本/原始文件名）、图标与 manifest，而我们交付的载荷一样都没有；这一项已由下面的"PE 版本资源 / 图标 / 公司信息 / 时间戳"（v1.4.0 S3 第二批）补上，且**必须插在 UPX 与签名之前**（顺序契约见 §2.4，`builder/finalize_order.go` 会拦住"sign 不在最后"的改动）。
 - 该项的验收口径（写在这里，落地时按它验）：① 产物出现 `.rsrc` 节；② `Get-ItemProperty <载荷> | Select-Object -ExpandProperty VersionInfo` 能读出我们写入的公司名/产品名/文件描述/版本；③ 资源查看器能看到图标；④ **顺序正确时签名仍有效**（签名在最后一步，改资源在它之前）—— 最后一条是整项的意义所在。
 
+#### 🚨 事故记录：RVA 空洞 + 资源节 = Windows 拒绝加载（v1.4.0 S3 第三批回归，已修）
+
+**症状**：用了 `neutral` 资源预设（或任何写 `.rsrc` 的字段）的载荷双击提示 **"此应用无法在你的电脑上运行"**；不带资源字段的载荷完全正常。
+
+**根因**：节规范化删掉 Go 的 `.symtab` 后，RVA 空间里留下**一页没人映射的空洞**。**只有空洞时 Windows 容忍**（所以当时的单测、真机 e2e、静态体检全绿），**一旦再追加 `.rsrc` 资源节，`LoadLibraryEx` 就以 `ERROR_BAD_EXE_FORMAT(193)` 拒绝整个镜像**。两个各自"正确"的改动（默认执行的节规范化 + 显式开启的资源注入）叠加出的缺陷。
+
+**判定手段（可复现、不需要真机执行）**：
+
+```powershell
+# 只映射不执行：能区分"PE 结构合法"与"loader 愿意接受"
+python -c "import ctypes,ctypes.wintypes as wt; k=ctypes.WinDLL('kernel32',use_last_error=True); k.LoadLibraryExW.restype=wt.HMODULE; h=k.LoadLibraryExW(r'<载荷绝对路径>',None,0x20); print('OK' if h else ctypes.get_last_error())"
+```
+
+返回 `193` = loader 拒绝（用户看到的正是这个）。我们用它做的对照实验：
+
+| 样本 | 结果 |
+|---|---|
+| 无资源（有空洞） | LOADER OK |
+| 有资源 + 有空洞（386 / amd64） | **REJECT 193** |
+| 有资源，但用一个小节头把空洞补上 | LOADER OK |
+| 有资源，只把前一个节的 `VirtualSize` 扩到覆盖那一页 | **LOADER OK**（386/amd64 皆然，最终采用的修法） |
+
+排除过的假设（都单独验证过）：资源树写错（可用/不可用产物的 `.rsrc` 前 1024 字节**完全相同**）、`PointerToSymbolTable=0`（改回非 0 仍 REJECT；把可用产物的该字段改 0 仍 OK）、节数/节序（补一个第 7 节并不解决）。
+
+**修法**：`builder/pe_sections.go` 的 `coverFreedSectionRVA()` —— 删节后把被删节原本占用的虚拟区间**划给它的前一个节**（只扩大 `VirtualSize`；节数、文件长度、任何数据都不动，多出来的尾巴由加载器按 0 填充），上界取"下一个节的 RVA"或"被删节虚拟区间的页对齐末尾"。
+
+**验收口径（血的教训，以后改 PE 布局必须照做）**：
+
+1. **"静态体检通过" ≠ "能被 loader 接受"**：改节表/节布局的改动，验收必须包含 **`LoadLibraryEx` 判定**（上面那条命令）**加真实执行一次**。
+2. **组合路径必须交叉验证**：功能各自单独测都绿（资源注入单独绿、节规范化单独绿），叠加起来才炸。凡是"两个都会改 PE 字节"的功能，测试矩阵要交叉（有/无资源 × 386/amd64 × 有/无规范化的载荷全部跑一遍）。
+3. 回归守卫：`pe_sections_test.go` 的 `TestNormalizeLeavesNoUnmappedRVAGap` 断言"规范化后"与"规范化 + 资源注入后"都不存在整页未映射的 RVA 空洞；`TestNormalizeMiddleSectionGapCoverage` 断言扩大范围不会越界压到下一节。
+
 #### 实测：PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批，已实现）
 
 **改观什么**：把"没有 `.rsrc`"这个最扎眼的非典型信号补上 —— 版本信息（`CompanyName`/`ProductName`/`FileDescription`/`FileVersion`/`ProductVersion`/`LegalCopyright`/`OriginalFilename`/`InternalName`，UTF-16LE）、图标（多尺寸，PNG 压缩项原样搬运）、以及一个"像正经发布版本"的 COFF 时间戳。实现是纯标准库的 PE 后处理（`internal/server/builder/patch_resources.go`），位置在指纹擦除之后、**UPX 与签名之前**（见下方"实测"与 §2.4）。

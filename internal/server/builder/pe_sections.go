@@ -101,6 +101,13 @@ type PESectionNormalizeResult struct {
 	SymCount  uint32
 	// OtherNonStandardSections 名单外的其它节名（只报告，不处理）。
 	OtherNonStandardSections []string
+	// CoveredGapRVA 为了让"删节后不留 RVA 空洞"而额外覆盖的字节数（0 = 无需补，例如
+	// mingw DLL 本来就没有 `.symtab`）。见 coverFreedSectionRVA 的事故说明。
+	CoveredGapRVA int
+	// ExtendedSection 被扩大 VirtualSize 的节名（"" = 没有扩大）。
+	ExtendedSection string
+	// ExtendedVS 扩大后的 VirtualSize（ExtendedSection 非空时有效）。
+	ExtendedVS uint32
 }
 
 // NormalizePESections 删掉 Go 链接器残留的 `.symtab` 节并把 COFF 符号表指针/符号数置 0。
@@ -184,6 +191,21 @@ func NormalizePESections(data []byte) ([]byte, PESectionNormalizeResult, error) 
 		}
 		binary.LittleEndian.PutUint16(out[m.numSectionsOff:m.numSectionsOff+2], uint16(m.numSections-1))
 
+		// ②.5 **补上被删节留下的 RVA 空洞**（v1.4.0 修：这一条是实测出来的硬要求，漏了会让
+		// 带资源的载荷整批无法运行）。
+		//
+		// 事故经过（实测）：删掉 `.symtab` 后在 RVA 空间留下"一页没人映射"的空洞。只删不补时
+		// **不带资源**的载荷 Windows 照常加载；可一旦后面再追加 `.rsrc`（PE 资源节，见
+		// patch_resources.go），Windows 就会以 `ERROR_BAD_EXE_FORMAT(193)` 拒绝整个镜像 ——
+		// 用户的症状正是"用了 neutral 预设的载荷双击提示『此应用无法在你的电脑上运行』"。
+		// 逐字节对照实验（`LoadLibraryEx(LOAD_LIBRARY_AS_IMAGE_RESOURCE)`）：
+		//   - 带资源 + 有空洞 → REJECT 193；把空洞用一个小节头补上 → OK；
+		//   - 只把前一个节的 VirtualSize 扩到覆盖那一页 → OK（386/amd64 皆然）。
+		// 所以这里选择"扩前一个节的 VirtualSize"：不动节数、不动文件长度，只是让被删节原本
+		// 占用的虚拟区间继续归前一个节所有（多出来的部分由加载器按 0 填充，没有任何代码或
+		// 数据引用它）。这样既不留下工具链指纹（`.symtab` 这个名字没了），又不会留下空洞。
+		res.CoveredGapRVA, res.ExtendedSection, res.ExtendedVS = coverFreedSectionRVA(m, out, idx)
+
 		// ③ 只有"原始数据正好在文件末尾 + 无人引用"时才顺带截断。
 		if canTruncateSectionRaw(m, sec) {
 			truncateAt = int(sec.rawPtr)
@@ -201,6 +223,56 @@ func NormalizePESections(data []byte) ([]byte, PESectionNormalizeResult, error) 
 	}
 	res.Changed = true
 	return out, res, nil
+}
+
+// coverFreedSectionRVA 把"被删掉的节原本占用的虚拟区间"划给它的前一个节，
+// 消除删节在 RVA 空间留下的空洞（返回：被覆盖的字节数、被扩大的节名、扩大后的 VirtualSize）。
+//
+// 为什么必须做（事故复盘，见 NormalizePESections 里的调用点注释）：
+// 空洞本身在"不追加任何东西"时 Windows 是容忍的，因此最初的单测与 plain 载荷验证都通过了；
+// 但只要后续再追加一个 PE 节（`.rsrc` 资源节），`LoadLibraryEx` 就会以 193
+// （ERROR_BAD_EXE_FORMAT）拒绝镜像 —— 也就是用户看到的"此应用无法在你的电脑上运行"。
+// 逐字节对照实验证明两种补法都能修好（补一个小节头 / 扩大前一个节的 VirtualSize），
+// 这里选后者：不改节数、不改文件长度，只是让那段虚拟地址继续属于前一个节
+// （多出来的尾巴由加载器按 0 填充，没有任何代码或数据引用它）。
+//
+// 上界怎么取：
+//   - 被删节后面还有节（中间节情形）→ 取下一个节的 RVA（再多就会与它重叠）；
+//   - 被删节是最后一节（本仓库的 Go 载荷都是）→ 取"被删节虚拟区间的页对齐末尾"，
+//     这样之后按 SectionAlignment 追加的新节（如 `.rsrc`）正好接在映射区的下一页，
+//     RVA 空间保持页连续。
+//
+// 返回空节名 = 没有可扩大的前节（被删的是第一节）。那种情况下空洞无法消除，
+// 调用方应当意识到"后续若再追加节仍可能被 loader 拒绝"——Go 载荷不会是这种情况。
+func coverFreedSectionRVA(m *pePatchImage, out []byte, idx int) (gained int, secName string, newVS uint32) {
+	if idx <= 0 || idx >= len(m.sections) {
+		return 0, "", 0
+	}
+	prev := m.sections[idx-1]
+	removed := m.sections[idx]
+
+	var upper uint32
+	if idx+1 < len(m.sections) {
+		upper = m.sections[idx+1].rva
+	} else {
+		upper = alignUp(removed.rva+removed.vsize, m.sectionAlign)
+	}
+	if upper <= prev.rva {
+		return 0, "", prev.vsize
+	}
+	desired := upper - prev.rva
+	if desired <= prev.vsize {
+		return 0, "", prev.vsize // 前节本来就覆盖了（正常不会发生）；不做"缩小"
+	}
+
+	// 写回前一个节的 VirtualSize（节头偏移 = 节表起点 + 40*索引 + 8）。
+	off := m.secTableOff + peSectionHeaderSize*(idx-1) + 8
+	if off+4 > len(out) {
+		return 0, "", prev.vsize
+	}
+	binary.LittleEndian.PutUint32(out[off:off+4], desired)
+	m.sections[idx-1].vsize = desired // 让同一趟里的后续判断看到新值
+	return int(desired - prev.vsize), prev.name, desired
 }
 
 // sectionReferencedByDataDir 是否有任何数据目录落在该节的 RVA 区间里（用

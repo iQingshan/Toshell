@@ -119,10 +119,24 @@ func TestNormalizePESectionsRemovesLastAndTruncates(t *testing.T) {
 	if bytes.Contains(out, bytes.Repeat([]byte{0x77}, 16)) {
 		t.Fatal(".symtab 的原始数据没有被截断掉（文件里仍有它的填充字节）")
 	}
-	// 节表其余部分（前 numSections-1 项）必须逐字节一致。
+	// 节表其余部分（前 numSections-1 项）必须逐字节一致 —— **除了被删节前一个节的
+	// VirtualSize**：删节会在 RVA 空间留下空洞，空洞必须划给前一个节（见
+	// coverFreedSectionRVA 与 TestNormalizeLeavesNoUnmappedRVAGap），这是有意为之的改动。
+	prevHdr := m.secTableOff + peSectionHeaderSize*(m.numSections-2) // 最后一个被保留的节
 	keep := peSectionHeaderSize * (m.numSections - 1)
-	if !bytes.Equal(out[m.secTableOff:m.secTableOff+keep], in[m.secTableOff:m.secTableOff+keep]) {
-		t.Fatal("保留的节头字节被改动了（应当只减计数 + 清零末尾 40 字节）")
+	prevVS := [2]int{prevHdr + 8, prevHdr + 12}
+	for i := 0; i < keep; i++ {
+		off := m.secTableOff + i
+		if off >= prevVS[0] && off < prevVS[1] {
+			continue // 前一个节的 VirtualSize：允许（且必须）被扩大
+		}
+		if out[off] != in[off] {
+			t.Fatalf("保留的节头在偏移 0x%X 被改动了（只允许改前一个节的 VirtualSize）", off)
+		}
+	}
+	if gotPrev, wantPrev := binary.LittleEndian.Uint32(out[prevHdr+8:prevHdr+12]),
+		binary.LittleEndian.Uint32(in[prevHdr+8:prevHdr+12]); gotPrev <= wantPrev {
+		t.Fatalf("前一个节的 VirtualSize 必须被扩大以覆盖空洞：%d → %d", wantPrev, gotPrev)
 	}
 	// 末尾多出来的 40 字节必须清零（否则文件里留着一份“幽灵节头”）。
 	tail := out[m.secTableOff+keep : m.secTableOff+keep+peSectionHeaderSize]
@@ -134,8 +148,8 @@ func TestNormalizePESectionsRemovesLastAndTruncates(t *testing.T) {
 	if !bytes.Equal(out[dd:dd+peMaxDataDirs*8], in[dd:dd+peMaxDataDirs*8]) {
 		t.Fatal("数据目录被改动了")
 	}
-	// 其余前部（DOS/PE 头/可选头/节表起点之前）除了那两个 COFF 字段与 NumberOfSections，
-	// 也必须逐字节不变。
+	// 其余前部（DOS/PE 头/可选头/节表起点之前）除了那两个 COFF 字段、NumberOfSections
+	// 与前一个节的 VirtualSize，也必须逐字节不变。
 	fh := m.fileHdrOff
 	for i := 0; i < dd+peMaxDataDirs*8; i++ {
 		if i >= fh+8 && i < fh+16 {
@@ -143,6 +157,9 @@ func TestNormalizePESectionsRemovesLastAndTruncates(t *testing.T) {
 		}
 		if i >= fh+2 && i < fh+4 {
 			continue // NumberOfSections 必须减一
+		}
+		if i >= prevVS[0] && i < prevVS[1] {
+			continue // 前一个节的 VirtualSize（覆盖删节留下的 RVA 空洞）
 		}
 		if out[i] != in[i] {
 			t.Fatalf("偏移 0x%X 的字节被意外改动：0x%02X → 0x%02X", i, in[i], out[i])
@@ -174,14 +191,21 @@ func TestNormalizePESectionsRemovesLastAndTruncates(t *testing.T) {
 	if err := VerifyPELayout(out); err != nil {
 		t.Fatalf("删除节后结构自检必须通过：%v", err)
 	}
-	// 保留节的名字/RVA/原始数据必须没动。
+	// 保留节的 名字/RVA/原始数据/属性 必须没动（`.rdata` 紧邻被删的 `.symtab`，
+	// 它的 VirtualSize 会被有意扩大以覆盖空洞，见 coverFreedSectionRVA）。
 	for _, want := range []string{".text", ".rdata"} {
 		a, _ := findTestSection(t, in, want)
 		b, _ := findTestSection(t, out, want)
+		a.vsize, b.vsize = 0, 0
 		if a != b {
 			t.Fatalf("节 %q 的节头被改动了：%+v → %+v", want, a, b)
 		}
-		if !bytes.Equal(in[a.rawPtr:a.rawPtr+a.rawSize], out[b.rawPtr:b.rawPtr+b.rawSize]) {
+		a2, _ := findTestSection(t, in, want)
+		b2, _ := findTestSection(t, out, want)
+		if b2.vsize < a2.vsize {
+			t.Fatalf("节 %q 的 VirtualSize 不许被缩小：%d → %d", want, a2.vsize, b2.vsize)
+		}
+		if !bytes.Equal(in[a2.rawPtr:a2.rawPtr+a2.rawSize], out[b2.rawPtr:b2.rawPtr+b2.rawSize]) {
 			t.Fatalf("节 %q 的原始数据被改动了", want)
 		}
 	}
@@ -440,12 +464,14 @@ func TestNormalizePESectionsReportsOtherNonStandardNames(t *testing.T) {
 	if len(res.OtherNonStandardSections) != 1 || res.OtherNonStandardSections[0] != ".gopclnt" {
 		t.Fatalf("应当报告 .gopclnt 为非标准节名，实际 %v", res.OtherNonStandardSections)
 	}
-	// 只报告：那节必须还在，且字节没动。
+	// 只报告：那节必须还在，且除了"因为它紧邻被删的 .symtab 而被扩大 VirtualSize"之外
+	// 节头其余字段一个字节都不许动（见 coverFreedSectionRVA）。
 	if !hasTestSection(t, out, ".gopclnt") {
 		t.Fatal("非标准节名不该被删除（只报告）")
 	}
 	sym, _ := findTestSection(t, in, ".gopclnt")
 	got, _ := findTestSection(t, out, ".gopclnt")
+	sym.vsize, got.vsize = 0, 0 // VirtualSize 被有意扩大（覆盖删节留下的 RVA 空洞）
 	if sym != got {
 		t.Fatalf("非标准节 %q 的节头被改动了：%+v → %+v", ".gopclnt", sym, got)
 	}
@@ -472,5 +498,99 @@ func TestNonStandardPESectionNamesRealToolchainNames(t *testing.T) {
 	}
 	if len(res.OtherNonStandardSections) != 0 {
 		t.Fatalf("MSVC/mingw 的合法节名不该被报告为非标准：%v", res.OtherNonStandardSections)
+	}
+}
+
+// ─── 回归：删节后不得留下"未映射的 RVA 空洞"（v1.4.0 实测事故）──────────────
+//
+// 事故经过（用户实测触发）：节规范化删掉 `.symtab` 后，RVA 空间留下一页无人映射的空洞。
+// 只删不补时**不带资源**的载荷 Windows 照常加载（所以最初的单测与 e2e 全绿），但一旦
+// 再追加 `.rsrc` 资源节（`pe_resource_patch`，例如用 neutral 预设），
+// `LoadLibraryEx` 就以 193（ERROR_BAD_EXE_FORMAT）拒绝整个镜像 —— 用户双击载荷看到
+// "此应用无法在你的电脑上运行"。
+//
+// 修复方式：把被删节原本占用的虚拟区间划给它的前一个节（`coverFreedSectionRVA`）。
+// 下面两个用例断言"任何一对相邻节之间都不存在整页未映射的区间"，这是可自动化的那部分：
+// 真正的加载器行为只能在 Windows 上实测（见 CHANGELOG 的对照实验记录），但空洞一旦回来，
+// 这个不变量立刻会红。
+func assertNoUnmappedRVAGap(t *testing.T, data []byte, label string) {
+	t.Helper()
+	m, err := parsePEPatchImage(data)
+	if err != nil {
+		t.Fatalf("%s: parsePEPatchImage: %v", label, err)
+	}
+	for i := 0; i+1 < len(m.sections); i++ {
+		prev, next := m.sections[i], m.sections[i+1]
+		// 加载器按 max(VirtualSize, SizeOfRawData) 映射，并把上一节的最后一页整页映射。
+		mappedEnd := prev.rva + prev.endRVA() - prev.rva
+		if prev.rawSize > prev.vsize {
+			mappedEnd = prev.rva + prev.rawSize
+		} else {
+			mappedEnd = prev.rva + prev.vsize
+		}
+		pageEnd := alignUp(mappedEnd, m.sectionAlign)
+		if next.rva > pageEnd {
+			t.Fatalf("%s: %s(0x%X..0x%X 页对齐到 0x%X) 与 %s(rva 0x%X) 之间存在未映射的 RVA 空洞："+
+				"这种镜像在追加 .rsrc 后会被 Windows 以 193 拒绝加载",
+				label, prev.name, prev.rva, mappedEnd, pageEnd, next.name, next.rva)
+		}
+	}
+}
+
+// TestNormalizeLeavesNoUnmappedRVAGap 删掉最后一节（`.symtab`）后不得留下整页空洞；
+// 并且**再追加资源节之后**依然不得留下空洞（这正是用户踩到的那条路径）。
+func TestNormalizeLeavesNoUnmappedRVAGap(t *testing.T) {
+	in := lastSectionPEWithSymtab()
+	out, res, err := NormalizePESections(in)
+	if err != nil {
+		t.Fatalf("NormalizePESections: %v", err)
+	}
+	if res.RemovedSection != goSymtabSectionName {
+		t.Fatalf("前置条件不成立：应该删掉 %s，实际 %q", goSymtabSectionName, res.RemovedSection)
+	}
+	if res.CoveredGapRVA <= 0 || res.ExtendedSection == "" {
+		t.Fatalf("删节后必须把空洞划给前一个节，实际 CoveredGapRVA=%d ExtendedSection=%q",
+			res.CoveredGapRVA, res.ExtendedSection)
+	}
+	assertNoUnmappedRVAGap(t, out, "规范化之后")
+
+	// 再走一遍资源注入（neutral 预设）：这是用户实际踩到的组合。
+	cfg, cerr := ResourceConfigForOptions(&BuildOptions{Format: "exe", ResourcePreset: ResourcePresetNeutral})
+	if cerr != nil {
+		t.Fatalf("ResourceConfigForOptions: %v", cerr)
+	}
+	withRes, err := PatchPEResources(out, cfg)
+	if err != nil {
+		t.Fatalf("PatchPEResources: %v", err)
+	}
+	if !hasTestSection(t, withRes, ".rsrc") {
+		t.Fatal("资源注入应追加 .rsrc 节")
+	}
+	assertNoUnmappedRVAGap(t, withRes, "规范化 + 资源注入之后")
+}
+
+// TestNormalizeMiddleSectionGapCoverage 中间节情形：扩大范围必须被"下一个节的 RVA"卡住，
+// 不许越界覆盖到下一个节的地盘。
+func TestNormalizeMiddleSectionGapCoverage(t *testing.T) {
+	in := middleSectionPEWithSymtab()
+	out, res, err := NormalizePESections(in)
+	if err != nil {
+		t.Fatalf("NormalizePESections: %v", err)
+	}
+	if res.RemovedSection != goSymtabSectionName {
+		t.Fatalf("前置条件不成立：应该删掉 %s，实际 %q", goSymtabSectionName, res.RemovedSection)
+	}
+	assertNoUnmappedRVAGap(t, out, "中间节规范化之后")
+
+	m, err := parsePEPatchImage(out)
+	if err != nil {
+		t.Fatalf("parsePEPatchImage: %v", err)
+	}
+	for i := 0; i+1 < len(m.sections); i++ {
+		prev, next := m.sections[i], m.sections[i+1]
+		if prev.rva+prev.vsize > next.rva {
+			t.Fatalf("扩大的 VirtualSize 越界压到了下一节：%s end=0x%X > %s rva=0x%X",
+				prev.name, prev.rva+prev.vsize, next.name, next.rva)
+		}
 	}
 }
