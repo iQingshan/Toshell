@@ -111,7 +111,7 @@ sleep mask 具体做了什么（便于自查与排错）：
 
 #### 实测：PE 节表 / 熵 / 资源现状（口径与下一步验收）
 
-对 `windows/386` 默认档案产物逐节测量（脚本见 §4；这组数字是"节名/节熵口径"的基线）：
+对 `windows/386` 默认档案产物逐节测量（脚本：`scripts/pe_footprint.ps1`，见 §4 的 ⓪；这组数字是"节名/节熵口径"的基线）：
 
 | 节 | 虚拟大小 | 原始大小 | 熵 |
 |---|---|---|---|
@@ -234,6 +234,12 @@ AV 的判定里权重很大的是**文件哈希信誉 / 云端结果 / 母进程
 
 以下检查只依赖本机工具（`strings` 在 Linux/macOS 自带；Windows 可用 WSL、Git Bash、`sigcheck -a -h` 或 `findstr` 替代）。
 把 `payload.exe` 换成实际产物（`dll` 用 `payload.dll`）：
+
+```powershell
+# ⓪ PE 结构体检（节表 / 熵 / 时间戳 / 资源 / overlay）——纯 PowerShell，无需 strings/toolchain
+#    基线数字与判读见 §2.3；重点看：TimeDateStamp 是否为 0、是否含 .rsrc、overlay 是否只是配置块。
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pe_footprint.ps1 -Path .\release\implants\payload.exe
+```
 
 ```bash
 # ① Go 构建指纹：三条都应搜不到（harden.go 擦除是否生效）
