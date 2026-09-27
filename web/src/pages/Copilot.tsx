@@ -39,6 +39,9 @@ export function Copilot() {
   const [runs, setRuns] = useState<PlaybookRun[]>([])
   // 审批弹窗（normal 权限模式：影响会话的操作需用户确认）
   const [pendingConsents, setPendingConsents] = useState<ConsentReq[] | null>(null)
+  // SSE 缺口提示：服务端用 resync 显式告知"这条流不完整"（缓冲淘汰/运行期丢事件）。
+  // 不能静默忽略——否则用户会把"缺一段过程"误当成 agent 真的没做那些事。
+  const [streamGap, setStreamGap] = useState<string>('')
   const [consentBusy, setConsentBusy] = useState(false)
   // 两侧信息面板：最近任务
   const [sideTasks, setSideTasks] = useState<{ id: number; task_type: string; command: string; status: string; created_at: string }[]>([])
@@ -233,7 +236,10 @@ export function Copilot() {
       // 主路径：轮询 status() 直到终态（绝对可靠，不依赖长连接）。
       // SSE 作为实时增量增强——SSE 断开/失败不影响结论，轮询兜底一定渲染最终结果。
       pollRun(runId)
-      agentApi.events(runId, (ev) => handleAgentEvent(ev), () => { /* SSE 断开时轮询仍在 */ })
+      setStreamGap('')
+      // SSE 作为实时增量增强；断线会自动带 Last-Event-ID 续传（见 api/index.ts 的 streamAgent），
+      // shouldContinue 保证用户切到别的 run 后旧连接不再重连。
+      agentApi.events(runId, (ev) => handleAgentEvent(ev), () => { /* SSE 断开时轮询仍在 */ }, () => activeRunIdRef.current === runId)
     } catch (e: any) {
       const errText = e?.response?.data?.error || (e instanceof Error ? e.message : String(e))
       // 结束占位，替换为错误
@@ -359,6 +365,31 @@ export function Copilot() {
         // SSE 错误（如事件通道满/连接断）静默，绝不显示为 network error。
         // 轮询 pollRun 会渲染真正的最终结果/建议。
         break
+      case 'resync': {
+        // 服务端明确告知"这条事件流有缺口"：events_expired（缓冲淘汰）/ events_dropped
+        // （运行期丢事件）。两种都不能静默——把提示显出来，并立刻拉一次 run 详情对齐。
+        const reason = String(ev.data?.reason || '')
+        const text =
+          reason === 'events_expired'
+            ? '事件流缺口：要续传的事件已被服务端淘汰（只保留最近一段），过程以轮询结果为准'
+            : reason === 'events_dropped'
+              ? '事件流缺口：服务端运行期丢过事件，过程以轮询结果为准'
+              : '事件流有缺口，过程以轮询结果为准'
+        setStreamGap(text)
+        const rid = activeRunIdRef.current
+        if (rid) {
+          void agentApi
+            .status(rid)
+            .then((st) => {
+              const acts = buildActs(st.data)
+              if (acts.length > 0) useCopilotStore.getState().setLastActs(acts)
+            })
+            .catch(() => {
+              /* 拉取失败就等下一次轮询 */
+            })
+        }
+        break
+      }
       default:
         break
     }
@@ -444,6 +475,15 @@ export function Copilot() {
           <div className="copilot-notice">
             <AlertTriangle size={14} />
             在「设置 → AI 副驾驶」中填写 API 端点/密钥/模型后启用
+          </div>
+        )}
+        {streamGap && (
+          <div className="copilot-notice" title="服务端通过 resync 事件告知这条流不完整">
+            <AlertTriangle size={14} />
+            {streamGap}
+            <button className="copilot-clear" style={{ marginLeft: 8 }} onClick={() => setStreamGap('')}>
+              知道了
+            </button>
           </div>
         )}
         {messages.length > 0 && (

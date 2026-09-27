@@ -606,67 +606,120 @@ export const agentApi = {
   /** 处理审批：allow/deny */
   consent: (runId: string, decision: 'allow' | 'deny') =>
     api.post<{ run_id: string; status: string }>(`/agent/runs/${runId}/consent`, { decision }),
-  /** SSE 事件流：thinking / message / tool_start / tool_result / final / done / status */
-  events: (runId: string, onEvent: (ev: AgentStreamEvent) => void, onDone: () => void) =>
-    streamAgent(runId, onEvent, onDone),
+  /** SSE 事件流：thinking / message / tool_start / tool_result / final / done / status / resync
+   *  shouldContinue 用于"用户已经切到别的 run"时停止自动重连（默认一直续传）。
+   *  续传：内部记录每个事件的 `id:`，断线后带 `Last-Event-ID` 重连，服务端会恰好补齐缺口。 */
+  events: (runId: string, onEvent: (ev: AgentStreamEvent) => void, onDone: () => void, shouldContinue?: () => boolean) =>
+    streamAgent(runId, onEvent, onDone, shouldContinue),
 }
 
 export interface AgentStreamEvent {
   event: string
   data: any
+  /** 服务端给每个 run 事件分配的 run 内序号（控制帧没有）。断点续传的水位线。 */
+  id?: number
 }
 
+// SSE 重连参数：服务端会在连接建立时下发 `retry:`，这里给一个兜底默认值。
+const SSE_DEFAULT_RETRY_MS = 3000
+// 最多连续重连次数（之后交给 2s 轮询兜底，不再无限重试占着连接）。
+const SSE_MAX_RECONNECTS = 8
+
 // streamAgent 用 fetch + ReadableStream 消费 SSE（axios 无法流式，故用原生 fetch）。
-async function streamAgent(runId: string, onEvent: (ev: AgentStreamEvent) => void, onDone: () => void) {
-  const url = `/api/v1/agent/runs/${runId}/events`
-  try {
-    const resp = await fetch(url, {
-      headers: authHeaders(),
-      signal: undefined,
-    })
-    if (!resp.body) throw new Error('no stream body')
-    const reader = resp.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    let done = false
-    while (!done) {
-      const { value, done: d } = await reader.read()
-      done = d
-      buf += decoder.decode(value || new Uint8Array(), { stream: !done })
-      // 解析 SSE：按 \n\n 切分事件块
-      let idx: number
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
-        const block = buf.slice(0, idx)
-        buf = buf.slice(idx + 2)
-        const ev = parseSSEBlock(block)
-        if (ev) {
-          onEvent(ev)
-          if (ev.event === 'done' || ev.event === 'error' || (ev.event === 'state' && ev.data?.done)) {
-            onDone()
-            return
+//
+// v1.4.0：支持**断点续传**。服务端每个 run 事件带 `id: <seq>`，断线后按 `Last-Event-ID`
+// 续传即可补齐缺口，不必退化成"只能靠 2s 轮询重建视图"。两类缺口由服务端用 `resync`
+// 事件显式告知（缓冲淘汰 / 运行期丢事件），这里原样交给调用方处理，**不静默吞掉**。
+async function streamAgent(
+  runId: string,
+  onEvent: (ev: AgentStreamEvent) => void,
+  onDone: () => void,
+  shouldContinue?: () => boolean,
+) {
+  let lastEventId = 0
+  let retryMs = SSE_DEFAULT_RETRY_MS
+  let terminal = false
+
+  for (let attempt = 0; attempt <= SSE_MAX_RECONNECTS; attempt++) {
+    if (attempt > 0) {
+      if (shouldContinue && !shouldContinue()) break
+      await new Promise((r) => setTimeout(r, retryMs))
+      if (shouldContinue && !shouldContinue()) break
+    }
+    // 续传水位线：头优先（服务端认它），查询参数作为兜底（便于将来换成 EventSource）。
+    const qs = lastEventId > 0 ? `?last_event_id=${lastEventId}` : ''
+    const headers: Record<string, string> = { ...authHeaders(), Accept: 'text/event-stream' }
+    if (lastEventId > 0) headers['Last-Event-ID'] = String(lastEventId)
+
+    try {
+      const resp = await fetch(`/api/v1/agent/runs/${runId}/events${qs}`, { headers })
+      if (!resp.ok || !resp.body) {
+        // 404（run 已不在内存）/ 5xx：重连也没意义，交给轮询与调用方
+        onEvent({ event: 'error', data: { error: `stream ${resp.status}` } })
+        break
+      }
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      let closed = false
+      while (!closed) {
+        const { value, done: d } = await reader.read()
+        closed = d
+        buf += decoder.decode(value || new Uint8Array(), { stream: !closed })
+        // 解析 SSE：按 \n\n 切分事件块
+        let idx: number
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, idx)
+          buf = buf.slice(idx + 2)
+          const parsed = parseSSEBlock(block)
+          if (!parsed) continue
+          if (parsed.id && parsed.id > lastEventId) lastEventId = parsed.id
+          if (parsed.retryMs > 0) retryMs = parsed.retryMs
+          onEvent({ event: parsed.event, data: parsed.data, id: parsed.id })
+          if (parsed.event === 'done' || parsed.event === 'error' || (parsed.event === 'state' && parsed.data?.done)) {
+            terminal = true
+            closed = true
+            break
           }
         }
       }
+      if (terminal) break
+      // 流自然结束（服务端在 run 终态后会主动收尾；这里多为网络中断/代理掐连接）→ 续传
+    } catch (e) {
+      // 连接层错误：同样按"续传"处理（轮询仍在跑，所以这里不当作致命错误）
+      if (attempt >= SSE_MAX_RECONNECTS) {
+        onEvent({ event: 'error', data: { error: (e as Error).message } })
+        break
+      }
     }
-    onDone()
-  } catch (e) {
-    onEvent({ event: 'error', data: { error: (e as Error).message } })
-    onDone()
   }
+  onDone()
 }
 
-function parseSSEBlock(block: string): AgentStreamEvent | null {
+interface ParsedSSEBlock {
+  event: string
+  data: any
+  id: number
+  retryMs: number
+}
+
+function parseSSEBlock(block: string): ParsedSSEBlock | null {
   let event = 'message'
   let data = ''
+  let id = 0
+  let retryMs = 0
   for (const line of block.split('\n')) {
     if (line.startsWith('event:')) event = line.slice(6).trim()
     else if (line.startsWith('data:')) data += line.slice(5).trim()
+    else if (line.startsWith('id:')) id = Number(line.slice(3).trim()) || 0
+    else if (line.startsWith('retry:')) retryMs = Number(line.slice(6).trim()) || 0
+    // 其它行（含 `:` 心跳注释）忽略
   }
   if (!data) return null
   try {
-    return { event, data: JSON.parse(data) }
+    return { event, data: JSON.parse(data), id, retryMs }
   } catch {
-    return { event, data }
+    return { event, data, id, retryMs }
   }
 }
 
