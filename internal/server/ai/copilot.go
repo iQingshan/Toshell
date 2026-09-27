@@ -106,6 +106,15 @@ type Copilot struct {
 	cfg      config.AIConfig
 	executor ToolExecutor
 	client   *http.Client
+	// streamClient 专供**流式**调用（completeStream*）：它不能带"总时长超时"。
+	//
+	// 为什么必须分开（v1.4.0 实测事故）：`client.Timeout` 在 Go 里覆盖**整个请求**——
+	// 从建连到读完响应体。流式回答可能合法地跑好几分钟（带 tool 结果的大上下文 +
+	// 推理模型），于是 `ai.timeout=60` 会在第 2 轮（工具结果之后的收尾那一轮）把 SSE
+	// 掐断：表现为"工具都执行成功了，最后却只回一句模板文案"，而且**每个问题都一样**，
+	// 因为每次都在同一个位置超时。正确语义是"**多久没有新数据**算超时"（空闲超时），
+	// 由 completeStreamOpts 里的 idle 计时器实现，这里把总时长交给调用方 context。
+	streamClient *http.Client
 
 	// results / inlineLimit：工具结果外置存储与内联上限（v1.4.0 S2），由 api.Server 注入。
 	//
@@ -182,10 +191,11 @@ func New(cfg config.AIConfig, executor ToolExecutor) *Copilot {
 	// 启动时对写错的审批策略告警一次（写错的值会被按 graded 处理，不静默生效）。
 	warnUnknownConsentPolicy(cfg)
 	return &Copilot{
-		cfg:      cfg,
-		executor: executor,
-		client:   &http.Client{Timeout: time.Duration(timeout) * time.Second},
-		pending:  make(map[string]*pendingSession),
+		cfg:          cfg,
+		executor:     executor,
+		client:       &http.Client{Timeout: time.Duration(timeout) * time.Second},
+		streamClient: &http.Client{}, // 无总时长超时；空闲超时见 completeStreamOpts
+		pending:      make(map[string]*pendingSession),
 	}
 }
 
@@ -205,6 +215,7 @@ func (c *Copilot) Reconfigure(cfg config.AIConfig) {
 		timeout = 60
 	}
 	c.client.Timeout = time.Duration(timeout) * time.Second
+	c.streamClient = &http.Client{} // 流式路径不带总时长超时，理由见 Copilot.streamClient 注释
 	warnUnknownConsentPolicy(cfg)
 }
 
@@ -1167,8 +1178,26 @@ func (c *Copilot) completeStreamOpts(ctx context.Context, messages []Message, op
 	httpReq.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := c.client.Do(httpReq)
+	// 流式路径用 streamClient（**无总时长超时**）+ 自己实现的**空闲超时**：
+	// 只要还在持续收到数据就不算超时，真正"卡住不动"超过 ai.timeout 秒才中断。
+	// 理由见 Copilot.streamClient 的注释（总时长超时曾把第 2 轮收尾整段掐断，
+	// 表现为"工具都成功、最后只回模板文案"，且每个问题都一样）。
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	idle := time.Duration(c.cfg.Timeout) * time.Second
+	if idle <= 0 {
+		idle = 60 * time.Second
+	}
+	idleTimer := time.AfterFunc(idle, cancelStream)
+	defer idleTimer.Stop()
+	httpReq = httpReq.WithContext(streamCtx)
+
+	resp, err := c.streamClient.Do(httpReq)
 	if err != nil {
+		if streamCtx.Err() != nil && ctx.Err() == nil {
+			return nil, fmt.Errorf("LLM 流式调用空闲超时：连续 %s 没有收到任何数据（ai.timeout=%ds；"+
+				"注意它是**空闲**超时，不是总时长上限）: %w", idle, c.cfg.Timeout, err)
+		}
 		return nil, fmt.Errorf("LLM request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -1190,6 +1219,7 @@ func (c *Copilot) completeStreamOpts(ctx context.Context, messages []Message, op
 	var toolOrder []int
 
 	for scanner.Scan() {
+		idleTimer.Reset(idle) // 收到数据即刷新空闲计时
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || line == "data: [DONE]" || line == "[DONE]" {
 			continue
@@ -1253,6 +1283,13 @@ func (c *Copilot) completeStreamOpts(ctx context.Context, messages []Message, op
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		// 空闲超时是通过取消 context 实现的，读端因此报的是 "context canceled" ——
+		// 那个词对操作员毫无信息量，容易让人以为是客户端主动取消。这里把真实原因写出来。
+		if streamCtx.Err() != nil && ctx.Err() == nil {
+			return nil, fmt.Errorf("LLM 流式调用空闲超时：连续 %s 没有收到任何数据（ai.timeout=%ds，"+
+				"它是**空闲**阈值不是总时长上限；模型思考慢时会一直有数据，不会触发）: %w",
+				idle, c.cfg.Timeout, err)
+		}
 		return nil, fmt.Errorf("SSE read failed: %w", err)
 	}
 
@@ -1422,10 +1459,18 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		})
 		if err != nil {
 			// 出错兜底：绝不让 run 停在「无回复」状态。
-			// 若已累积动作则输出动作摘要；否则给出明确的错误说明 + 建议，供用户知晓并决定下一步。
+			//
+			// ⚠️ v1.4.0 修（用户实测："问什么都是一个回复"）：以前这里在"已有工具轨迹"时
+			// 直接回 buildActionSummary(run.Traces) —— 那是一段**与问题内容无关**的模板文案，
+			// 于是任何一次 LLM 调用失败都表现为"每个问题都得到同一句回复"，而真正的失败原因
+			// 只发在 SSE 的 error 事件里（前端不渲染），用户完全看不出发生了什么。
+			// 现在：**失败原因必须写进正文**（模型没答出来 vs 模型答了是两件事），
+			// 动作清单退化为附注；同时打 ERROR 级日志便于服务端排查。
+			logging.Error("ai", "agent run=%s trace=%s LLM 调用失败：%v", run.ID, traceID, err)
 			var reply string
 			if len(run.Traces) > 0 {
-				reply = buildActionSummary(run.Traces)
+				reply = "❌ 本次未能得到模型回复（LLM 调用失败）：`" + truncate(err.Error(), 300) + "`\n\n" +
+					"【已完成的工具动作（供参考，不是回答）】\n" + buildActionSummary(run.Traces)
 			} else {
 				reply = "❌ 本次执行遇到异常，未能完成：`" + err.Error() + "`。\n\n" +
 					"【建议】可以换一种更明确的表述重新告诉我目标（例如指定会话 ID、命令或要执行的操作），" +
