@@ -59,9 +59,9 @@
   1. **异步任务状态机**：工具调用改成「提交 → 立即返回句柄 → 由事件/轮询驱动恢复」，禁止在调用线程 sleep 轮询（现状 `pushAndAwait` 就是 sleep 500ms 轮询到超时）；恢复时按 `agent_tool_calls` 的 `internal_task_id` 对齐 `tasks` 表。
   2. **长结果外置 + 句柄内联 + 分页回读**：把 `truncate(out, 4000)` 换成统一信封 + `tool_results` 句柄；**任何截断显式告知模型**（顺带修掉"截图 base64 被截断成非法 JSON"）。
   3. **上下文分层与 token 预算**：常驻 / 任务 / 工作 / 历史四层，压缩优先于扩窗，稳定前缀做缓存。
-  4. **控制循环三处硬上限 + 防死循环 + 防漂移 + 错误隔离**（进行中：上限与 loop 检测由本轮的 `ai.max_tool_calls`/`ai.max_wallclock_sec`/同参重复检测落地）。
-  5. **审批分级**：`auto/normal` 二元 → 按注册表 read/confirm/danger 分级（`ai.consent_policy: graded|all|off`，旧值 `auto→off`、`normal→graded` 兼容）。
-  6. **可观测性**：trace id 全链路 + SSE `id`/`Last-Event-ID` 断点续传 + 失败可 replay。
+  4. ✅ **控制循环三处硬上限 + 防死循环**（已完成）：`ai.max_turns=20`（统一）、`ai.max_tool_calls=40`、`ai.max_wallclock_sec=900`，触发即停并记 `stop_reason`；同工具同参数签名第 2 次提示换策略、第 3 次判 `loop_detected`（只读工具豁免）。判定逻辑为纯函数（`shouldStopRun`/`loopSignature`），有单测。
+  5. ✅ **审批分级**（已完成）：`ai.consent_policy: graded|all|off`（旧值 `auto→off`、`normal→graded` 兼容），按注册表 read/confirm/danger 分级，未注册工具按 danger、`delegate` 恒危险；设置页可改。
+  6. **可观测性**：✅ trace id 全链路（run/事件/日志/工具调用，`DoneInfo` 带 `stop_reason`）；⬜ SSE `id`/`Last-Event-ID` 断点续传、失败 replay。
   7. **评估门禁**：离线黄金集（输入→期望工具序列→期望结论）+ 在线指标 + 回归门禁。
 
 ### S3 免杀：分层治理（先解决"起不来"，再谈"藏得深"）

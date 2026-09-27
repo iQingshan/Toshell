@@ -32,7 +32,13 @@
   - 全部 `CREATE TABLE/INDEX IF NOT EXISTS`：**对既有库幂等**，不动既有表、无破坏性 DDL，回滚只是多几张没人查的空表；DDL 抽成导出的 `AgentSchemaStatements`，让存储层的测试与生产共用同一份定义（schema 不会漂移）。
   - 存储层提供：run 的 upsert/状态机推进/用量累加/可恢复列表、step 的 next-cursor 与幂等 append、tool_call 的幂等 upsert 与待决列表、result 的索引与 TTL 清理（清理时回传外置文件路径供调用方删除）、以及 **`CountArgsHash`（同工具同参数计数，供防死循环）**。
 - **修掉「重启后任务 id 撞号」**：任务 id 来自内存 atomic 计数器（`task/task.go`），进程重启即归零 → 新任务会与 `tasks` 表里的历史任务撞号（按 id 查任务会串到旧记录）。新增 `Manager.SeedTaskCounter()`，启动时用 `MAX(tasks.id)` 校准（只在更大方向抬升、CAS 幂等），`cmd/server` 在数据库就绪后调用并写日志。
-- （进行中）控制循环三处硬上限（轮次/工具调用数/总时长）、防死循环（同工具同参数重复检测）、分级审批（`ai.consent_policy: graded|all|off`，按注册表 read/confirm/danger 分级）、trace id 全链路。
+- **控制循环三处硬上限**（`ai.max_turns` 统一为 **20**、新增 `ai.max_tool_calls=40`、`ai.max_wallclock_sec=900`）：循环内每轮检查，任一触发立刻停止并记 `stop_reason`（`max_turns` / `max_tool_calls` / `max_wallclock`），同时写含 trace id 的告警日志；**设置页可改**（区间校验：工具调用 1~1000、墙钟 30~86400 秒）。
+- **防死循环**：以「工具名 + 规范化参数 JSON」的 sha256 前 16 位作签名，在一次 run 内计数——**第 2 次**出现同签名时在结果后追加"同工具同参数已重复，请换策略或收尾"的系统提示，**第 3 次**停止循环并记 `stop_reason=loop_detected`（明确告知是哪把工具、什么参数）。**只读工具豁免**（重复查一次会话列表是正常的），理由写在注释里。
+- **分级审批**（取代原来的二元 `auto/normal`）：新增 `ai.consent_policy`，取值 `graded`（默认：只读免审、confirm/danger 需同意）、`all`（全都要问）、`off`（不询问，危险）；**旧值兼容** `auto→off`、`normal→graded`，无法识别的值按 `graded` 处理并告警。等级判定统一走工具注册表（`mcp.Default().LevelOf`），**未注册工具按 danger**，`delegate` 恒按危险处理（v1.3.5 的绕过点）。
+- **trace id 全链路**：每次 run 生成 `trace_id`，贯穿 run 结构、SSE 事件（`ToolStart`/`ToolResult`/`TraceInfo`/`DoneInfo`）与相关日志；新增字段对老前端是可选忽略项，不改既有字段名。
+- **设置页新增「MCP 服务端」配置段**（集成与通知分页）：安全前提警告（与内置 AI 共享同一张工具表、默认关闭/只绑回环/必须配 token/白名单留空只放行只读）、`bind`/`token`（三态：留空=保持、`clear`=清空、其它=覆盖）/`allowed_tools`(CSV)/`allowed_origins`/`allow_cidrs`/`max_rpm`/`max_concurrent`/`max_pending_handles`/`inline_limit`/`result_dir`/`result_ttl`/`audit_path`/`fail_closed`，并显示"实际生效 N 个（留空即只读集合）"与 read/confirm/danger 三档数量；**CSV⇄字符串数组只有一个转换点**（`mcpCsvToArray`/`mcpArrayToCsv`，留空 → `[]` 绝不产生 `[""]`），提交前做与后端同口径的预校验（不通就不发 PUT），并提示"MCP 改动需重启生效"。
+- **验证**：`go build ./...` / `go vet`(ai,config,api) / `tsc -b` / `npm run build` 全绿；**设置页 API 端到端实测**——`GET /settings` 的 `ai` 段已暴露三个新键、`PUT` 非法值（`consent_policy=nonsense`、`max_wallclock_sec=5`）均 400、旧值 `normal` 被规范化为 `graded` 且 `max_tool_calls/max_wallclock_sec` 真实落盘；`scripts/mcp_smoke.ps1` 回归 **18/18**。
+- **仍未做**（S2 剩余）：异步任务状态机（工具调用改成"提交 → 句柄 → 事件驱动恢复"）、长结果外置接入（把 `truncate(out, 4000)` 换成信封 + `tool_results` 句柄）、上下文四层与 token 预算、SSE `id`/`Last-Event-ID` 断点续传、评估门禁。单测（`limits_test.go`/`consent_test.go`/`store_test.go`）在本机被 360 拦截未能执行，将由 CI 覆盖。
 
 ### 🥷 S3 免杀：分层治理（落地 / 动态 / 静态）
 - （待填）

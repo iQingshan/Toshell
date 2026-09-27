@@ -278,6 +278,38 @@
 .settings-muted,
 .setting-muted { color: var(--color-text-secondary); font-size: var(--fs-sm); }
 
+/* ── MCP 服务端段（v1.4.0）：工具白名单整行一块，下面跟只读工具全集 ──
+   只读工具名有一二十个，用可滚动、可换行的等宽 chip 列表展示，避免把配置段撑得过长。
+   颜色/间距/字号全部走 token（--color-* / --sp-* / --fs-*），深浅主题一致，不写死十六进制。 */
+.mcp-whitelist {
+  margin-top: var(--sp-3);
+}
+
+.mcp-tool-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: var(--sp-2);
+  max-height: 132px;
+  overflow-y: auto;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.mcp-tool-chip {
+  padding: 1px 6px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
 /* ── 窄屏：导航变成横向可滚动的分页标签条，栅格单列 ── */
 @media (max-width: 900px) {
   .settings-page {

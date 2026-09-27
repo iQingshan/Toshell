@@ -139,16 +139,28 @@ type WebConfig struct {
 // BaseURL 为 OpenAI 兼容的 chat/completions 端点（如 https://api.deepseek.com/v1）；
 // 留空时 AI 副驾驶不可用（前端显示未配置提示）。
 type AIConfig struct {
-	Enabled  bool   `mapstructure:"enabled" json:"enabled"`     // 是否启用
-	BaseURL  string `mapstructure:"base_url" json:"base_url"`   // OpenAI 兼容端点
-	APIKey   string `mapstructure:"api_key" json:"api_key"`     // API Key
-	Model    string `mapstructure:"model" json:"model"`         // 模型名（如 deepseek-chat）
-	Timeout  int    `mapstructure:"timeout" json:"timeout"`     // 单次请求超时（秒），默认 60
-	MaxTurns int    `mapstructure:"max_turns" json:"max_turns"` // 工具调用最大轮数，默认 8
-	// ConsentMode 权限模式：auto=全自动（默认，工具直接执行）；
-	// normal=影响会话的操作（命令下发/文件/进程/凭据/截屏/隧道/插件等）执行前需用户同意，
-	// 任务流(delegate/剧本)除外。读取/查询类工具不拦截。
+	Enabled bool   `mapstructure:"enabled" json:"enabled"`   // 是否启用
+	BaseURL string `mapstructure:"base_url" json:"base_url"` // OpenAI 兼容端点
+	APIKey  string `mapstructure:"api_key" json:"api_key"`   // API Key
+	Model   string `mapstructure:"model" json:"model"`       // 模型名（如 deepseek-chat）
+	Timeout int    `mapstructure:"timeout" json:"timeout"`   // 单次请求超时（秒），默认 60
+	// MaxTurns 工具调用最大轮数（默认 20）。v1.4.0 S2 起三处默认值统一为 20：
+	// 本注释、viper.SetDefault、ai 包的运行时兜底（历史上注释写 8 / viper 20 / 前端 8 / 后端 20）。
+	MaxTurns int `mapstructure:"max_turns" json:"max_turns"`
+	// MaxToolCalls 一次 run 内最多发起多少次工具调用（默认 40）；<=0 时按默认值处理，
+	// **不允许**用配置关掉上限（关掉等于把"无限下发命令"的能力交回给模型）。
+	MaxToolCalls int `mapstructure:"max_tool_calls" json:"max_tool_calls"`
+	// MaxWallclockSec 一次 run 的最长墙钟时间（秒，默认 900）；<=0 时按默认值处理。
+	// 它约束的是"真实耗时"而非模型轮次，上游卡住/单步超时也一定会收手。
+	MaxWallclockSec int `mapstructure:"max_wallclock_sec" json:"max_wallclock_sec"`
+	// ConsentMode 旧键（v1.4.0 S2 起由 ConsentPolicy 取代，保留仅为兼容老配置）：
+	// auto=全自动（等价 consent_policy=off）；normal=影响会话的操作需用户同意（等价 graded）。
+	// 新的分级语义（只读/confirm/danger）与 delegate 硬兜底见 internal/server/ai 的审批判定。
 	ConsentMode string `mapstructure:"consent_mode" json:"consent_mode"`
+	// ConsentPolicy 分级审批策略：graded（默认，只读免审 + confirm/danger 需用户同意）/
+	// all（含只读在内的一切工具都需同意）/ off（都不问，危险，仅在明确知道后果时使用）。
+	// 旧值兼容：auto→off、normal→graded；无法识别的值按 graded 处理并在启动日志里告警。
+	ConsentPolicy string `mapstructure:"consent_policy" json:"consent_policy"`
 	// AgentConcurrency 异步自主 Agent 的并发上限（同时进行的 run 数），默认 2。
 	// 每个 run 独立后台 goroutine，超过上限的任务排队等待。
 	AgentConcurrency int `mapstructure:"agent_concurrency" json:"agent_concurrency"`
@@ -606,7 +618,14 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("ai.api_key", "")
 	viper.SetDefault("ai.model", "deepseek-chat")
 	viper.SetDefault("ai.timeout", 60)
+	// 三处上限的默认值：20 轮 / 40 次工具调用 / 900 秒墙钟。
 	viper.SetDefault("ai.max_turns", 20)
+	viper.SetDefault("ai.max_tool_calls", 40)
+	viper.SetDefault("ai.max_wallclock_sec", 900)
+	// 审批策略默认 graded。这里**故意留空串**而不是写 "graded"：老配置往往只写了旧键
+	// ai.consent_mode，空串才能让 ai 包的 effectiveConsentPolicy 回落到旧值映射
+	// （auto→off / normal→graded）；若在此写死 "graded"，旧键会被默认值盖掉而失效。
+	viper.SetDefault("ai.consent_policy", "")
 	viper.SetDefault("ai.agent_concurrency", 2)
 
 	// ── 对外 MCP 服务端（默认整体关闭；开启后也只绑回环 + 需 token + 只放行只读工具）──

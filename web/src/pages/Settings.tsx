@@ -16,11 +16,14 @@ interface SettingsData {
   ai: Record<string, any>
   /** 防测绘（控制台前置认证）配置 */
   web: Record<string, any>
+  /** 对外 MCP 服务端（v1.4.0）：契约见 handlers_settings.go 的 mcp 段；token 只写不回显 */
+  mcp: Record<string, any>
   new_password?: string // 仅前端草稿，不随分组提交
 }
 
 /** 可分组的配置段（与 /api/v1/settings 的段名一致；general 为只读展示，不在其中） */
-type SettingsGroup = 'general' | 'listener' | 'implant' | 'builder' | 'notifications' | 'security' | 'ai' | 'web'
+type SettingsGroup =
+  | 'general' | 'listener' | 'implant' | 'builder' | 'notifications' | 'security' | 'ai' | 'web' | 'mcp'
 
 /** 草稿里所有 Record 型分组（不含仅前端使用的 new_password 字符串字段） */
 type DraftGroup = 'general' | SettingsGroup
@@ -45,6 +48,7 @@ const GROUP_LABEL: Record<SettingsGroup, string> = {
   security: '账户与鉴权',
   ai: 'AI 副驾驶',
   web: '安全与防测绘',
+  mcp: 'MCP 服务端',
 }
 
 /** builder 段的空草稿：后端未回传该段时用它兜底（字段名照抄 server.yaml） */
@@ -69,6 +73,141 @@ const EMPTY: SettingsData = {
   security: {},
   ai: {},
   web: {},
+  mcp: {},
+}
+
+/* ─────────────────── MCP 服务端段：CSV ⇄ 字符串数组 的唯一转换点 ───────────────────
+   后端契约（GET/PUT /api/v1/settings 的 mcp 段）：
+     - allowed_tools / allowed_origins / allow_cidrs 必须是**字符串数组**（传字符串会被 400）；
+     - token 只写不回显（GET 只回 token_set 布尔）。
+   输入框只能给一个文本框，所以草稿里用 `${字段}_csv` 承载输入、数组字段本身原样保留：
+   这样"边打字边 split"不会产生 ["a", ""] 这类中间态，脏值比较也不会被前端专用键搅乱。
+   转换只允许出现在下面两个函数里（load 调用 mcpToDraft、saveAll 调用 mcpDraftToPayload），
+   两处都 trim + filter(Boolean)：**留空 / 只有逗号 / 只有空格 → []，绝不会提交 [""]**。 */
+const MCP_CSV_FIELDS: ReadonlyArray<readonly [csvKey: string, field: string]> = [
+  ['allowed_tools_csv', 'allowed_tools'],
+  ['allowed_origins_csv', 'allowed_origins'],
+  ['allow_cidrs_csv', 'allow_cidrs'],
+]
+
+/** 后端数组 → CSV 输入串（非数组/空数组 → 空串） */
+function mcpArrayToCsv(v: unknown): string {
+  if (!Array.isArray(v)) return ''
+  return v.map((s) => String(s).trim()).filter(Boolean).join(', ')
+}
+
+/** CSV 输入串 → 后端要求的字符串数组（'' 或 ' , ' → []；'a, b ,' → ['a','b']） */
+function mcpCsvToArray(v: unknown): string[] {
+  if (typeof v !== 'string') return []
+  return v.split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+/** GET 的 mcp 段 → 草稿：数组字段补一份 CSV 副本，其余字段（含只读展示字段）原样带过来 */
+function mcpToDraft(raw: unknown): Record<string, any> {
+  const m: Record<string, any> = raw && typeof raw === 'object' ? { ...(raw as Record<string, any>) } : {}
+  for (const [csvKey, field] of MCP_CSV_FIELDS) m[csvKey] = mcpArrayToCsv(m[field])
+  return m
+}
+
+/** 草稿的 mcp 段 → PUT 载荷：CSV → 数组、剔除前端专用/只读字段、token 三态处理 */
+function mcpDraftToPayload(m: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = { ...(m || {}) }
+  for (const [csvKey, field] of MCP_CSV_FIELDS) {
+    out[field] = mcpCsvToArray(out[csvKey]) // 留空 → []（不是 [""]）
+    delete out[csvKey] // 前端专用输入键，不回传
+  }
+  // 只读展示字段（GET 派生，仅用于 UI）：token_set 绝不能被当成 token 回传
+  delete out.token_set
+  delete out.effective_allowed
+  delete out.read_only_tools
+  delete out.tool_levels
+  // token 只写不回显：留空 = 保持原值（干脆不带该字段）、"clear" = 清空、其它 = 覆盖。
+  // 含 "****" 的掩码值后端会跳过，这里也不回传（trim 过的 "clear" 才能被后端识别为清空）。
+  const tk = typeof out.token === 'string' ? out.token.trim() : ''
+  if (tk && !tk.includes('****')) out.token = tk
+  else delete out.token
+  return out
+}
+
+/* ───────────────────────── MCP 段前端校验（口径同后端 400 提示） ─────────────────────────
+   bind 必须 host:port；max_concurrent 1~64；max_pending_handles 1~4096；inline_limit ≥ 512；
+   max_rpm ≥ 0（0/负数 = 用后端默认 60，不是"不限"）；result_ttl 形如 24h；allow_cidrs 必须是
+   CIDR 或裸 IP。这些后端都会 400，这里先在保存前拦住（不做校验的话用户只会看到一个 400）。 */
+interface MCPFieldErrors {
+  bind?: string
+  max_rpm?: string
+  max_concurrent?: string
+  max_pending_handles?: string
+  inline_limit?: string
+  result_ttl?: string
+  allowed_tools?: string
+  allow_cidrs?: string
+}
+
+/** Go time.ParseDuration 风格的时长 → 秒（解析失败或 ≤ 0 返回 null） */
+function parseMCPDuration(v: string): number | null {
+  const src = v.trim()
+  if (!src) return null
+  const unit: Record<string, number> = { ns: 1e-9, us: 1e-6, 'µs': 1e-6, ms: 1e-3, s: 1, m: 60, h: 3600 }
+  const re = /(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)/g
+  let total = 0
+  let consumed = 0
+  let hit: RegExpExecArray | null
+  while ((hit = re.exec(src)) !== null) {
+    total += Number(hit[1]) * unit[hit[2]]
+    consumed += hit[0].length
+  }
+  // 有解析不掉的片段（如 "24" / "1d"）或总量为 0 都算非法
+  if (consumed !== src.length || total <= 0) return null
+  return total
+}
+
+/** 前端预校验：返回按字段归类的错误文案（空对象 = 可以提交）。入参是草稿 mcp 段（含 *_csv） */
+function mcpValidate(m: Record<string, any>): MCPFieldErrors {
+  const errs: MCPFieldErrors = {}
+
+  const bind = String(m.bind ?? '').trim()
+  const bindMatch = /^(\[[^\]]*\]|[^:]*):(\d+)$/.exec(bind)
+  if (!bind) errs.bind = '监听地址不能为空（示例: 127.0.0.1:18082）'
+  else if (!bindMatch) errs.bind = '监听地址需为 host:port（示例: 127.0.0.1:18082）'
+  else if (Number(bindMatch[2]) < 1 || Number(bindMatch[2]) > 65535) errs.bind = '监听端口需在 1~65535 之间'
+
+  const rpm = Number(m.max_rpm)
+  if (!Number.isFinite(rpm) || rpm < 0) errs.max_rpm = 'RPM 不能为负（填 0 表示用后端默认 60，不是不限制）'
+
+  const conc = Number(m.max_concurrent)
+  if (!(conc >= 1 && conc <= 64)) errs.max_concurrent = '最大并发需在 1~64 之间'
+
+  const pend = Number(m.max_pending_handles)
+  if (!(pend >= 1 && pend <= 4096)) errs.max_pending_handles = '挂起句柄上限需在 1~4096 之间'
+
+  const inline = Number(m.inline_limit)
+  if (!(inline >= 512)) errs.inline_limit = '内联上限需 ≥ 512 字节'
+
+  if (parseMCPDuration(String(m.result_ttl ?? '')) === null) {
+    errs.result_ttl = '结果保留时长非法（示例: 24h / 90m / 1h30m）'
+  }
+
+  // 工具名：只做格式自检（完整注册表在前端拿不到，拼错的名字由后端 400 兜底）
+  const badTools = mcpCsvToArray(m.allowed_tools_csv).filter((t) => !/^[A-Za-z0-9_.:-]+$/.test(t))
+  if (badTools.length > 0) errs.allowed_tools = `工具名格式非法：${badTools.join('、')}（只能是字母/数字/下划线）`
+
+  // 来源网段：同 internal/server/mcp 的 parseCIDRs（CIDR 或裸 IP，裸 IP 会补成 /32、/128）
+  const cidrRe = /^[0-9A-Fa-f:.]+(\/\d{1,3})?$/
+  const badCidrs = mcpCsvToArray(m.allow_cidrs_csv).filter((c) => {
+    if (!cidrRe.test(c)) return true
+    if (!c.includes('/')) return false
+    const bits = Number(c.slice(c.indexOf('/') + 1))
+    return !(bits >= 0 && bits <= 128)
+  })
+  if (badCidrs.length > 0) errs.allow_cidrs = `既不是 CIDR 也不是 IP：${badCidrs.join('、')}`
+
+  return errs
+}
+
+/** Origin 白名单的格式提示（非阻塞）：后端只在 fail_closed=true 启动时拒绝非法项 */
+function mcpBadOrigins(csv: unknown): string[] {
+  return mcpCsvToArray(csv).filter((o) => !/^https?:\/\/[^/\s]+$/i.test(o))
 }
 
 /* ───────────────────────────── 分页（左侧导航） ─────────────────────────────
@@ -110,8 +249,8 @@ const PAGES: SettingsPageDef[] = [
     id: 'integrations',
     label: '集成与通知',
     icon: Bell,
-    sections: ['通知 Webhook', 'AI 副驾驶'],
-    groups: ['notifications', 'ai'],
+    sections: ['通知 Webhook', 'AI 副驾驶', 'MCP 服务端'],
+    groups: ['notifications', 'ai', 'mcp'],
   },
   {
     id: 'account',
@@ -131,6 +270,7 @@ const LEGACY_ANCHOR_PAGE: Record<string, SettingsPageId> = {
   'sec-implant': 'implant',
   'sec-notify': 'integrations',
   'sec-ai': 'integrations',
+  'sec-mcp': 'integrations',
   'sec-account': 'account',
 }
 
@@ -218,6 +358,9 @@ export function Settings() {
         // 保存后重新加载时保留用户刚填的草稿（keepBuilder），避免"填完就被冲掉"。
         data.builder = opts?.keepBuilder ? { ...BUILDER_DEFAULTS, ...opts.keepBuilder } : { ...BUILDER_DEFAULTS }
       }
+      // mcp 段：三个字符串数组字段在这里一次性转成 CSV 草稿（唯一转换点，见 mcpToDraft）。
+      // 注意 draft 与 baseline 都从转换后的 data 派生，所以 CSV 副本不会把自己算成"未保存改动"。
+      data.mcp = mcpToDraft(data.mcp)
       setDraft(data)
       const base: SettingsData = JSON.parse(JSON.stringify(data))
       if (!hasBuilder) base.builder = { ...BUILDER_DEFAULTS }
@@ -248,6 +391,9 @@ export function Settings() {
   const dirty = dirtyGroups.length > 0
   const dirtyLabels = dirtyGroups.map((g) => GROUP_LABEL[g]).join('、')
 
+  /** 后端是否在 settings 接口里放行了 mcp 段（GET 会回传 enabled 等字段） */
+  const mcpUnsupported = loaded && !Object.prototype.hasOwnProperty.call(draft.mcp || {}, 'enabled')
+
   // 未保存时关闭/刷新页面给浏览器一个提示（SPA 内部路由切换不会触发，见报告说明）
   const dirtyRef = useRef(false)
   useEffect(() => {
@@ -276,13 +422,20 @@ export function Settings() {
       setMsg({ kind: 'ok', text: '没有需要保存的改动' })
       return
     }
+    // mcp 段先在本地做与后端同口径的校验（bind / 数值区间 / 时长 / CIDR）：
+    // 有错就直接提示并不提交，免得用户只拿到一个 400（见 mcpValidate）。
+    const mcpErrList = Object.values(mcpValidate(draft.mcp || {})).filter(Boolean) as string[]
+    if (dirtyGroups.includes('mcp') && mcpErrList.length > 0) {
+      setMsg({ kind: 'err', text: 'MCP 服务端配置校验未通过，未提交：' + mcpErrList.join('；') })
+      return
+    }
     setSaving(true)
     setMsg(null)
     try {
       const payload: Record<string, any> = {}
       for (const g of dirtyGroups) {
-        // security / web 需要脱敏字段清洗，放到下面统一处理
-        if (g === 'security' || g === 'web') continue
+        // security / web 需要脱敏字段清洗，mcp 需要 CSV→数组 与只读字段清洗，放到下面统一处理
+        if (g === 'security' || g === 'web' || g === 'mcp') continue
         payload[g] = { ...(draft[g] as Record<string, any>) }
       }
       if (dirtyGroups.includes('security')) {
@@ -303,11 +456,19 @@ export function Settings() {
         else delete web.new_password // 留空 = 不修改密码
         payload.web = web
       }
+      if (dirtyGroups.includes('mcp')) {
+        // 对外 MCP 服务端：CSV → 字符串数组、剔除只读展示字段（含 token_set）、token 三态。
+        // 唯一转换点见 mcpDraftToPayload —— 留空数组在这里变成 []，不是 [""]。
+        payload.mcp = mcpDraftToPayload(draft.mcp || {})
+      }
 
       await settingsApi.save(payload)
 
       const savedLabels = dirtyGroups.map((g) => GROUP_LABEL[g]).join('、')
       const builderWarn = dirtyGroups.includes('builder') && !builderSupported
+      const mcpWarn = dirtyGroups.includes('mcp') && mcpUnsupported
+      // MCP 监听器只在启动时创建（不做动态重绑）：保存后必须提示重启，否则用户以为没生效
+      const mcpRestart = dirtyGroups.includes('mcp') && !mcpWarn
       setDraft((p) => ({ ...p, new_password: '' }))
       // 重新拉取最新配置；builder 未被后端放行时保留草稿（它仍未持久化）
       await load(builderWarn ? { keepBuilder: { ...draft.builder } } : undefined)
@@ -315,8 +476,12 @@ export function Settings() {
         kind: 'ok',
         text:
           `✓ 已保存：${savedLabels}` +
+          (mcpRestart ? ' — MCP 服务端改动需重启服务端才生效' : '') +
           (builderWarn
             ? ' — ⚠ builder 段（构建/签名）当前未被后端 settings 接口接收，改动没有写入配置文件，请在 server.yaml 的 builder: 段手工配置'
+            : '') +
+          (mcpWarn
+            ? ' — ⚠ mcp 段当前未被后端 settings 接口接收（GET 不回传该段），改动没有写入配置文件'
             : ''),
       })
     } catch (e: any) {
@@ -373,6 +538,15 @@ export function Settings() {
   }
 
   const currentPage = PAGES.find((p) => p.id === page) ?? PAGES[0]
+
+  // ── MCP 服务端段的展示派生值（CSV → 数组只用于展示/校验；提交时的转换统一在 saveAll 里做）──
+  const mcpErrs = mcpValidate(draft.mcp || {})
+  const mcpDraftTools = mcpCsvToArray(draft.mcp?.allowed_tools_csv)
+  const mcpSavedTools: string[] = Array.isArray(draft.mcp?.allowed_tools) ? draft.mcp.allowed_tools : []
+  const mcpEffective: string[] = Array.isArray(draft.mcp?.effective_allowed) ? draft.mcp.effective_allowed : []
+  const mcpReadOnly: string[] = Array.isArray(draft.mcp?.read_only_tools) ? draft.mcp.read_only_tools : []
+  const mcpLevels: Record<string, number> = draft.mcp?.tool_levels || {}
+  const mcpBadOriginList = mcpBadOrigins(draft.mcp?.allowed_origins_csv)
 
   return (
     <div className="settings-page">
@@ -875,6 +1049,226 @@ export function Settings() {
                     </select>
                   </Field>
                 </div>
+              </Section>
+            )}
+
+            {/* ══ MCP 服务端（对外暴露内部工具表；默认关闭、只绑回环、需 token）══ */}
+            {page === 'integrations' && (
+              <Section
+                title="MCP 服务端"
+                desc="把内部工具表通过 Model Context Protocol 暴露给外部 MCP 客户端（Claude Desktop / Cursor 等）。默认关闭、默认只绑回环；所有字段改动都需重启服务端才生效。"
+                badge={
+                  <>
+                    <Badge tone="warn">高风险 · 默认关闭</Badge> <Badge>需重启</Badge>
+                  </>
+                }
+              >
+                <Callout tone="warn" title="安全前提：能连上 MCP 端点的客户端，就等于拿到了调用内部工具的能力">
+                  MCP 客户端与内置 AI 副驾驶<b>共用同一张工具表</b>（会话管理 / 命令执行 / 文件读写 / 凭据等），
+                  它没有自己的权限边界。因此默认关闭、默认只绑回环、启用时<b>必须配置访问令牌</b>、
+                  白名单留空时只放行只读工具。<b>不要把端点暴露到公网</b>：需要跨机访问时走堡垒机或
+                  SSH 端口转发（如 <code>ssh -L 18082:127.0.0.1:18082 user@host</code>），
+                  并用来源网段（<code>allow_cidrs</code>）与 Origin 白名单把入口收到最小。
+                  接入方一旦持有令牌，就应当把它当成一份<b>管理凭据</b>来保管。
+                </Callout>
+                {mcpUnsupported && (
+                  <Callout tone="danger" title="当前后端的 settings 接口未放行 mcp 段" style={{ marginTop: 'var(--sp-3)' }}>
+                    GET 没有回传该段，保存时后端 <code>SettingsUpdate</code> 也无 mcp 字段，
+                    <b>这里的改动不会写入配置文件</b>。请改用支持该段的后端，或直接编辑 server.yaml 的 <code>mcp:</code> 段。
+                  </Callout>
+                )}
+                <div className="settings-grid" style={{ marginTop: 'var(--sp-3)' }}>
+                  <Check
+                    label="启用 MCP 服务端 (enabled)"
+                    hint="默认关闭。开启后需重启服务端才真正监听；未配置 token 时服务端会拒绝启动"
+                    checked={!!draft.mcp.enabled}
+                    onChange={(v) => setField('mcp', 'enabled', v)}
+                  />
+                  <Field
+                    label="监听地址 (bind)"
+                    hint="host:port，默认只绑回环 127.0.0.1:18082；填 0.0.0.0 等于把端点暴露到所有网卡"
+                    error={mcpErrs.bind}
+                  >
+                    <input
+                      className="ui-input ui-input--mono"
+                      value={draft.mcp.bind ?? ''}
+                      onChange={(e) => setField('mcp', 'bind', e.target.value)}
+                      placeholder="127.0.0.1:18082"
+                    />
+                  </Field>
+                  <Field
+                    label="访问令牌 (token)"
+                    required={!!draft.mcp.enabled}
+                    hint={
+                      draft.mcp.token_set
+                        ? '当前已设置（明文不回显）：留空 = 保持不变，填 clear = 清空'
+                        : '当前未设置：留空 = 保持不变；启用 MCP 时必须设置，否则服务端拒绝启动'
+                    }
+                  >
+                    <input
+                      type="password"
+                      className="ui-input"
+                      autoComplete="new-password"
+                      value={draft.mcp.token || ''}
+                      onChange={(e) => setField('mcp', 'token', e.target.value)}
+                      placeholder={draft.mcp.token_set ? '留空 = 不修改' : '设置访问令牌'}
+                    />
+                  </Field>
+                  <Field label="结果目录 (result_dir)" hint="大结果落盘目录（相对路径相对服务端工作目录）；留空用默认 ./data/mcp-results">
+                    <input
+                      className="ui-input ui-input--mono"
+                      value={draft.mcp.result_dir ?? ''}
+                      onChange={(e) => setField('mcp', 'result_dir', e.target.value)}
+                      placeholder="./data/mcp-results"
+                    />
+                  </Field>
+                  <Field label="结果保留时长 (result_ttl)" hint="Go 时长写法，如 24h / 90m / 1h30m；过期结果会被清理" error={mcpErrs.result_ttl}>
+                    <input
+                      className="ui-input ui-input--mono"
+                      value={draft.mcp.result_ttl ?? ''}
+                      onChange={(e) => setField('mcp', 'result_ttl', e.target.value)}
+                      placeholder="24h"
+                    />
+                  </Field>
+                  <Field label="审计日志路径 (audit_path)" hint="MCP 调用审计 JSONL（谁在什么时候调了哪个工具），建议纳入日志留存">
+                    <input
+                      className="ui-input ui-input--mono"
+                      value={draft.mcp.audit_path ?? ''}
+                      onChange={(e) => setField('mcp', 'audit_path', e.target.value)}
+                      placeholder="./logs/mcp-audit.jsonl"
+                    />
+                  </Field>
+                  <Field
+                    label="每分钟请求上限 (max_rpm)"
+                    hint="0 或负数 = 用后端默认 60（不是不限制）；调大可放宽，但请先确认令牌没有外泄"
+                    error={mcpErrs.max_rpm}
+                  >
+                    <input
+                      type="number"
+                      min={0}
+                      className="ui-input"
+                      value={draft.mcp.max_rpm ?? ''}
+                      onChange={(e) => setField('mcp', 'max_rpm', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="最大并发 (max_concurrent)" hint="1~64，同时在跑的 MCP 请求数上限" error={mcpErrs.max_concurrent}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={64}
+                      className="ui-input"
+                      value={draft.mcp.max_concurrent ?? ''}
+                      onChange={(e) => setField('mcp', 'max_concurrent', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field
+                    label="挂起句柄上限 (max_pending_handles)"
+                    hint="1~4096，等待被取回的结果句柄数量上限（长任务结果先挂起再拉取）"
+                    error={mcpErrs.max_pending_handles}
+                  >
+                    <input
+                      type="number"
+                      min={1}
+                      max={4096}
+                      className="ui-input"
+                      value={draft.mcp.max_pending_handles ?? ''}
+                      onChange={(e) => setField('mcp', 'max_pending_handles', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="内联结果上限 (inline_limit)" hint="≥ 512，单位字节；超过该大小的结果不内联返回，改为落盘 + 句柄拉取" error={mcpErrs.inline_limit}>
+                    <input
+                      type="number"
+                      min={512}
+                      className="ui-input"
+                      value={draft.mcp.inline_limit ?? ''}
+                      onChange={(e) => setField('mcp', 'inline_limit', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Check
+                    label="出错即拒 (fail_closed)"
+                    hint="true（默认）：令牌为空、白名单/CIDR 有非法项时拒绝启动；false：只告警放行，非法项会被静默忽略"
+                    checked={draft.mcp.fail_closed !== false}
+                    onChange={(v) => setField('mcp', 'fail_closed', v)}
+                  />
+                </div>
+
+                {/* 工具白名单：占满整行，下面跟"实际生效数量 + 分级统计 + 只读工具全集" */}
+                <div className="mcp-whitelist">
+                  <Field
+                    label="允许的工具白名单 (allowed_tools)"
+                    hint="逗号分隔的 MCP 工具名；留空 = 只放行只读工具集合（推荐）。名字必须是已注册工具，拼错保存会 400（可用 GET /api/v1/mcp/tools 看全集）；写入 confirm/danger 级工具会绕过分级审批，请逐项确认。"
+                    error={mcpErrs.allowed_tools}
+                  >
+                    <input
+                      className="ui-input ui-input--mono"
+                      value={draft.mcp.allowed_tools_csv ?? ''}
+                      onChange={(e) => setField('mcp', 'allowed_tools_csv', e.target.value)}
+                      placeholder="留空 = 只放行只读工具（推荐）"
+                    />
+                  </Field>
+                  <Toolbar style={{ marginTop: 'var(--sp-2)', marginBottom: 0 }}>
+                    <Badge tone="info">
+                      实际生效 = {mcpEffective.length} 个{mcpSavedTools.length === 0 ? '（留空即只读集合）' : ''}
+                    </Badge>
+                    {mcpDraftTools.length > 0 ? (
+                      <Badge tone="warn">草稿白名单 {mcpDraftTools.length} 个（保存并重启后生效）</Badge>
+                    ) : (
+                      <span className="settings-muted">留空 = 只放行只读工具</span>
+                    )}
+                    <span className="ui-spacer" />
+                    <Badge tone="ok">只读 {mcpLevels.read ?? 0}</Badge>
+                    <Badge tone="warn">需确认 {mcpLevels.confirm ?? 0}</Badge>
+                    <Badge tone="danger">危险 {mcpLevels.danger ?? 0}</Badge>
+                  </Toolbar>
+                  {mcpReadOnly.length > 0 && (
+                    <div className="mcp-tool-list">
+                      <span className="settings-muted">只读工具全集（留空白名单时实际生效的就是这些）：</span>
+                      {mcpReadOnly.map((t) => (
+                        <code key={t} className="mcp-tool-chip">{t}</code>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="settings-grid" style={{ marginTop: 'var(--sp-3)' }}>
+                  <Field
+                    label="允许的 Origin (allowed_origins)"
+                    hint={
+                      <>
+                        浏览器跨域调用时必须命中的 Origin，如 <code>https://ops.example.com</code>；留空 = 只放行同源。
+                        {mcpBadOriginList.length > 0 && (
+                          <span className="ui-field-error">
+                            {' '}格式可疑：{mcpBadOriginList.join('、')}（需写成 scheme://host；fail_closed=true 时非法项会让服务端拒绝启动）
+                          </span>
+                        )}
+                      </>
+                    }
+                  >
+                    <input
+                      className="ui-input ui-input--mono"
+                      value={draft.mcp.allowed_origins_csv ?? ''}
+                      onChange={(e) => setField('mcp', 'allowed_origins_csv', e.target.value)}
+                      placeholder="留空 = 只放行同源"
+                    />
+                  </Field>
+                  <Field
+                    label="允许的来源网段 (allow_cidrs)"
+                    hint="逗号分隔的 CIDR 或裸 IP（如 10.0.0.0/8, 192.168.1.10）；留空 = 不限制来源。只按直连地址判定，不读 X-Forwarded-For"
+                    error={mcpErrs.allow_cidrs}
+                  >
+                    <input
+                      className="ui-input ui-input--mono"
+                      value={draft.mcp.allow_cidrs_csv ?? ''}
+                      onChange={(e) => setField('mcp', 'allow_cidrs_csv', e.target.value)}
+                      placeholder="留空 = 不限制来源"
+                    />
+                  </Field>
+                </div>
+
+                <Callout tone="info" title="改动需重启服务端才生效" style={{ marginTop: 'var(--sp-3)' }}>
+                  MCP 监听器只在服务端启动时创建，不做动态重绑：enabled / bind / token / 白名单等改动保存只写入 server.yaml，
+                  需<b>重启服务端</b>才生效。重启后可用 <code>GET /api/v1/mcp/tools</code> 核对实际放行的工具集合。
+                </Callout>
               </Section>
             )}
 

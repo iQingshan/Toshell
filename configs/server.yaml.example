@@ -145,14 +145,34 @@ ai:
     api_key: ""
     model: deepseek-chat
     timeout: 60
+    # 一次 run 的三处控制循环硬上限（副驾驶同步循环与自主 Agent 共用）：
+    #   max_turns         = 最多多少轮 LLM 往返（默认 20）
+    #   max_tool_calls    = 最多发起多少次工具调用（默认 40）
+    #   max_wallclock_sec = 最长墙钟时间，秒（默认 900）
+    # 任一触发都会立即停止循环：stop_reason 记为 max_turns / max_tool_calls / max_wallclock，
+    # 并照常产出"因预算耗尽而停止"的最终回复（不会静默中断）。留空或填 <=0 一律按默认值处理，
+    # 不支持"关掉上限"（想要更宽松就填一个具体的大数字）。
     max_turns: 20
+    max_tool_calls: 40
+    max_wallclock_sec: 900
     # 异步自主 Agent 并发上限（同时进行的任务数，默认 2，范围 1-8）。每个任务起一个 goroutine，超出则排队。
     agent_concurrency: 2
     # 工具下载域名白名单（远程下载 remote_download 只能从这些域名拉取；留空=允许任意公网域名，
     # 但始终拒绝内网/回环地址，防 SSRF）。
     download_allowlist: []
-    # 权限模式：auto=全自动（默认，工具直接执行）；normal=影响会话的操作（下发/文件/进程/凭据/截屏/隧道/插件）
-    # 执行前需用户同意（副驾驶会拦截并请求确认；任务流(delegate/剧本)除外）。
+    # 审批策略（分级审批，默认 graded）：
+    #   graded = 只读工具直接执行；confirm/danger 级（下发命令/文件/进程/凭据/截屏/隧道/插件/
+    #            载荷分发/任务流 delegate 等）需用户同意；
+    #   all    = 任何工具（含只读）都要用户同意（最小授权/演示场景）；
+    #   off    = 都不询问（危险：仅在你明确知道后果时使用）。
+    # 判断等级统一取工具注册表（internal/server/mcp）：未登记的工具按 danger 处理（fail-closed），
+    # delegate 一律按 danger（它会驱动剧本在目标侧执行动作，不能被"只读"豁免绕过）。
+    # 无法识别的值按 graded 处理并在启动日志里告警。
+    consent_policy: graded
+    # 旧键（v1.4.0 起被 consent_policy 取代，仅供老配置兼容，建议改用上面的 consent_policy）：
+    #   auto   = 全自动（等价 consent_policy: off）
+    #   normal = 影响会话的操作需用户同意（等价 consent_policy: graded）
+    # 注意：consent_policy 非空时以它为准，consent_mode 只是回落项。
     consent_mode: auto
 
 # ── Web 控制台防护（防资产测绘 / 防未授权访问）────────────────────────

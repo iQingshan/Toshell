@@ -105,13 +105,17 @@ type settingsWebUpdate struct {
 }
 
 type settingsAIUpdate struct {
-	Enabled           *bool     `json:"enabled"`
-	BaseURL           *string   `json:"base_url"`
-	APIKey            *string   `json:"api_key"`
-	Model             *string   `json:"model"`
-	Timeout           *int      `json:"timeout"`
-	MaxTurns          *int      `json:"max_turns"`
-	ConsentMode       *string   `json:"consent_mode"` // auto=全自动(默认) / normal=影响会话操作需用户同意(任务流除外)
+	Enabled  *bool   `json:"enabled"`
+	BaseURL  *string `json:"base_url"`
+	APIKey   *string `json:"api_key"`
+	Model    *string `json:"model"`
+	Timeout  *int    `json:"timeout"`
+	MaxTurns *int    `json:"max_turns"`
+	// v1.4.0 S2：控制循环的另外两处硬上限 + 分级审批策略
+	MaxToolCalls      *int      `json:"max_tool_calls"`    // 一次 run 内最多工具调用数（默认 40）
+	MaxWallclockSec   *int      `json:"max_wallclock_sec"` // 一次 run 最长墙钟时间（秒，默认 900）
+	ConsentPolicy     *string   `json:"consent_policy"`    // graded(默认) / all / off（旧值 auto/normal 兼容）
+	ConsentMode       *string   `json:"consent_mode"`      // 旧键，保留兼容：auto=全自动 / normal=影响会话操作需用户同意
 	AgentConcurrency  *int      `json:"agent_concurrency"`
 	DownloadAllowlist *[]string `json:"download_allowlist"`
 }
@@ -231,12 +235,16 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"api_key_count": len(cfg.Auth.APIKeys),
 		},
 		AI: map[string]interface{}{
-			"enabled":            cfg.AI.Enabled,
-			"base_url":           cfg.AI.BaseURL,
-			"api_key":            maskSecret(cfg.AI.APIKey),
-			"model":              cfg.AI.Model,
-			"timeout":            cfg.AI.Timeout,
-			"max_turns":          cfg.AI.MaxTurns,
+			"enabled":   cfg.AI.Enabled,
+			"base_url":  cfg.AI.BaseURL,
+			"api_key":   maskSecret(cfg.AI.APIKey),
+			"model":     cfg.AI.Model,
+			"timeout":   cfg.AI.Timeout,
+			"max_turns": cfg.AI.MaxTurns,
+			// v1.4.0 S2：控制循环的另外两处硬上限与分级审批策略（旧 consent_mode 保留兼容）
+			"max_tool_calls":     cfg.AI.MaxToolCalls,
+			"max_wallclock_sec":  cfg.AI.MaxWallclockSec,
+			"consent_policy":     cfg.AI.ConsentPolicy,
 			"consent_mode":       cfg.AI.ConsentMode,
 			"agent_concurrency":  cfg.AI.AgentConcurrency,
 			"download_allowlist": cfg.AI.DownloadAllowlist,
@@ -589,6 +597,37 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if a.MaxTurns != nil && *a.MaxTurns > 0 {
 			updates["ai.max_turns"] = *a.MaxTurns
+		}
+		// v1.4.0 S2：控制循环的另外两处硬上限 + 分级审批策略。
+		// 上限给下限保护（0/负数会让循环直接停摆，比"不限制"更危险）。
+		if a.MaxToolCalls != nil {
+			if *a.MaxToolCalls < 1 || *a.MaxToolCalls > 1000 {
+				http.Error(w, `{"error":"ai.max_tool_calls 范围 1-1000"}`, http.StatusBadRequest)
+				return
+			}
+			updates["ai.max_tool_calls"] = *a.MaxToolCalls
+		}
+		if a.MaxWallclockSec != nil {
+			if *a.MaxWallclockSec < 30 || *a.MaxWallclockSec > 86400 {
+				http.Error(w, `{"error":"ai.max_wallclock_sec 范围 30-86400（秒）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["ai.max_wallclock_sec"] = *a.MaxWallclockSec
+		}
+		if a.ConsentPolicy != nil {
+			cp := strings.ToLower(strings.TrimSpace(*a.ConsentPolicy))
+			// 兼容旧值：auto→off、normal→graded（与 ai 包的 normalizeConsentPolicy 一致）
+			switch cp {
+			case "auto":
+				cp = "off"
+			case "normal":
+				cp = "graded"
+			}
+			if cp != "graded" && cp != "all" && cp != "off" {
+				http.Error(w, `{"error":"ai.consent_policy 仅支持 graded / all / off（旧值 auto/normal 亦可）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["ai.consent_policy"] = cp
 		}
 		if a.ConsentMode != nil {
 			cm := strings.TrimSpace(*a.ConsentMode)

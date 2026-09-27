@@ -8,6 +8,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -102,6 +105,12 @@ type ConsentRequest struct {
 	Tool  string            `json:"tool"`
 	Args  map[string]string `json:"args"`
 	Desc  string            `json:"desc,omitempty"`
+	// TraceID / CallID / Level 为 v1.4.0 S2 新增（老字段与语义不变，老前端忽略即可）：
+	// 审批弹窗与审计需要知道"哪一次执行（trace）、哪次工具调用（LLM 的 tool_call id）、
+	// 按什么等级（read/confirm/danger）在问人"，否则事后无法把审批与日志精确对上。
+	TraceID string `json:"trace_id,omitempty"`
+	CallID  string `json:"call_id,omitempty"`
+	Level   string `json:"level,omitempty"`
 }
 
 // ChatResult 一轮副驾驶对话的结果：最终回复 + 工具轨迹 + 待确认请求（若有）。
@@ -109,6 +118,11 @@ type ChatResult struct {
 	Reply   string           `json:"reply"`
 	Traces  []ToolTrace      `json:"traces"`
 	Pending []ConsentRequest `json:"pending_consents,omitempty"`
+	// TraceID 本次执行的 trace id；StopReason 非空时说明为何停止
+	// （max_turns / max_tool_calls / max_wallclock / loop_detected / awaiting_consent）。
+	// 两者均为 v1.4.0 S2 新增，老前端忽略即可。
+	TraceID    string `json:"trace_id,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
 }
 
 // pendingSession 一个被挂起的审批会话：保存当前消息序列、待确认的工具与已产生轨迹。
@@ -117,6 +131,9 @@ type pendingSession struct {
 	tool     ToolCall
 	args     map[string]string
 	traces   []ToolTrace
+	// traceID 挂起前的 trace id：用户 allow/deny 后恢复循环时沿用同一条 trace，
+	// 保证"审批请求 → 实际执行 → 审计日志"能被同一个 id 串起来。
+	traceID string
 }
 
 func New(cfg config.AIConfig, executor ToolExecutor) *Copilot {
@@ -124,6 +141,8 @@ func New(cfg config.AIConfig, executor ToolExecutor) *Copilot {
 	if timeout <= 0 {
 		timeout = 60
 	}
+	// 启动时对写错的审批策略告警一次（写错的值会被按 graded 处理，不静默生效）。
+	warnUnknownConsentPolicy(cfg)
 	return &Copilot{
 		cfg:      cfg,
 		executor: executor,
@@ -148,6 +167,7 @@ func (c *Copilot) Reconfigure(cfg config.AIConfig) {
 		timeout = 60
 	}
 	c.client.Timeout = time.Duration(timeout) * time.Second
+	warnUnknownConsentPolicy(cfg)
 }
 
 // Chat 单轮对话入口（兼容无审批的简单调用）：返回助手最终文本 + 工具调用轨迹。
@@ -170,7 +190,8 @@ func (c *Copilot) ChatWithConsent(ctx context.Context, history []Message) (*Chat
 		return nil, fmt.Errorf("AI copilot executor not available")
 	}
 	messages := c.buildMessages(history)
-	return c.runLoop(ctx, messages)
+	// trace id 为空 → 本次执行新生成一条（见 runLoop）。
+	return c.runLoop(ctx, messages, "")
 }
 
 // buildMessages 组装系统提示（注入当前在线会话清单）+ 历史消息。
@@ -258,16 +279,30 @@ func (c *Copilot) buildMessages(history []Message) []Message {
 	return messages
 }
 
-// runLoop ReAct 循环主体；normal 模式下遇影响会话操作会挂起并返回 pending。
-func (c *Copilot) runLoop(ctx context.Context, messages []Message) (*ChatResult, error) {
-	maxTurns := c.cfg.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = 20
-	}
+// runLoop ReAct 循环主体（同步副驾驶路径）；分级审批下遇需用户同意的工具会挂起并返回 pending。
+//
+// traceID 为空时本次执行新生成一条；同一轮的 LLM 往返、工具调用、审批请求与日志共用它。
+// v1.4.0 S2 起循环里有三处硬上限（轮次/工具调用数/墙钟）与"同工具同参数"防死循环，
+// 判定全部走本文件底部的纯函数（shouldStopRun / loopGuardAction）。
+func (c *Copilot) runLoop(ctx context.Context, messages []Message, traceID string) (*ChatResult, error) {
+	traceID = ensureTraceID(traceID)
+	limits := limitsFromConfig(c.cfg, 0)
+	policy := c.consentPolicy()
+	startedAt := time.Now()
 	var traces []ToolTrace
-	lastCall := ""
-	repeatCount := 0
-	for turn := 0; turn < maxTurns; turn++ {
+	loopSeen := map[string]int{}
+	toolCalls := 0
+	stopReason := ""
+	for turn := 0; ; turn++ {
+		// 三处硬上限逐轮判定：任一触发立即停止循环并记录 stop_reason。
+		usage := runUsage{Turns: turn, ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}
+		if stop, reason := shouldStopRun(usage, limits); stop {
+			stopReason = reason
+			logging.Warn("ai", "copilot trace=%s stop_reason=%s usage[turns=%d tool_calls=%d elapsed=%ds] limits[turns=%d tool_calls=%d wallclock=%ds]",
+				traceID, reason, usage.Turns, usage.ToolCalls, usage.ElapsedSec,
+				limits.MaxTurns, limits.MaxToolCalls, limits.MaxWallclockSec)
+			break
+		}
 		resp, err := c.complete(ctx, messages)
 		if err != nil {
 			return nil, err
@@ -278,26 +313,40 @@ func (c *Copilot) runLoop(ctx context.Context, messages []Message) (*ChatResult,
 		msg := resp.Choices[0].Message
 		messages = append(messages, msg)
 		if len(msg.ToolCalls) == 0 {
-			return &ChatResult{Reply: msg.Content, Traces: traces}, nil
+			return &ChatResult{Reply: msg.Content, Traces: traces, TraceID: traceID}, nil
 		}
+		budgetExhausted := false
 		for _, tc := range msg.ToolCalls {
+			// 工具调用数上限：逐个检查（一轮可能返回多个 tool_calls），保证不超发。
+			if limits.MaxToolCalls > 0 && toolCalls >= limits.MaxToolCalls {
+				stopReason = stopReasonMaxToolCalls
+				logging.Warn("ai", "copilot trace=%s stop_reason=%s tool_calls=%d limit=%d",
+					traceID, stopReason, toolCalls, limits.MaxToolCalls)
+				budgetExhausted = true
+				break
+			}
 			args := map[string]string{}
 			if tc.Function.Arguments != "" {
 				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			}
-			callKey := tc.Function.Name + "|" + tc.Function.Arguments
-			if callKey == lastCall {
-				repeatCount++
-			} else {
-				lastCall = callKey
-				repeatCount = 1
+			// 防死循环（相同工具 + 相同参数）：只读工具豁免，理由见 loopGuardAction。
+			level := toolLevel(tc.Function.Name)
+			sig := loopSignature(tc.Function.Name, args)
+			loopSeen[sig]++
+			action := loopGuardAction(loopSeen[sig], level)
+			if action == loopStop {
+				stopReason = stopReasonLoopDetected
+				logging.Warn("ai", "copilot trace=%s stop_reason=%s tool=%s level=%s identical_calls=%d args=%s",
+					traceID, stopReason, tc.Function.Name, level, loopSeen[sig], truncate(argsJSON(args), 200))
+				return &ChatResult{
+					Reply:      loopStopReply(tc.Function.Name, args, traces),
+					Traces:     traces,
+					TraceID:    traceID,
+					StopReason: stopReason,
+				}, nil
 			}
-			if repeatCount >= 3 {
-				logging.Warn("ai", "copilot tool loop detected: %s called %d times with same args", tc.Function.Name, repeatCount)
-				return &ChatResult{Reply: buildActionSummary(traces), Traces: traces}, nil
-			}
-			// 权限护栏：normal 模式下影响会话的操作挂起等用户确认；任务流(delegate)除外。
-			if c.cfg.ConsentMode == "normal" && isRiskyTool(tc.Function.Name) {
+			// 分级审批护栏：按策略判断该等级是否需要用户同意；需要则挂起（含 trace/call_id/等级）。
+			if needsConsent(policy, level) {
 				token := c.newConsentToken()
 				c.pendingMu.Lock()
 				c.pending[token] = &pendingSession{
@@ -305,34 +354,53 @@ func (c *Copilot) runLoop(ctx context.Context, messages []Message) (*ChatResult,
 					tool:     tc,
 					args:     args,
 					traces:   append([]ToolTrace(nil), traces...),
+					traceID:  traceID,
 				}
 				c.pendingMu.Unlock()
 				return &ChatResult{
-					Reply:   "✋ 以下操作会影响目标会话，需要你确认后才会执行。",
-					Traces:  traces,
-					Pending: []ConsentRequest{{Token: token, Tool: tc.Function.Name, Args: args, Desc: toolDesc(tc.Function.Name)}},
+					Reply:      "✋ 以下操作会影响目标会话，需要你确认后才会执行。",
+					Traces:     traces,
+					Pending:    []ConsentRequest{consentRequestFor(token, traceID, tc, args)},
+					TraceID:    traceID,
+					StopReason: stopReasonAwaitConsent,
 				}, nil
 			}
+			toolCalls++
 			result, err := c.executor.InvokeTool(tc.Function.Name, args)
 			trace := ToolTrace{Name: tc.Function.Name, Args: args}
 			var out string
 			if err != nil {
 				out = "error: " + err.Error()
 				trace.Error = err.Error()
+			} else if b, jerr := json.Marshal(result); jerr == nil {
+				out = string(b)
 			} else {
-				if b, jerr := json.Marshal(result); jerr == nil {
-					out = string(b)
-				} else {
-					out = fmt.Sprintf("%v", result)
-				}
+				out = fmt.Sprintf("%v", result)
 			}
 			trace.Result = out
 			traces = append(traces, trace)
 			messages = append(messages, Message{Role: "tool", ToolCallID: tc.ID, Content: truncate(out, 4000)})
+			// 第 2 次相同签名：**工具结果之后**追加一条系统提示，要求换策略或直接给结论。
+			// 多数情况下模型只是没意识到自己在重复，提示一次比直接掐断更有效。
+			if action == loopWarn {
+				messages = append(messages, Message{Role: "system", Content: loopNudge(tc.Function.Name, args)})
+			}
+			// 动作审计：记录每次工具调用（trace/等级/调用 id/参数/成败），供追溯与合规。
+			logging.Info("agent-audit", "trace=%s tool=%s level=%s call_id=%s args=%s ok=%v err=%v",
+				traceID, tc.Function.Name, level, tc.ID, truncate(tc.Function.Arguments, 200), trace.Error == "", trace.Error)
+		}
+		if budgetExhausted {
+			break
 		}
 	}
-	logging.Warn("ai", "copilot tool loop reached %d turns, returning action summary", maxTurns)
-	return &ChatResult{Reply: buildActionSummary(traces), Traces: traces}, nil
+	// 预算耗尽：照常给出"因预算耗尽而停止"的最终回复（不静默中断、不 panic）。
+	note := stopReasonText(stopReason, runUsage{ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}, limits)
+	return &ChatResult{
+		Reply:      "⚠️ " + note + "\n\n" + buildActionSummary(traces),
+		Traces:     traces,
+		TraceID:    traceID,
+		StopReason: stopReason,
+	}, nil
 }
 
 // ResolveConsent 用户对挂起的操作做决定：allow→执行该工具，deny→跳过；然后恢复 ReAct 循环。
@@ -364,7 +432,8 @@ func (c *Copilot) ResolveConsent(ctx context.Context, token string, allow bool) 
 	}
 
 	msgs := append(p.messages, Message{Role: "tool", ToolCallID: p.tool.ID, Content: truncate(out, 4000)})
-	res, err := c.runLoop(ctx, msgs)
+	// 恢复循环时沿用挂起前的 trace_id：审批、执行与日志必须是同一条 trace。
+	res, err := c.runLoop(ctx, msgs, p.traceID)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +467,7 @@ func (c *Copilot) ResolveAgentConsent(ctx context.Context, run *AgentRun, allow 
 
 	var out string
 	if allow {
-		run.emit(AgentEventToolStart, ToolStart{Name: p.tool.Function.Name, Args: p.args}, "")
+		run.emit(AgentEventToolStart, ToolStart{Name: p.tool.Function.Name, Args: p.args, TraceID: p.traceID}, "")
 		res, err := c.executor.InvokeTool(p.tool.Function.Name, p.args)
 		if err != nil {
 			out = "error: " + err.Error()
@@ -415,7 +484,8 @@ func (c *Copilot) ResolveAgentConsent(ctx context.Context, run *AgentRun, allow 
 
 	trace := ToolTrace{Name: p.tool.Function.Name, Args: p.args, Result: truncate(out, 4000)}
 	run.Traces = append(run.Traces, trace)
-	run.emit(AgentEventToolResult, ToolResult{Name: p.tool.Function.Name, Result: truncate(out, 4000)}, "")
+	run.emit(AgentEventToolResult, ToolResult{Name: p.tool.Function.Name, Result: truncate(out, 4000), TraceID: p.traceID}, "")
+	logging.Info("agent-audit", "run=%s trace=%s consent_resolved tool=%s call_id=%s allow=%v", run.ID, p.traceID, p.tool.Function.Name, p.tool.ID, allow)
 
 	// 追加 tool 结果消息，恢复循环。用 p.messages 作为基础，避免重复。
 	run.Messages = append(p.messages, Message{Role: "tool", ToolCallID: p.tool.ID, Content: truncate(out, 4000)})
@@ -465,6 +535,10 @@ func toolDesc(name string) string {
 		return "读取会话环境变量"
 	case "scheduled_tasks":
 		return "列出会话计划任务"
+	case "delegate":
+		// delegate 会驱动剧本在目标侧执行 task_submit/credentials 等动作，
+		// 不是"编排类只读操作"：审批弹窗必须让用户看到这一点。
+		return "启动任务流（会在目标会话执行剧本动作）"
 	default:
 		return "影响目标会话的操作"
 	}
@@ -1054,21 +1128,44 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		return c.runChatReply(ctx, run, guard)
 	}
 
-	maxTurns := run.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = c.cfg.MaxTurns
-		if maxTurns <= 0 {
-			maxTurns = 20
-		}
-	}
+	// 控制循环护栏（v1.4.0 S2）：三处硬上限 + 防死循环 + trace id。
+	// limits 的轮次优先用本 run 指定的 MaxTurns（0=用配置默认），工具调用数与墙钟只来自配置。
+	limits := limitsFromConfig(c.cfg, run.MaxTurns)
+	traceID := ensureTraceID(run.TraceID)
+	run.setTraceID(traceID)
+	policy := c.consentPolicy()
+	startedAt := time.Now()
+	toolCalls := 0
+	loopSeen := map[string]int{} // 签名 → 本 run 内累计出现次数（防死循环）
+	stopReason := ""
 
-	lastCall := ""
-	repeatCount := 0
+	// 先把 trace/生效预算/审批策略作为独立事件推给前端：老前端不认识 trace 事件名会
+	// 走 SSE 的 default 分支忽略，新前端/抓包工具可据此把 run 与日志、审批串起来。
+	run.emit(AgentEventTrace, TraceInfo{
+		TraceID:         traceID,
+		RunID:           run.ID,
+		ConsentPolicy:   policy,
+		MaxTurns:        limits.MaxTurns,
+		MaxToolCalls:    limits.MaxToolCalls,
+		MaxWallclockSec: limits.MaxWallclockSec,
+	}, "")
+
 	consecutiveFail := 0 // 连续失败工具计数：超过阈值强制收敛，避免 agent 无限瞎试/幻觉
 	var fullThinking strings.Builder
 	var fullContent strings.Builder
 
-	for turn := 0; turn < maxTurns; turn++ {
+	for turn := 0; ; turn++ {
+		// 三处硬上限**每轮都查**：任一触发立刻停止循环并记录 stop_reason，
+		// 由循环后的收尾逻辑产出"因预算耗尽而停止"的最终回复（不静默中断、不 panic）。
+		usage := runUsage{Turns: turn, ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}
+		if stop, reason := shouldStopRun(usage, limits); stop {
+			stopReason = reason
+			logging.Warn("ai", "agent run=%s trace=%s stop_reason=%s usage[turns=%d tool_calls=%d elapsed=%ds] limits[turns=%d tool_calls=%d wallclock=%ds]",
+				run.ID, traceID, reason, usage.Turns, usage.ToolCalls, usage.ElapsedSec,
+				limits.MaxTurns, limits.MaxToolCalls, limits.MaxWallclockSec)
+			break
+		}
+
 		// 取消检查
 		select {
 		case <-ctx.Done():
@@ -1127,7 +1224,7 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			run.setReply(ag.Content)
 			run.appendTimeline("final", truncate(ag.Content, 220))
 			run.emit(AgentEventFinal, ag.Content, "")
-			run.emitRaw(AgentEvent{Kind: AgentEventDone})
+			run.emitDone()
 			run.setStatus(AgentDone)
 			run.closeEvents()
 			return ag, nil
@@ -1141,36 +1238,47 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		if tc.Function.Arguments != "" {
 			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 		}
-		callKey := tc.Function.Name + "|" + tc.Function.Arguments
-		if callKey == lastCall {
-			repeatCount++
-		} else {
-			lastCall = callKey
-			repeatCount = 1
-		}
-		if repeatCount >= 3 {
-			logging.Warn("ai", "agent %s: tool loop detected: %s repeated %d times", run.ID, tc.Function.Name, repeatCount)
-			// 收敛时尽量产出真实报告而不是动作清单
+		// 防死循环（相同工具 + 相同参数）：签名 = 工具名 + 规范化参数 JSON 的 sha256 前 16 hex。
+		// 第 2 次出现 → 工具结果后追加系统提示；第 3 次 → 停止循环（stop_reason=loop_detected）。
+		// 只读工具豁免（查两次同一会话列表是正常行为），理由见 loopGuardAction 注释。
+		level := toolLevel(tc.Function.Name)
+		sig := loopSignature(tc.Function.Name, args)
+		loopSeen[sig]++
+		action := loopGuardAction(loopSeen[sig], level)
+		if action == loopStop {
+			stopReason = stopReasonLoopDetected
+			logging.Warn("ai", "agent run=%s trace=%s stop_reason=%s tool=%s level=%s identical_calls=%d args=%s",
+				run.ID, traceID, stopReason, tc.Function.Name, level, loopSeen[sig], truncate(argsJSON(args), 200))
+			run.setStopReason(stopReason)
+			run.appendTimeline("stop", "🛑 工具 "+tc.Function.Name+" 以相同参数重复调用，已停止（防死循环）trace="+traceID)
+			// 收敛时尽量产出真实报告而不是动作清单（报告里点名是哪个工具/参数触发的）。
 			if len(run.Traces) > 0 {
-				if _, rerr := c.finalizeWithReport(ctx, run, "检测到你连续重复执行同一工具/命令，未产生新信息。工具阶段到此为止。"); rerr == nil {
-					return nil, fmt.Errorf("tool loop detected")
+				note := stopReasonText(stopReason, runUsage{ToolCalls: toolCalls}, limits) +
+					fmt.Sprintf(" 触发详情：工具 %s，参数 %s。", tc.Function.Name, truncate(argsJSON(args), 200))
+				if _, rerr := c.finalizeWithReport(ctx, run, note); rerr == nil {
+					return nil, fmt.Errorf("tool loop detected: %s", tc.Function.Name)
 				}
 			}
-			summary := buildActionSummary(run.Traces)
-			run.setReply(summary)
-			run.emit(AgentEventFinal, summary, "")
-			run.emitRaw(AgentEvent{Kind: AgentEventDone})
+			reply := loopStopReply(tc.Function.Name, args, run.Traces)
+			run.setReply(reply)
+			run.emit(AgentEventFinal, reply, "")
+			run.emitDone()
 			run.setStatus(AgentDone)
 			run.closeEvents()
-			return nil, fmt.Errorf("tool loop detected")
+			return nil, fmt.Errorf("tool loop detected: %s", tc.Function.Name)
 		}
 
-		// 权限护栏：normal 模式下影响会话的操作挂起等确认（任务流除外）
-		if c.cfg.ConsentMode == "normal" && isRiskyTool(tc.Function.Name) {
-			c.waitForConsent(ctx, run, tc, args)
+		// 分级审批护栏：按 ai.consent_policy 判断该等级是否需要用户同意（graded=只读免审、
+		// confirm/danger 需审；all=都要审；off=都不审）。delegate 一律按 danger（toolLevel 硬兜底）。
+		if needsConsent(policy, level) {
+			c.waitForConsent(ctx, run, tc, args, traceID, level)
 			// run 已被挂起（awaiting_consent），停止本轮循环，等 resumeAgentAsync 恢复。
 			return nil, errAgentPaused
 		}
+
+		// 预算计数：本次工具调用计入 max_tool_calls（含下面被去重复用的调用——
+		// 模型确实"发起"了这次调用，占用了本次 run 的动作预算）。
+		toolCalls++
 
 		// 命令级去重（信息收集空转的结构性拦截）：exec/run_command/语义命令若本 run
 		// 已执行成功过，不再向植入端重复下发，直接回放上次完整结果。模型若仍反复要求
@@ -1182,15 +1290,18 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 				run.execStall++
 				stall := run.execStall
 				run.mu.Unlock()
-				logging.Info("agent-audit", "run=%s dedup tool=%s key=%s (stall=%d)", run.ID, tc.Function.Name, ek, stall)
+				logging.Info("agent-audit", "run=%s trace=%s dedup tool=%s key=%s (stall=%d)", run.ID, traceID, tc.Function.Name, ek, stall)
 				replay := prev.Full
 				if replay == "" {
 					replay = "（该命令已在本次任务中执行过，未产生新信息）"
 				}
 				run.appendTimeline("tool_result", "⏭ 重复命令已去重（本次任务已执行过，结果复用）")
 				run.Traces = append(run.Traces, ToolTrace{Name: tc.Function.Name, Args: args, Result: truncate(replay, 2000)})
-				run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(replay, 4000)}, "")
+				run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(replay, 4000), TraceID: traceID}, "")
 				run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: truncate(replay, 4000)})
+				if action == loopWarn {
+					run.Messages = append(run.Messages, Message{Role: "system", Content: loopNudge(tc.Function.Name, args)})
+				}
 				if stall >= 2 {
 					// 空转判定：同一命令第二次重复且模型仍不收敛 → 强制输出报告，杜绝刷屏
 					return c.finalizeWithReport(ctx, run,
@@ -1201,7 +1312,7 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		}
 
 		// 执行工具
-		run.emit(AgentEventToolStart, ToolStart{Name: tc.Function.Name, Args: args}, "")
+		run.emit(AgentEventToolStart, ToolStart{Name: tc.Function.Name, Args: args, TraceID: traceID}, "")
 		run.appendTimeline("tool_start", tc.Function.Name+" "+truncate(tc.Function.Arguments, 160))
 		result, err := c.executor.InvokeTool(tc.Function.Name, args)
 		trace := ToolTrace{Name: tc.Function.Name, Args: args}
@@ -1234,9 +1345,9 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			run.appendTimeline("tool_result", "✅ "+tc.Function.Name+" → "+truncate(out, 220))
 		}
 		if consecutiveFail >= 3 {
-			logging.Warn("ai", "agent %s: %d consecutive failures, converging to summary", run.ID, consecutiveFail)
+			logging.Warn("ai", "agent run=%s trace=%s: %d consecutive failures, converging to summary", run.ID, traceID, consecutiveFail)
 			run.Traces = append(run.Traces, trace)
-			run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(out, 4000), Error: trace.Error}, "")
+			run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(out, 4000), Error: trace.Error, TraceID: traceID}, "")
 			// 收敛时尽量产出真实报告而不是动作清单
 			if len(run.Traces) > 0 {
 				if _, rerr := c.finalizeWithReport(ctx, run, "工具连续失败多次，工具阶段到此为止。"); rerr == nil {
@@ -1246,7 +1357,7 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			summary := buildActionSummary(run.Traces)
 			run.setReply(summary)
 			run.emit(AgentEventFinal, summary, "")
-			run.emitRaw(AgentEvent{Kind: AgentEventDone})
+			run.emitDone()
 			run.setStatus(AgentDone)
 			run.closeEvents()
 			return nil, fmt.Errorf("%d consecutive tool failures", consecutiveFail)
@@ -1254,28 +1365,38 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 
 		trace.Result = out
 		run.Traces = append(run.Traces, trace)
-		run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(out, 4000), Error: trace.Error}, "")
+		run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(out, 4000), Error: trace.Error, TraceID: traceID}, "")
 		run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: truncate(out, 4000)})
+		// 第 2 次相同签名：**工具结果之后**追加一条系统提示，要求换策略或直接给结论。
+		// 多数情况下模型只是没意识到自己在重复，提示一次比直接掐断更有效。
+		if action == loopWarn {
+			run.Messages = append(run.Messages, Message{Role: "system", Content: loopNudge(tc.Function.Name, args)})
+			run.appendTimeline("loop_warn", "⚠️ "+tc.Function.Name+" 相同参数重复调用，已追加换策略提示")
+		}
 
-		// 动作审计：记录 agent 每次工具调用（工具名、参数、成败），供追溯/合规。
+		// 动作审计：记录 agent 每次工具调用（trace/等级/调用 id/工具名/参数/成败），供追溯/合规。
 		// 结构化日志 component=agent-audit（可按该组件过滤审计轨迹）。
-		logging.Info("agent-audit", "run=%s tool=%s args=%s ok=%v err=%v",
-			run.ID, tc.Function.Name, truncate(tc.Function.Arguments, 200), trace.Error == "", trace.Error)
+		logging.Info("agent-audit", "run=%s trace=%s tool=%s level=%s call_id=%s args=%s ok=%v err=%v",
+			run.ID, traceID, tc.Function.Name, level, tc.ID, truncate(tc.Function.Arguments, 200), trace.Error == "", trace.Error)
 	}
 
-	// 达到轮数上限：让模型基于已收集结果整理最终报告/答复（而非纯工具清单）
+	// 预算耗尽（轮次 / 工具调用数 / 墙钟）：不静默中断——先让模型基于已收集结果整理
+	// 最终报告，收尾调用失败再退回动作清单；stop_reason 写到 run 上并在最终回复里说明。
+	note := stopReasonText(stopReason, runUsage{ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}, limits)
+	run.setStopReason(stopReason)
+	run.appendTimeline("stop", "⏱ "+note+" trace="+traceID)
 	if len(run.Traces) > 0 {
-		if _, rerr := c.finalizeWithReport(ctx, run, "已达到本轮工具调用上限。工具阶段到此为止。"); rerr == nil {
-			return nil, fmt.Errorf("reached max turns %d", maxTurns)
+		if _, rerr := c.finalizeWithReport(ctx, run, note); rerr == nil {
+			return nil, fmt.Errorf("stopped: %s", stopReason)
 		}
 	}
-	summary := buildActionSummary(run.Traces)
-	run.setReply(summary)
-	run.emit(AgentEventFinal, summary, "")
-	run.emitRaw(AgentEvent{Kind: AgentEventDone})
+	reply := "⚠️ " + note + "\n\n" + buildActionSummary(run.Traces)
+	run.setReply(reply)
+	run.emit(AgentEventFinal, reply, "")
+	run.emitDone()
 	run.setStatus(AgentDone)
 	run.closeEvents()
-	return nil, fmt.Errorf("reached max turns %d", maxTurns)
+	return nil, fmt.Errorf("stopped: %s", stopReason)
 }
 
 // runChatReply 短消息纯聊回复（根治护栏的执行体）：不进入自主执行循环——
@@ -1347,7 +1468,7 @@ func (c *Copilot) runChatReply(ctx context.Context, run *AgentRun, guard string)
 	run.Messages = append(run.Messages, Message{Role: "assistant", Content: reply})
 	run.setReply(reply)
 	run.emit(AgentEventFinal, reply, "")
-	run.emitRaw(AgentEvent{Kind: AgentEventDone})
+	run.emitDone()
 	run.setStatus(AgentDone)
 	run.closeEvents()
 	return ag, nil
@@ -1389,26 +1510,31 @@ func (c *Copilot) finalizeWithReport(ctx context.Context, run *AgentRun, reason 
 	run.setReply(reply)
 	run.appendTimeline("final", truncate(reply, 220))
 	run.emit(AgentEventFinal, reply, "")
-	run.emitRaw(AgentEvent{Kind: AgentEventDone})
+	run.emitDone()
 	run.setStatus(AgentDone)
 	run.closeEvents()
 	return ag, nil
 }
 
-// waitForConsent normal 模式下挂起 run，等前端 allow/deny。不返回——run 状态
-// 已置为 awaiting_consent，调用方应停止本轮循环，由 resumeAgentAsync 恢复。
-func (c *Copilot) waitForConsent(ctx context.Context, run *AgentRun, tc ToolCall, args map[string]string) {
+// waitForConsent 挂起 run 等前端 allow/deny（仅当 needsConsent 判定需要用户同意时调用）。
+// 不返回——run 状态已置为 awaiting_consent，调用方应停止本轮循环，由 resumeAgentAsync 恢复。
+// traceID/level 随挂起状态一起保存，审批请求与恢复后的执行都带同一条 trace 与同一等级。
+func (c *Copilot) waitForConsent(ctx context.Context, run *AgentRun, tc ToolCall, args map[string]string, traceID string, level mcp.Level) {
 	run.mu.Lock()
 	run.Pending = &pendingState{
 		messages: append([]Message(nil), run.Messages...),
 		tool:     tc,
 		args:     args,
 		traces:   append([]ToolTrace(nil), run.Traces...),
+		traceID:  traceID,
 	}
 	run.mu.Unlock()
 	run.setStatus(AgentWaitConsent)
 
-	req := ConsentRequest{Token: newConsentToken(), Tool: tc.Function.Name, Args: args, Desc: toolDesc(tc.Function.Name)}
+	req := consentRequestFor(newConsentToken(), traceID, tc, args)
+	req.Level = level.String() // 显式用判定时的等级，避免二次查询注册表得到不同结果
+	logging.Info("agent-audit", "run=%s trace=%s consent_required tool=%s level=%s call_id=%s args=%s",
+		run.ID, traceID, tc.Function.Name, req.Level, tc.ID, truncate(argsJSON(args), 200))
 	run.emit(AgentEventConsent, req, "")
 }
 
@@ -1473,7 +1599,7 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// isRiskyTool 判定一个工具是否影响目标会话（需要在「正常」权限模式下获用户同意）。
+// isRiskyTool 判定一个工具是否"需要用户同意"（等价于 graded 策略下的 needsConsent）。
 //
 // ⚠️ v1.4.0 修正了这里的**安全默认值**。旧实现是一份"危险工具允许列表"+ `default: false`，
 // 有两个后果：
@@ -1482,21 +1608,348 @@ func truncate(s string, n int) string {
 //     等目标侧动作的剧本（`handlers_mcp.go` 的 delegate → `playbook.go`），于是
 //     "需用户同意"模式可以被它整个绕过。
 //
-// 现在改成**白名单式**：只有明确"只读、不接触被控主机"的工具免审批，其余一律需要同意；
-// 而且优先使用工具注册表的风险分级（`internal/server/mcp`）——那是全项目唯一的工具元数据来源，
-// 避免这里再维护第二份清单。
+// 现在等级**只**来自工具注册表（`internal/server/mcp`，全项目唯一的工具元数据来源）：
+// 只有显式标成 LevelRead 的免审批，confirm/danger 都要同意，未注册的名字按 LevelDanger
+// （fail-closed，见 toolLevel）。保留这个函数只是给既有调用点/测试一个单一语义入口，
+// 分级审批的实际判定走 needsConsent(policy, toolLevel(name))。
 func isRiskyTool(name string) bool {
-	if reg := mcp.Default(); reg.IsRegistered(name) {
-		// 注册表里标了 LevelRead 的才免审批；confirm/danger 都要用户同意。
-		return reg.LevelOf(name) != mcp.LevelRead
+	return toolLevel(name) != mcp.LevelRead
+}
+
+// ─── 控制循环护栏：预算上限 / 防死循环 / 分级审批 / trace id ────────────────
+//
+// 本段是 v1.4.0 S2 的增量：把"能跑多久、能跑多少步、什么时候必须问人"从提示词里的
+// 软约束变成**循环里的硬判定**（copilot.go 的 runLoop 与 RunAgent 每轮都查）。
+// 判定逻辑全部写成纯函数，便于不依赖网络/LLM/真实会话地单测（见 limits_test.go /
+// consent_test.go）：漏判的代价是死循环刷命令，误判的代价是正常任务被掐断，
+// 两者都必须在 CI 里被钉住。
+
+// 停止原因（写进 run.stop_reason / ChatResult.stop_reason，并出现在日志与最终回复里）。
+const (
+	// stopReasonMaxTurns 轮次上限：一次 run 的 LLM 往返次数达上限。
+	stopReasonMaxTurns = "max_turns"
+	// stopReasonMaxToolCalls 工具调用数上限：一次 run 发起的工具调用次数达上限。
+	stopReasonMaxToolCalls = "max_tool_calls"
+	// stopReasonMaxWallclock 墙钟上限：一次 run 的真实耗时达上限（与模型行为无关的硬边界）。
+	stopReasonMaxWallclock = "max_wallclock"
+	// stopReasonLoopDetected 死循环：同一工具 + 同一参数在同一 run 内第 3 次出现。
+	stopReasonLoopDetected = "loop_detected"
+	// stopReasonAwaitConsent 因等待用户审批而暂停（不是失败，等 allow/deny 后恢复）。
+	stopReasonAwaitConsent = "awaiting_consent"
+)
+
+// 三处预算的缺省值：必须与 config.Load 的 viper.SetDefault 和示例配置一致
+// （历史教训：ai.max_turns 曾在注释/viper/前端/后端四处取不同值）。
+const (
+	defaultMaxTurns        = 20
+	defaultMaxToolCalls    = 40
+	defaultMaxWallclockSec = 900
+)
+
+// 防死循环阈值。
+const (
+	// loopWarnAt 同一签名（工具+参数）第 2 次出现：执行后追加系统提示。
+	loopWarnAt = 2
+	// loopStopAt 同一签名第 3 次出现：停止循环（stop_reason=loop_detected）。
+	loopStopAt = 3
+)
+
+// runLimits 一次 run 的预算上限（纯值对象，便于单测）。
+type runLimits struct {
+	MaxTurns        int
+	MaxToolCalls    int
+	MaxWallclockSec int
+}
+
+// runUsage 一次 run 的累计用量（纯值对象）。
+type runUsage struct {
+	Turns      int   // 已完成的 LLM 往返轮数
+	ToolCalls  int   // 已发起的工具调用次数
+	ElapsedSec int64 // 自 run 开始以来的墙钟秒数
+}
+
+// limitsFromConfig 解析一次 run 实际生效的预算上限。
+// overrideTurns > 0 时优先（供调用方为单次 run 指定更小的轮数，如 AgentRun.MaxTurns）。
+// 配置里 <=0 一律回落到缺省值：**不允许用配置关掉上限**——关掉等于把"无限循环 +
+// 无限下发命令"交回给模型，与本次增量的目的相反。想要更宽松就配一个具体的大数字。
+func limitsFromConfig(cfg config.AIConfig, overrideTurns int) runLimits {
+	l := runLimits{
+		MaxTurns:        cfg.MaxTurns,
+		MaxToolCalls:    cfg.MaxToolCalls,
+		MaxWallclockSec: cfg.MaxWallclockSec,
 	}
-	// 注册表尚未覆盖该名字（例如旧客户端传来的历史工具名）：退回保守白名单。
-	switch name {
-	case "session_list", "session_context", "intel_query", "attack_suggest",
-		"plugin_list", "tunnel_list", "task_result", "task_wait", "result_read":
-		return false
+	if overrideTurns > 0 {
+		l.MaxTurns = overrideTurns
+	}
+	if l.MaxTurns <= 0 {
+		l.MaxTurns = defaultMaxTurns
+	}
+	if l.MaxToolCalls <= 0 {
+		l.MaxToolCalls = defaultMaxToolCalls
+	}
+	if l.MaxWallclockSec <= 0 {
+		l.MaxWallclockSec = defaultMaxWallclockSec
+	}
+	return l
+}
+
+// shouldStopRun 判断是否必须停止循环，并给出 stop_reason（""=继续）。
+//
+// 判定顺序：墙钟 → 工具调用数 → 轮次。墙钟排最前，因为它是唯一"与模型是否配合无关"的
+// 硬边界（上游卡住、单步超时、模型慢慢磨都必须收手）；同时触发时按此顺序返回确定的原因，
+// 便于单测与事后审计对齐。
+//
+// 语义是"用量达到上限即停"（>=）：MaxTurns=20 最多跑 20 轮 LLM 往返，
+// MaxToolCalls=40 最多发起 40 次工具调用，MaxWallclockSec=900 最多跑 900 秒。
+// limits 中 <=0 表示该维度不设限（limitsFromConfig 永不产出这种值，仅供单测与临时关闭一项）。
+func shouldStopRun(usage runUsage, limits runLimits) (bool, string) {
+	if limits.MaxWallclockSec > 0 && usage.ElapsedSec >= int64(limits.MaxWallclockSec) {
+		return true, stopReasonMaxWallclock
+	}
+	if limits.MaxToolCalls > 0 && usage.ToolCalls >= limits.MaxToolCalls {
+		return true, stopReasonMaxToolCalls
+	}
+	if limits.MaxTurns > 0 && usage.Turns >= limits.MaxTurns {
+		return true, stopReasonMaxTurns
+	}
+	return false, ""
+}
+
+// stopReasonText 生成"为什么停下"的中文说明（含具体数值）。
+// 预算类停止不静默中断：这段文本既作为收尾提示交给模型成文，也会出现在最终回复里。
+func stopReasonText(reason string, usage runUsage, limits runLimits) string {
+	switch reason {
+	case stopReasonMaxTurns:
+		return fmt.Sprintf("本次执行已达轮次上限（%d 轮，实际 %d 轮），工具阶段到此为止。",
+			limits.MaxTurns, usage.Turns)
+	case stopReasonMaxToolCalls:
+		return fmt.Sprintf("本次执行已达工具调用上限（%d 次），工具阶段到此为止。", limits.MaxToolCalls)
+	case stopReasonMaxWallclock:
+		return fmt.Sprintf("本次执行已达墙钟时间上限（%d 秒，实际 %d 秒），工具阶段到此为止。",
+			limits.MaxWallclockSec, usage.ElapsedSec)
+	case stopReasonLoopDetected:
+		return "检测到同一工具以完全相同的参数被反复调用（不会产生新信息），工具阶段到此为止。"
+	case stopReasonAwaitConsent:
+		return "本次执行在等待你的审批，确认后才会继续。"
 	default:
-		// 未知工具一律按危险处理（fail-closed）。
-		return true
+		return "本次执行已停止。"
 	}
+}
+
+// loopAction 防死循环的判定动作。
+type loopAction int
+
+const (
+	loopOK   loopAction = iota // 首次出现：正常执行
+	loopWarn                   // 第 2 次：执行后追加系统提示，要求换策略
+	loopStop                   // 第 3 次：停止循环（stop_reason=loop_detected）
+)
+
+// loopSignature 计算"同工具 + 同参数"签名：tool 名 + 规范化后的参数 JSON 的 sha256 前 16 hex。
+// 参数按 key 排序后序列化（encoding/json 序列化 map 时固定按 key 升序，无需自己排），
+// 因此参数的书写顺序不影响签名；nil 与空参数归一为同一签名。
+// 只做规范化、不解析语义：宁可多拦一次"看起来相同"的调用，也不放过原地打转。
+func loopSignature(tool string, args map[string]string) string {
+	if args == nil {
+		args = map[string]string{}
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		// map[string]string 实际不会失败；兜底保证签名仍可计算（宁可撞签名也不 panic）。
+		b = []byte("{}")
+	}
+	sum := sha256.Sum256(append([]byte(tool+"|"), b...))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// loopGuardAction 根据"该签名在本 run 内累计出现的次数"（含本次，seen>=1）决定动作：
+//
+//	只读工具（LevelRead）**豁免**：查两次同一个会话列表/上下文是正常行为
+//	（先 session_list 找会话、执行动作后再 session_list 确认状态），把它当死循环
+//	会把正常流程掐断；而且只读调用不接触被控主机，重复的代价只是一次查询。
+//	非只读：第 2 次给提示（模型常常只是没意识到自己在重复），第 3 次停
+//	（提示无效即判定打转——此时它通常已经在下发相同命令了）。
+func loopGuardAction(seen int, level mcp.Level) loopAction {
+	if level == mcp.LevelRead {
+		return loopOK
+	}
+	switch {
+	case seen < loopWarnAt:
+		return loopOK
+	case seen < loopStopAt:
+		return loopWarn
+	default:
+		return loopStop
+	}
+}
+
+// loopNudge 第 2 次相同签名后追加的**系统提示**。措辞克制：只陈述事实 + 要求换策略或收尾，
+// 不训斥、不追加新任务，避免把模型推向另一条无意义的探索路径。
+func loopNudge(tool string, args map[string]string) string {
+	return fmt.Sprintf("【系统提示】工具 %s 已用完全相同的参数调用过一次：%s。"+
+		"相同输入只会得到相同结果，请换用其它工具/参数，或直接基于已有结果给出结论，"+
+		"不要再次重复该调用（重复第 3 次会被强制停止）。", tool, truncate(argsJSON(args), 200))
+}
+
+// loopStopReply 判定打转（第 3 次相同签名）时给用户的最终回复：明确点名是哪把工具、
+// 什么参数触发的，并附上已完成的动作清单——绝不静默中断。
+func loopStopReply(tool string, args map[string]string, traces []ToolTrace) string {
+	return fmt.Sprintf("⚠️ 已停止本次执行：工具 `%s` 以完全相同的参数（`%s`）被重复调用到第 %d 次，"+
+		"继续执行不会产生新信息（防死循环保护）。\n\n【触发详情】工具：`%s`；参数：`%s`\n\n",
+		tool, truncate(argsJSON(args), 300), loopStopAt, tool, truncate(argsJSON(args), 300)) +
+		buildActionSummary(traces)
+}
+
+// argsJSON 把工具参数序列化成一行可读文本（日志/提示/审批展示用）。
+func argsJSON(args map[string]string) string {
+	if len(args) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Sprintf("%v", args)
+	}
+	return string(b)
+}
+
+// 分级审批策略取值。
+const (
+	consentPolicyGraded = "graded" // 只读免审；confirm/danger 需用户同意（默认）
+	consentPolicyAll    = "all"    // 任何工具（含只读）都要同意
+	consentPolicyOff    = "off"    // 都不询问（危险：仅在明确知道后果时使用）
+)
+
+// normalizeConsentPolicy 归一化审批策略（大小写/首尾空白容错）：
+//
+//	graded / ""（未配置）→ graded
+//	all                   → all
+//	off                   → off
+//	auto（v1.3.x 旧值）    → off     全自动
+//	normal（v1.3.x 旧值）  → graded  影响会话的操作需同意
+//	其它无法识别的值        → graded  （fail-safe：不认识就按"要审批"处理，不是放行）
+//
+// 旧值映射是**必须**的：老配置文件里只有 ai.consent_mode，改名不该让审批模式失效。
+func normalizeConsentPolicy(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case consentPolicyAll:
+		return consentPolicyAll
+	case consentPolicyOff, "auto":
+		return consentPolicyOff
+	case consentPolicyGraded, "normal":
+		return consentPolicyGraded
+	default:
+		return consentPolicyGraded
+	}
+}
+
+// knownConsentPolicy 判断配置里写的是不是可识别的策略值。
+// 空串视为"未设置"（可识别，默认由 normalizeConsentPolicy("") 给出），不告警。
+func knownConsentPolicy(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", consentPolicyGraded, consentPolicyAll, consentPolicyOff, "auto", "normal":
+		return true
+	default:
+		return false
+	}
+}
+
+// effectiveConsentPolicy 解析生效策略：优先新键 ai.consent_policy（非空时），
+// 新键为空才回落到旧键 ai.consent_mode 的旧值映射——老配置文件因此不需要改动。
+func effectiveConsentPolicy(policy, legacyMode string) string {
+	if strings.TrimSpace(policy) != "" {
+		return normalizeConsentPolicy(policy)
+	}
+	return normalizeConsentPolicy(legacyMode)
+}
+
+// needsConsent 判断某等级的工具在当前策略下是否需要用户同意：
+//
+//	graded：只读直接执行；confirm/danger 需要同意（默认）
+//	all   ：任何工具（含只读）都要同意——最小授权/演示场景
+//	off   ：全部直接执行（危险：等价 v1.3.x 的 auto）
+//
+// 这里只做"等级 → 是否问人"的判定，"等级"由 toolLevel 统一给出
+// （未注册工具与 delegate 都是 danger）。这样策略、等级、工具名三者解耦，可分别单测。
+func needsConsent(policy string, level mcp.Level) bool {
+	switch normalizeConsentPolicy(policy) {
+	case consentPolicyOff:
+		return false
+	case consentPolicyAll:
+		return true
+	default: // graded
+		return level != mcp.LevelRead
+	}
+}
+
+// toolLevel 返回工具的审批等级，统一走工具注册表（`internal/server/mcp`，唯一元数据来源）。
+// 注册表的 LevelOf 对**未注册的工具**返回 LevelDanger（fail-closed）：将来新增工具忘了登记
+// 也一定会被审批门拦住，而不是默认放行（旧实现正是 fail-open 的允许列表）。
+//
+// `delegate` 例外——无论注册表怎么写都按 danger 处理：它会驱动剧本在目标侧执行
+// task_submit/credentials 等动作，v1.3.5 的审批门就是被它整个绕过的。这里再硬编码一层，
+// 防止将来有人把注册表里的 delegate 改成 read/confirm 时，审批门被悄悄重新打开。
+func toolLevel(name string) mcp.Level {
+	if name == "delegate" {
+		return mcp.LevelDanger
+	}
+	return mcp.Default().LevelOf(name)
+}
+
+// consentRequestFor 组装审批请求：带上 trace_id / call_id / 工具名 / 等级 + 中文说明。
+// call_id 即 LLM 给出的 tool_call id（同一次 run 内唯一），用于把"审批弹窗 → 实际执行 →
+// 审计日志"三者精确对上；光有工具名不足以区分同一轮里的多次同类调用。
+func consentRequestFor(token, traceID string, tc ToolCall, args map[string]string) ConsentRequest {
+	return ConsentRequest{
+		Token:   token,
+		Tool:    tc.Function.Name,
+		Args:    args,
+		Desc:    toolDesc(tc.Function.Name),
+		TraceID: traceID,
+		CallID:  tc.ID,
+		Level:   toolLevel(tc.Function.Name).String(),
+	}
+}
+
+// warnUnknownConsentPolicy 启动/热更新时对写错的审批策略告警。
+// 只在配置装载时做（New/Reconfigure），不在每次工具调用上刷日志；
+// 写错的值按 graded 处理——拼错一个词不该静默生效，也不该让审批门失效。
+func warnUnknownConsentPolicy(cfg config.AIConfig) {
+	raw := cfg.ConsentPolicy
+	if strings.TrimSpace(raw) == "" {
+		raw = cfg.ConsentMode
+	}
+	if !knownConsentPolicy(raw) {
+		logging.Warn("ai", "ai.consent_policy=%q 无法识别，已按 %q 处理（只读免审，confirm/danger 需用户同意）",
+			raw, consentPolicyGraded)
+	}
+}
+
+// consentPolicy 返回当前生效的审批策略（graded/all/off）。
+func (c *Copilot) consentPolicy() string {
+	return effectiveConsentPolicy(c.cfg.ConsentPolicy, c.cfg.ConsentMode)
+}
+
+// newTraceID 生成一次执行的 trace id：tr-<unixnano>-<4hex>。
+// 同一次 run 的所有事件、工具调用、审批请求与日志都带同一个 id，
+// 用于把「用户指令 → 每步工具 → 审批 → 审计日志」在日志里串成一条线。
+func newTraceID() string {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand 失败（极少见）时用时间戳低 16 位兜底，保证格式不变且基本不重复。
+		return fmt.Sprintf("tr-%d-%04x", time.Now().UnixNano(), time.Now().UnixNano()&0xffff)
+	}
+	return fmt.Sprintf("tr-%d-%s", time.Now().UnixNano(), hex.EncodeToString(b[:]))
+}
+
+// ensureTraceID 空 trace id 时新生成一条（同步副驾驶路径没有 AgentRun，用它兜底）。
+func ensureTraceID(id string) string {
+	if strings.TrimSpace(id) == "" {
+		return newTraceID()
+	}
+	return id
+}
+
+// elapsedSec 自 start 起的墙钟秒数（墙钟上限判定用）。
+func elapsedSec(start time.Time) int64 {
+	return int64(time.Since(start) / time.Second)
 }

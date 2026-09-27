@@ -21,30 +21,59 @@ import (
 type AgentEventKind string
 
 const (
-	AgentEventThinking   AgentEventKind = "thinking"      // 模型推理增量（reasoning_content）
-	AgentEventMessage    AgentEventKind = "message"       // 模型正文增量（content）
-	AgentEventToolStart  AgentEventKind = "tool_start"    // 开始执行工具
-	AgentEventToolResult AgentEventKind = "tool_result"   // 工具执行结果
-	AgentEventFinal      AgentEventKind = "final"         // 最终答复（完整）
-	AgentEventConsent    AgentEventKind = "consent"       // 需要审批（normal 模式）
-	AgentEventDone       AgentEventKind = "done"          // 全部完成
-	AgentEventError      AgentEventKind = "error"         // 出错（会话级）
+	AgentEventThinking   AgentEventKind = "thinking"    // 模型推理增量（reasoning_content）
+	AgentEventMessage    AgentEventKind = "message"     // 模型正文增量（content）
+	AgentEventToolStart  AgentEventKind = "tool_start"  // 开始执行工具
+	AgentEventToolResult AgentEventKind = "tool_result" // 工具执行结果
+	AgentEventFinal      AgentEventKind = "final"       // 最终答复（完整）
+	AgentEventConsent    AgentEventKind = "consent"     // 需要审批（需同意的工具）
+	AgentEventDone       AgentEventKind = "done"        // 全部完成
+	AgentEventError      AgentEventKind = "error"       // 出错（会话级）
+	// AgentEventTrace 本次执行的 trace/预算/策略（v1.4.0 S2 新增）。
+	// 单独发一条而不是塞进 thinking/message：那两个事件的 data 是**字符串**，
+	// 加字段会变成对象，老前端解析会退化；独立事件名老前端不认识会直接忽略。
+	AgentEventTrace AgentEventKind = "trace"
 )
 
 // AgentEvent 一次 Agent 事件。
 type AgentEvent struct {
 	Kind AgentEventKind `json:"kind"`
 	// 载荷：thinking/message 为字符串；tool_start 为 ToolStart；
-	// tool_result 为 ToolResult；final 为 string；consent 为 ConsentRequest；done/error 见 Error。
+	// tool_result 为 ToolResult；final 为 string；consent 为 ConsentRequest；
+	// trace 为 TraceInfo；done 为 DoneInfo；error 见 Error。
 	Data json.RawMessage `json:"data,omitempty"`
 	// Error 仅 kind=error 时携带。
 	Error string `json:"error,omitempty"`
+	// TraceID 本次执行的 trace id（v1.4.0 S2 新增，老前端忽略即可）。
+	// ⚠️ HTTP 层（internal/server/api）只把 Data 透传成 SSE 的 data 字段，
+	// 所以 trace_id 同时也写进了 tool_start/tool_result/consent/done 的载荷结构里。
+	TraceID string `json:"trace_id,omitempty"`
+}
+
+// TraceInfo 事件 kind=trace 的载荷：本次执行的 trace id 与生效预算/审批策略，
+// 便于前端与审计把一次 run 的日志、审批、工具调用串成一条线。
+type TraceInfo struct {
+	TraceID         string `json:"trace_id"`
+	RunID           string `json:"run_id"`
+	ConsentPolicy   string `json:"consent_policy"`
+	MaxTurns        int    `json:"max_turns"`
+	MaxToolCalls    int    `json:"max_tool_calls"`
+	MaxWallclockSec int    `json:"max_wallclock_sec"`
+}
+
+// DoneInfo 事件 kind=done 的载荷（v1.4.0 S2 新增）：trace id 与停止原因。
+// 老前端把 done 的 data 当空对象忽略，新增字段不影响。
+type DoneInfo struct {
+	TraceID    string `json:"trace_id,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
 }
 
 // ToolStart 工具开始执行事件。
 type ToolStart struct {
 	Name string            `json:"name"`
 	Args map[string]string `json:"args,omitempty"`
+	// TraceID v1.4.0 S2 新增：本次执行的 trace id（SSE 载荷里可见）。
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // ToolResult 工具结果事件。
@@ -52,37 +81,39 @@ type ToolResult struct {
 	Name   string `json:"name"`
 	Result string `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// TraceID v1.4.0 S2 新增：本次执行的 trace id（SSE 载荷里可见）。
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // AgentStatus run 生命周期状态。
 type AgentStatus string
 
 const (
-	AgentQueued  AgentStatus = "queued"
-	AgentRunning AgentStatus = "running"
-	AgentDone    AgentStatus = "done"
-	AgentError   AgentStatus = "error"
+	AgentQueued      AgentStatus = "queued"
+	AgentRunning     AgentStatus = "running"
+	AgentDone        AgentStatus = "done"
+	AgentError       AgentStatus = "error"
 	AgentWaitConsent AgentStatus = "awaiting_consent"
 )
 
 // RunEvent run 的结构化时间线事件（供前端展示 goal→step→tool→result 及失败原因）。
 type RunEvent struct {
-	Ts   int64  `json:"ts"`   // unix ms
-	Kind string `json:"kind"` // thinking/tool_start/tool_result/final/error
+	Ts   int64  `json:"ts"`             // unix ms
+	Kind string `json:"kind"`           // thinking/tool_start/tool_result/final/error
 	Text string `json:"text,omitempty"` // 摘要文本（thinking 片段/工具名/结果摘要/错误）
 }
 
 // GoalStep 目标分解后的一个执行步骤（agent 自主维护进度）。
 type GoalStep struct {
-	Index    int    `json:"index"`
-	Desc     string `json:"desc"`     // 步骤描述
-	Status   string `json:"status"`   // pending / running / done / skipped / failed
-	Result   string `json:"result,omitempty"`
+	Index  int    `json:"index"`
+	Desc   string `json:"desc"`   // 步骤描述
+	Status string `json:"status"` // pending / running / done / skipped / failed
+	Result string `json:"result,omitempty"`
 }
 
 // AgentRun 一次自主任务运行实例。
 type AgentRun struct {
-	ID     string `json:"id"`
+	ID     string      `json:"id"`
 	Status AgentStatus `json:"status"`
 	// Objective 当前被交代的目标（用户最新指令摘要，供展示/续接）。
 	Objective string `json:"objective,omitempty"`
@@ -101,6 +132,12 @@ type AgentRun struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// MaxTurns 本轮上限（0=用配置默认）。
 	MaxTurns int `json:"-"`
+	// TraceID 本次执行的 trace id（tr-<unixnano>-<4hex>，v1.4.0 S2 新增）：
+	// 同一次 run 的所有事件、工具调用、审批请求与日志都带同一个 id。
+	TraceID string `json:"trace_id,omitempty"`
+	// StopReason 循环停止原因（v1.4.0 S2 新增）：
+	// max_turns / max_tool_calls / max_wallclock / loop_detected，空=正常产出最终答复。
+	StopReason string `json:"stop_reason,omitempty"`
 
 	// events 缓冲事件通道（有缓冲，避免阻塞循环）。
 	events chan AgentEvent
@@ -261,6 +298,8 @@ type pendingState struct {
 	tool     ToolCall
 	args     map[string]string
 	traces   []ToolTrace
+	// traceID 挂起前的 trace id：审批通过后恢复循环仍用同一条，审计可串起来。
+	traceID string
 }
 
 // AgentManager 管理所有 run（并发上限 + 取消）。
@@ -312,10 +351,11 @@ func (m *AgentManager) NewRun(history []Message, maxTurns int) *AgentRun {
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		MaxTurns:  maxTurns,
+		TraceID:   newTraceID(),
 		// 事件通道缓冲放大到 8192：SSE 流式 thinking/message 事件密集，
 		// 通道过小会导致 final/done 等终态事件被丢弃，前端收不到最终答复（表现 network error）。
-		events:    make(chan AgentEvent, 8192),
-		Traces:    []ToolTrace{},
+		events: make(chan AgentEvent, 8192),
+		Traces: []ToolTrace{},
 	}
 	m.mu.Lock()
 	m.runs[run.ID] = run
@@ -343,27 +383,69 @@ func (r *AgentRun) Events() <-chan AgentEvent {
 }
 
 // emit 推事件到通道（非阻塞，通道满则丢弃——SSE 慢时保循环前进不卡）。
+// v1.4.0 S2：所有事件自动带上本 run 的 trace_id。
 func (r *AgentRun) emit(kind AgentEventKind, data interface{}, errMsg string) {
 	var raw json.RawMessage
 	if data != nil {
 		b, _ := json.Marshal(data)
 		raw = b
 	}
-	ev := AgentEvent{Kind: kind, Data: raw, Error: errMsg}
+	ev := AgentEvent{Kind: kind, Data: raw, Error: errMsg, TraceID: r.traceID()}
 	select {
 	case r.events <- ev:
 	default:
-		logging.Warn("ai", "agent %s: event channel full, dropping %s event", r.ID, kind)
+		logging.Warn("ai", "agent %s trace=%s: event channel full, dropping %s event", r.ID, ev.TraceID, kind)
 	}
 }
 
-// emitRaw 直接推一个已构造事件。
+// emitRaw 直接推一个已构造事件（缺 trace_id 时补上）。
 func (r *AgentRun) emitRaw(ev AgentEvent) {
+	if ev.TraceID == "" {
+		ev.TraceID = r.traceID()
+	}
 	select {
 	case r.events <- ev:
 	default:
-		logging.Warn("ai", "agent %s: event channel full, dropping %s event", r.ID, ev.Kind)
+		logging.Warn("ai", "agent %s trace=%s: event channel full, dropping %s event", r.ID, ev.TraceID, ev.Kind)
 	}
+}
+
+// emitDone 发送终态 done 事件：载荷带 trace_id 与 stop_reason。
+// 老前端收到 done 的 data 是空对象时也是"忽略"，新增字段向后兼容。
+func (r *AgentRun) emitDone() {
+	r.emit(AgentEventDone, DoneInfo{TraceID: r.traceID(), StopReason: r.stopReason()}, "")
+}
+
+// traceID 读本 run 的 trace id（线程安全）。
+func (r *AgentRun) traceID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.TraceID
+}
+
+// setTraceID 设置/刷新本 run 的 trace id（空值忽略）。
+func (r *AgentRun) setTraceID(id string) {
+	if id == "" {
+		return
+	}
+	r.mu.Lock()
+	r.TraceID = id
+	r.mu.Unlock()
+}
+
+// stopReason 读循环停止原因（线程安全）。
+func (r *AgentRun) stopReason() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.StopReason
+}
+
+// setStopReason 记录循环停止原因（max_turns/max_tool_calls/max_wallclock/loop_detected）。
+func (r *AgentRun) setStopReason(reason string) {
+	r.mu.Lock()
+	r.StopReason = reason
+	r.UpdatedAt = time.Now()
+	r.mu.Unlock()
 }
 
 func (r *AgentRun) setStatus(s AgentStatus) {
@@ -404,12 +486,16 @@ func (r *AgentRun) AppendMessages(msgs []Message) {
 
 // ResetForResume 在复用同一个 run 继续下一轮指令前，重置事件通道与循环状态
 // （保留 Messages/Traces，即保留完整上下文memory）。
+// v1.4.0 S2：同时换一条新的 trace_id——trace 归因的单位是「一次指令 → 一次执行」，
+// 复用 run 续接新指令若沿用旧 id，两次独立执行会在审计日志里混成一条。
 func (r *AgentRun) ResetForResume() {
 	r.mu.Lock()
 	r.Status = AgentQueued
 	r.FinalReply = ""
 	r.Pending = nil
 	r.cancel = nil
+	r.StopReason = ""
+	r.TraceID = newTraceID()
 	r.events = make(chan AgentEvent, 256)
 	r.once = sync.Once{}
 	r.mu.Unlock()
