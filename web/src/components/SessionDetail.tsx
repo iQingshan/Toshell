@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Monitor, FolderOpen, Cpu, Network, Terminal, Upload, Shield, Camera, KeyRound, ShieldCheck, Zap, MonitorPlay, Share2, X, MoreHorizontal } from 'lucide-react'
+import { Monitor, FolderOpen, Cpu, Network, Terminal, Upload, Shield, Camera, KeyRound, ShieldCheck, Zap, MonitorPlay, Share2, X, MoreHorizontal, Layers } from 'lucide-react'
 import { format } from 'date-fns'
 import type { Session } from '../types'
 import { FileManager } from './FileManager'
@@ -10,6 +10,7 @@ import { PersistencePanel } from './PersistencePanel'
 import { ScreenshotPanel } from './ScreenshotPanel'
 import { CredentialsPanel } from './CredentialsPanel'
 import { AVDetectTab } from './AVDetectTab'
+import { AVOpsPanel } from './AVOpsPanel'
 import { FilelessExecPanel } from './FilelessExecPanel'
 import { ScreenStreamPanel } from './ScreenStreamPanel'
 import { RelayPanel } from './RelayPanel'
@@ -17,7 +18,7 @@ import { pluginApi, sessionApi } from '../api'
 import { Badge } from './ui'
 import './SessionDetail.css'
 
-export type DetailTab = 'info' | 'files' | 'process' | 'injection' | 'shell' | 'bof' | 'persistence' | 'screenshot' | 'credentials' | 'av' | 'fileless' | 'screenstream' | 'relay'
+export type DetailTab = 'info' | 'files' | 'process' | 'injection' | 'shell' | 'bof' | 'persistence' | 'screenshot' | 'credentials' | 'av' | 'avops' | 'fileless' | 'screenstream' | 'relay'
 
 interface SessionDetailProps {
   session: Session
@@ -35,6 +36,9 @@ const TABS: { key: DetailTab; icon: React.ReactNode; label: string }[] = [
   { key: 'screenshot', icon: <Camera size={14} />, label: '截图' },
   { key: 'credentials', icon: <KeyRound size={14} />, label: '凭据' },
   { key: 'av', icon: <ShieldCheck size={14} />, label: '杀软' },
+  // 杀软对抗分级（AV-Ops，v1.4.0 S6）：分级目录 + 逐动作可用性 + 二次确认下发。
+  // 与上面的「杀软」面板并存：那个是既有裸链（无分级、无前置检查、不写审计），这个是分级入口。
+  { key: 'avops', icon: <Layers size={14} />, label: '对抗分级' },
   { key: 'fileless', icon: <Zap size={14} />, label: '内存' },
   { key: 'screenstream', icon: <MonitorPlay size={14} />, label: '屏幕流' },
   { key: 'relay', icon: <Share2 size={14} />, label: '中继' },
@@ -45,7 +49,7 @@ const PINNED_TABS: DetailTab[] = ['info', 'files', 'process', 'shell', 'fileless
 // 「更多」下拉里的分组顺序（只影响收纳后的展示顺序，不改任何功能）
 const TAB_GROUPS: { title: string; keys: DetailTab[] }[] = [
   { title: '执行与注入', keys: ['injection', 'bof'] },
-  { title: '环境与对抗', keys: ['av', 'credentials', 'persistence'] },
+  { title: '环境与对抗', keys: ['av', 'avops', 'credentials', 'persistence'] },
   { title: '屏幕', keys: ['screenshot', 'screenstream'] },
   { title: '网络', keys: ['relay'] },
 ]
@@ -86,6 +90,10 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
   const isMac = session.os?.toLowerCase().includes('darwin')
 
   const availableTabs = TABS.filter((tab) => {
+    // AV-Ops 面板（v1.4.0 S6）是**前端新增的面板**：服务端 capabilities 的 tabs 白名单
+    // （Go 侧 internal/common/features 的 tab 表）里没有 'avops' 这个键，所以它的可用性
+    // 跟随「杀软」面板。面板自己会处理接口 404/403（老服务端没有 /av-ops 时给说明而不是白屏）。
+    if (tab.key === 'avops') return capTabs ? capTabs.av === true : isWindows
     // 服务端清单优先（capTabs[key] === true）
     if (capTabs) return capTabs[tab.key] === true
     if (isWindows) return true // Windows：全部
@@ -263,6 +271,7 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
         {effectiveTab === 'screenshot' && <ScreenshotPanel session={session} />}
         {effectiveTab === 'credentials' && <CredentialsPanel session={session} />}
         {effectiveTab === 'av' && <AVDetectTab session={session} />}
+        {effectiveTab === 'avops' && <AVOpsPanel session={session} />}
         {effectiveTab === 'fileless' && <FilelessExecPanel session={session} />}
         {effectiveTab === 'screenstream' && <ScreenStreamPanel session={session} />}
         {effectiveTab === 'relay' && <RelayPanel session={session} />}

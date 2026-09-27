@@ -385,6 +385,8 @@ curl -s -X POST http://127.0.0.1:18082/mcp -H "Authorization: Bearer $MCP_TOKEN"
 
 `reasons[].code` 取值：`session_inactive`（不在线）· `tier_disabled`（等级被配置关闭）· `confirmation_required`（下发时要带 `confirm=true`）· `capability_missing`（载荷没编进这个能力）· `driver_unavailable`（L3 没有可用驱动，`ppl_kill` 会明确写"无 rw 档驱动"）。
 
+> **别把 `allowed:false` 一律当成"不能下发"**：`allowed` 的定义是"`reasons` 为空"，而 L1 起每个动作都会带一条 `confirmation_required`（= "下发时必须带 `confirm=true`"）。所以 **L1 动作的 `allowed:false` 通常只表示"要二次确认"**，带上 `confirm=true` 就能下发；只有 `reasons` 里出现 `tier_disabled`/`capability_missing`/`driver_unavailable`/`session_inactive` 才是**硬阻塞**。控制台面板按这个口径区分"可下发/需确认/不可下发"（`AVOpsPanel.tsx` 的 `hardBlocks()`）。
+
 `capability_source`：`reported`（载荷自报能力位，权威）/ `os_fallback`（旧载荷没上报，按 OS 兜底，**未必等于真实能力**，此时带 `capability_note`）。注意 `byovd_load`/`byovd_unload` 的驱动**随请求携带**，预览阶段不做驱动检查（顶层 `driver` 块给出本机档位现状）。
 
 ### 13.3 `POST /api/v1/sessions/{id}/av-ops` —— 执行

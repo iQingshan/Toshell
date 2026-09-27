@@ -218,6 +218,244 @@ export const driversApi = {
   verify: (name: string) => api.get<DriverVerifyResult & { ok: boolean }>(`/drivers/${encodeURIComponent(name)}/verify`),
 }
 
+// ─── 杀软对抗能力分级（AV-Ops，v1.4.0 S6）───────────────────────────────────────
+//
+// 服务端把"杀软对抗"从 6 条裸链收成一个**分级、可审计、fail-closed** 的入口：
+//   GET  /av-ops                等级目录（这台服务端现在允许做到哪一级）
+//   GET  /sessions/{id}/av-ops  对该会话的逐动作可用性（**排障先看这里**）
+//   POST /sessions/{id}/av-ops  执行（按动作定级 + 七步前置检查）
+//
+// ⚠️ 字段口径以**运行中的服务端**为准（本节逐字段与真实响应核对过）：
+//   - 目录/会话 actions[] 里的 `impact` 是**字符串**（服务端 avops.Action.Impact 的如实影响文案），
+//     **不是对象**；对象形状的 impact 只出现在 POST 的**成功响应**里（见 AVOpsExecImpact）。
+//   - `reasons[]` 是 `{code, message}` 对象数组：GET 阶段就把"为什么不能下发"一次列全，
+//     界面的职责是**显示原因**而不是让操作员"发一次试试"。
+//   - 会话不存在时沿用全项目口径 `404 {"error":"session not found: <id>"}`（**没有 code 字段**）。
+
+/** AV-Ops 理由/错误码（服务端 avops 包的对外契约，只允许新增，不允许改名）。 */
+export type AVOpsReasonCode =
+  // GET /sessions/{id}/av-ops 的 reasons[].code
+  | 'session_inactive'
+  | 'tier_disabled'
+  | 'confirmation_required'
+  | 'capability_missing'
+  | 'driver_unavailable'
+  // POST 失败时的 code（七步前置检查 + 下发）
+  | 'bad_request'
+  | 'unknown_action'
+  | 'unknown_tier'
+  | 'tier_mismatch'
+  | 'params_invalid'
+  | 'driver_selfcheck_failed'
+  | 'timeout_invalid'
+  | 'session_not_found'
+  | 'task_create_failed'
+  | 'push_failed'
+
+/** 策略回显（对应服务端 avopsPolicyView，键是正向的 require_confirm）。 */
+export interface AVOpsPolicy {
+  allow_l2: boolean
+  allow_l3: boolean
+  allow_l4: boolean
+  require_confirm: boolean
+  default_timeout_sec: number
+  max_timeout_sec: number
+}
+
+/** 动作参数说明（服务端只做展示用，真实校验按动作逐个做）。 */
+export interface AVOpsParamHint {
+  name: string
+  /** string / integer / array（服务端的自由文本口径，前端按此渲染最小输入框） */
+  type: string
+  required: boolean
+  description: string
+}
+
+/** 动作表里的一条动作（目录与会话级响应共用这组字段）。 */
+export interface AVOpsAction {
+  name: string
+  tier: string
+  task_type: string
+  capability: string
+  destructive: boolean
+  needs_confirm: boolean
+  summary: string
+  /** 如实的影响评估**文案**（字符串；对象形状见 AVOpsExecImpact） */
+  impact: string
+  /** false = 服务端不会自动重投递（重发 = 再执行） */
+  auto_retry: boolean
+  required_params?: string[]
+  params?: AVOpsParamHint[]
+}
+
+/** 等级目录里的一项。 */
+export interface AVOpsTier {
+  tier: string
+  name: string
+  description: string
+  default_enabled: boolean
+  read_only: boolean
+  destructive: boolean
+  needs_confirm: boolean
+  no_auto_retry: boolean
+  /** false = 本批没有落地动作（L4）；界面必须显示"暂无落地动作"，不能给假按钮 */
+  implemented: boolean
+  note?: string
+  allowed: boolean
+  /** allowed=false 时的中文原因 */
+  denied_reason?: string
+  action_count: number
+  actions: AVOpsAction[]
+}
+
+export interface AVOpsCatalog {
+  ok: boolean
+  policy: AVOpsPolicy
+  tiers: AVOpsTier[]
+  action_count: number
+  notes?: string[]
+  probe_hint?: string
+}
+
+export interface AVOpsReason {
+  code: AVOpsReasonCode
+  message: string
+}
+
+/** 会话级逐动作可用性（= 动作表字段 + tier_name/allowed/reasons）。 */
+export interface AVOpsSessionAction extends AVOpsAction {
+  tier_name: string
+  allowed: boolean
+  /** 阻塞该动作的**全部**原因（服务端一次列全，不是遇错即停） */
+  reasons: AVOpsReason[]
+}
+
+/** BYOVD 驱动档位现状（L3 排障用；只看 manifest 声明）。 */
+export interface AVOpsDriverSnapshot {
+  kill_available: boolean
+  rw_available: boolean
+  total: number
+  purposes?: string[] | null
+  search_dirs?: string[]
+  note?: string
+}
+
+export interface AVOpsSessionState {
+  ok: boolean
+  session_id: string
+  status?: string
+  os?: string
+  arch?: string
+  features?: string[]
+  /** reported = 载荷自报（权威）/ os_fallback = 按 OS 兜底（未必等于真实能力） */
+  capability_source?: string
+  capability_note?: string
+  policy: AVOpsPolicy
+  driver?: AVOpsDriverSnapshot
+  actions: AVOpsSessionAction[]
+  summary?: { allowed: number; blocked: number; total: number }
+  message?: string
+}
+
+export interface AVOpsExecRequest {
+  action: string
+  /** 只用于一致性核对（与实际等级不符 → 400 tier_mismatch）；留空由服务端决定 */
+  tier?: string
+  /** 破坏性动作（L1 起）必填 true */
+  confirm?: boolean
+  params?: Record<string, unknown>
+  /** 留空/0 = 用服务端默认；> 上限直接拒绝（不截断） */
+  timeout_sec?: number
+}
+
+/** 一步前置检查的结论。 */
+export interface AVOpsCheck {
+  step: number
+  name: string
+  ok: boolean
+  code?: string
+  detail?: string
+}
+
+/** POST 成功响应里的**对象**影响评估（与动作表里的 impact 字符串不同）。 */
+export interface AVOpsExecImpact {
+  destructive: boolean
+  auto_retry: boolean
+  reversible: boolean
+  summary: string
+  targets?: string
+  timeout_sec: number
+  irreversible_note?: string
+}
+
+export interface AVOpsExecResult {
+  ok: true
+  task_id: number
+  task_type: string
+  action: string
+  tier: string
+  tier_name: string
+  destructive: boolean
+  confirmed: boolean
+  auto_retry: boolean
+  impact: AVOpsExecImpact
+  checks: AVOpsCheck[]
+  /** 破坏性动作的服务端警告（L0 时为 null） */
+  warnings?: string[] | null
+  message: string
+}
+
+export interface AVOpsExecFailure {
+  /** 会话不存在（404）时服务端只回 `{error}`，此时没有这个字段 */
+  ok?: false
+  /** 同上：404 的 `{error}` 没有 code */
+  code?: AVOpsReasonCode
+  error: string
+  /** 同上：404 的 `{error}` 没有 checks（非 404 时至少含失败的那一步） */
+  checks?: AVOpsCheck[]
+}
+
+export const avOpsApi = {
+  /** 等级目录：判断"这台服务端现在允许做到哪一级"（老服务端 → 404） */
+  catalog: () => api.get<AVOpsCatalog>('/av-ops'),
+  /** 逐动作可用性：allowed=false 的动作带中文 reasons[]，不必发一次试试 */
+  forSession: (id: string) => api.get<AVOpsSessionState>(`/sessions/${encodeURIComponent(id)}/av-ops`),
+  /** 执行：服务端按动作定级 + 七步前置检查；破坏性动作必须带 confirm=true */
+  exec: (id: string, body: AVOpsExecRequest) =>
+    api.post<AVOpsExecResult>(`/sessions/${encodeURIComponent(id)}/av-ops`, body),
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null
+}
+
+/** AV-Ops 请求失败时的 HTTP 状态（非 axios 异常 → 0）。 */
+export function avOpsHttpStatus(err: unknown): number {
+  return axios.isAxiosError(err) ? err.response?.status ?? 0 : 0
+}
+
+/** 从失败响应里取出可判定的错误文案（404 的纯文本 / `{error}` / 网络错误都覆盖）。 */
+export function avOpsErrorMessage(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const data: unknown = err.response?.data
+    if (typeof data === 'string' && data.trim()) return data.trim()
+    if (isRecord(data) && typeof data.error === 'string' && data.error) return data.error
+    return err.message
+  }
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** 从 POST 失败响应里取出 `{code,error,checks[]}`（形状不符时返回 null，由调用方兜底）。 */
+export function avOpsFailure(err: unknown): AVOpsExecFailure | null {
+  if (!axios.isAxiosError(err)) return null
+  const data: unknown = err.response?.data
+  if (!isRecord(data)) return null
+  if (typeof data.error !== 'string') return null
+  const checks = Array.isArray(data.checks) ? (data.checks as AVOpsCheck[]) : []
+  const code = typeof data.code === 'string' ? (data.code as AVOpsReasonCode) : undefined
+  return { ok: false, code, error: data.error, checks }
+}
+
 // 运行时设置（设置页真实读写，保存后热生效）
 export interface SettingsResponse {
   general: Record<string, unknown>
