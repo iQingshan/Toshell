@@ -40,16 +40,14 @@
 | **S5** | 新增低特征通道 | WS 补域前置/拟态/uTLS（零新库）、首个新通道端到端、多通道热切换 | 新建 |
 | **S6** | 杀软对抗能力分级 + 工程收尾 | AV-L0 侦察 / AV-L1 温和、驱动选路与清场、内存执行加固、屏幕流跨平台、e2e 接 CI、可观测性、服务端在线更新 | **P0-1 / P0-2 / P0-3 / P0-4 + P3 全部** |
 
-### S1 开放 MCP 服务接口 + 公共执行基础设施（当前阶段）
+### S1 开放 MCP 服务接口 + 公共执行基础设施（✅ 已完成）
 
-- **工具元数据单源化**：新增 `internal/server/mcp/registry.go`（`ToolDef`/`Param`/风险级 + JSON Schema 生成），消除现在**三处硬编码**（`internal/server/api/handlers_mcp.go` 的工具清单、`internal/server/ai/copilot.go` 的 LLM schema、`handlers_mcp.go` 的命令映射），让 REST `/api/v1/mcp/tools`、LLM schema、MCP `tools/list` **同源**。
-- **统一结果信封 + 大结果外置**：`{status,data,error,meta}`（`meta` 含 `call_id`/`truncated`/`total_bytes`/`handle`/`next_cursor`/`untrusted`）；大结果落盘 `data/mcp-results/<date>/<handle>` 并提供分页回读；**替换 `truncateStr` 的静默截断**（现在截断了不告诉模型）。
-- **MCP 协议层**：实现 `initialize` / `tools/list` / `tools/call` / `resources/read`；传输给 **stdio 桥 + Streamable HTTP** 两种。
-- **安全边界（本阶段最重要）**：独立**回环**监听（默认 `127.0.0.1:18082`，**不复用**管理 API 的 `0.0.0.0:18081`，**不套** `webGate`）；**MCP 专用 Token**（**不复用** `auth.api_keys`——那把钥匙能开全部管理 API）；工具**三档分级**（只读 / 需确认 / 危险），**默认只放行只读**；危险工具走审批门；RPM / 并发 / 挂起句柄三道闸；IP 与 Origin 校验；JSONL 审计 + DB 镜像；**失败即拒（fail-closed）**。
-- **兼修两个既有缺陷**：
-  1. `internal/server/ai/copilot.go` 的 `isRiskyTool()` 是**允许列表且 fail-open**（以后新增工具默认免审批），且**未包含 `delegate`** → 在"需用户同意"模式下 Agent 仍可经 `delegate` **无审批**发起多步目标侧动作。改为**默认危险、仅只读白名单免审批**，并把编排类工具纳入。
-  2. `handlers_mcp.go` 的文件名参数存在**路径穿越**，需一并修掉。
-- **验收**：REST `/api/v1/mcp/tools` 与 MCP `tools/list` 输出同一份元数据；**越权矩阵**（危险工具在未审批时必须被拒）全绿；大结果可分段回读且带 `truncated` 标记；`normal` 模式下 `delegate` 必触发审批；本地 `go build` + 单测 + 服务端联调通过。
+- **工具元数据单源化**：新增 `internal/server/mcp`（`registry.go` 类型与 JSON Schema 生成、`registry_tools.go` 38 个工具的**类型化参数与风险分级** read 13 / confirm 14 / danger 11），REST `/api/v1/mcp/tools`、内置 AI 的 function schema、对外 MCP `tools/list` **三处同源**；删掉 `handlers_mcp.go` 里 190 行的工具清单与 `copilot.go` 里 33 条硬编码 schema。
+- **统一结果信封 + 大结果外置**（`envelope.go` / `resultstore.go`）：`{status,data,error,meta}`，超限结果落盘 `data/mcp-results/<日期>/<hex>` 并由 `result_read` 分页回读；**截断一律显式标注**；句柄做白名单 + `Abs`/`EvalSymlinks` 双校验防穿越。
+- **MCP 协议层**：`initialize` / `notifications/initialized` / `ping` / `tools/list` / `tools/call` / `resources/list` / `resources/read`；`Mcp-Session-Id` 会话、`DELETE` 结束、`GET` SSE；stdio 桥 `cmd/toshell-mcp`。新增 `scripts/mcp_smoke.ps1`（18 项权限/协议/设置页矩阵，不需要植入端）。
+- **安全边界**：独立回环监听（默认 `127.0.0.1:18082`）、MCP 专用 token（常量时间比较，不复用管理 API Key）、CIDR/Origin 校验、三档分级默认只放行只读、审批门扩展点（`ConsentGate`，真正的审批接线在 S2）、RPM/并发/挂起句柄三道闸、JSONL 审计（参数只记摘要、敏感键全脱敏）、fail-closed。
+- **兼修两个既有缺陷**：`delegate` 绕过审批（`isRiskyTool` 原为"允许列表 + fail-open"）、`plugin_upload`/`fileless_exec` 的路径穿越。
+- **验收证据**：`go build ./...` / `go vet` 通过；`go test ./internal/server/mcp/...` ok；`scripts/mcp_smoke.ps1` **18/18 通过**（无 token/错 token 401、会话头 400、tools/list=38、只读可调用、危险默认 403、未注册 403、路径穿越 403、超 RPM 429、设置页 GET/PUT 与工具名校验）；`npm run build` 通过。
 
 ### S2 内置 Agent：长任务可靠性
 

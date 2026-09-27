@@ -303,6 +303,40 @@ for ($i = 0; $i -lt ($MaxRPM + 5); $i++) {
 }
 if ($hit429) { Add-Result ('超 RPM(' + $MaxRPM + ') → 429') 'OK' } else { Add-Result ('超 RPM(' + $MaxRPM + ') → 429') 'FAIL' "连打 $($MaxRPM + 5) 次都没被限流" }
 
+# ── 3) 设置页接线：GET 能看到 mcp 段、PUT 会校验工具名（不需要植入端）──
+$r = Invoke-Raw -Method 'GET' -Url ($script:BaseUrl + '/api/v1/settings') -Headers @{ 'X-API-Key' = $apiKey }
+$mcpKeysOk = $false
+if ($r.StatusCode -eq 200) {
+    $o = Get-Json $r.Content
+    if ($o -and $o.mcp) {
+        $keys = @($o.mcp.PSObject.Properties.Name)
+        $need = @('enabled', 'bind', 'token_set', 'allowed_tools', 'effective_allowed', 'read_only_tools', 'max_rpm')
+        $missing = @($need | Where-Object { $keys -notcontains $_ })
+        if ($missing.Count -eq 0) { $mcpKeysOk = $true }
+        else { $missingTxt = $missing -join ',' }
+    }
+}
+if ($mcpKeysOk) { Add-Result 'GET /settings 含 mcp 段（token 只回 token_set）' 'OK' }
+else { Add-Result 'GET /settings 含 mcp 段（token 只回 token_set）' 'FAIL' ("HTTP " + $r.StatusCode + $(if ($missingTxt) { ' 缺字段: ' + $missingTxt } else { '' })) }
+
+# PUT：白名单里写错工具名必须被 400 拦下（否则"以为放行了其实没放行"）
+$badPut = '{"mcp":{"allowed_tools":["definitely_not_a_tool"]}}'
+$r = Invoke-Raw -Method 'PUT' -Url ($script:BaseUrl + '/api/v1/settings') -Headers @{ 'X-API-Key' = $apiKey } -Body $badPut
+if ($r.StatusCode -eq 400) { Add-Result 'PUT /settings 白名单写错工具名 → 400' 'OK' }
+else { Add-Result 'PUT /settings 白名单写错工具名 → 400' 'FAIL' ("实际 HTTP " + $r.StatusCode) }
+
+# PUT：合法的只读工具名应被接受（并真的写进配置）
+$goodPut = '{"mcp":{"allowed_tools":["session_list","session_context"],"max_pending_handles":16}}'
+$r = Invoke-Raw -Method 'PUT' -Url ($script:BaseUrl + '/api/v1/settings') -Headers @{ 'X-API-Key' = $apiKey } -Body $goodPut
+$applied = $false
+if ($r.StatusCode -eq 200) {
+    $cfgText = ''
+    if (Test-Path $cfgPath) { $cfgText = [IO.File]::ReadAllText($cfgPath, [Text.Encoding]::UTF8) }
+    if ($cfgText -match 'session_list' -and $cfgText -match 'max_pending_handles:\s*16') { $applied = $true }
+}
+if ($applied) { Add-Result 'PUT /settings 合法白名单 → 200 且已落盘' 'OK' }
+else { Add-Result 'PUT /settings 合法白名单 → 200 且已落盘' 'FAIL' ("HTTP " + $r.StatusCode) }
+
 # 审计日志确实在写
 $auditPath = Join-Path $script:TempDir 'mcp-audit.jsonl'
 if (Test-Path $auditPath) {
