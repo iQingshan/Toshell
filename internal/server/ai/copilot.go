@@ -293,7 +293,10 @@ func (c *Copilot) runLoop(ctx context.Context, messages []Message, traceID strin
 	loopSeen := map[string]int{}
 	toolCalls := 0
 	stopReason := ""
-	for turn := 0; ; turn++ {
+	// turn 在循环外声明：循环因预算耗尽 break 后，收尾文案要用它打印"实际跑了几轮"
+	// （曾经在收尾处漏传 Turns，导致提示里恒为"实际 0 轮"）。
+	turn := 0
+	for ; ; turn++ {
 		// 三处硬上限逐轮判定：任一触发立即停止循环并记录 stop_reason。
 		usage := runUsage{Turns: turn, ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}
 		if stop, reason := shouldStopRun(usage, limits); stop {
@@ -394,7 +397,7 @@ func (c *Copilot) runLoop(ctx context.Context, messages []Message, traceID strin
 		}
 	}
 	// 预算耗尽：照常给出"因预算耗尽而停止"的最终回复（不静默中断、不 panic）。
-	note := stopReasonText(stopReason, runUsage{ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}, limits)
+	note := stopReasonText(stopReason, runUsage{Turns: turn, ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}, limits)
 	return &ChatResult{
 		Reply:      "⚠️ " + note + "\n\n" + buildActionSummary(traces),
 		Traces:     traces,
@@ -1154,7 +1157,9 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 	var fullThinking strings.Builder
 	var fullContent strings.Builder
 
-	for turn := 0; ; turn++ {
+	// turn 在循环外声明：收尾文案要打印"实际跑了几轮"（预算类停止的用法统计）。
+	turn := 0
+	for ; ; turn++ {
 		// 三处硬上限**每轮都查**：任一触发立刻停止循环并记录 stop_reason，
 		// 由循环后的收尾逻辑产出"因预算耗尽而停止"的最终回复（不静默中断、不 panic）。
 		usage := runUsage{Turns: turn, ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}
@@ -1253,7 +1258,7 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			run.appendTimeline("stop", "🛑 工具 "+tc.Function.Name+" 以相同参数重复调用，已停止（防死循环）trace="+traceID)
 			// 收敛时尽量产出真实报告而不是动作清单（报告里点名是哪个工具/参数触发的）。
 			if len(run.Traces) > 0 {
-				note := stopReasonText(stopReason, runUsage{ToolCalls: toolCalls}, limits) +
+				note := stopReasonText(stopReason, runUsage{Turns: turn, ToolCalls: toolCalls}, limits) +
 					fmt.Sprintf(" 触发详情：工具 %s，参数 %s。", tc.Function.Name, truncate(argsJSON(args), 200))
 				if _, rerr := c.finalizeWithReport(ctx, run, note); rerr == nil {
 					return nil, fmt.Errorf("tool loop detected: %s", tc.Function.Name)
@@ -1382,7 +1387,7 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 
 	// 预算耗尽（轮次 / 工具调用数 / 墙钟）：不静默中断——先让模型基于已收集结果整理
 	// 最终报告，收尾调用失败再退回动作清单；stop_reason 写到 run 上并在最终回复里说明。
-	note := stopReasonText(stopReason, runUsage{ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}, limits)
+	note := stopReasonText(stopReason, runUsage{Turns: turn, ToolCalls: toolCalls, ElapsedSec: elapsedSec(startedAt)}, limits)
 	run.setStopReason(stopReason)
 	run.appendTimeline("stop", "⏱ "+note+" trace="+traceID)
 	if len(run.Traces) > 0 {
@@ -1530,6 +1535,9 @@ func (c *Copilot) waitForConsent(ctx context.Context, run *AgentRun, tc ToolCall
 	}
 	run.mu.Unlock()
 	run.setStatus(AgentWaitConsent)
+	// stop_reason 与 status 一起暴露：轮询 /agent/runs/{id} 的调用方（脚本、外部 MCP 客户端）
+	// 只看 stop_reason 也能知道"不是失败，是在等人审批"。恢复时 ResetForResume 会清空它。
+	run.setStopReason(stopReasonAwaitConsent)
 
 	req := consentRequestFor(newConsentToken(), traceID, tc, args)
 	req.Level = level.String() // 显式用判定时的等级，避免二次查询注册表得到不同结果
@@ -1813,10 +1821,20 @@ func argsJSON(args map[string]string) string {
 }
 
 // 分级审批策略取值。
+//
+// 导出常量（v1.4.0 S2）：这三个值同时是**对外契约**——settings/status 接口回传、
+// 前端下拉框取值、配置校验都按它们比对，散落的字符串字面量迟早会拼错。
 const (
-	consentPolicyGraded = "graded" // 只读免审；confirm/danger 需用户同意（默认）
-	consentPolicyAll    = "all"    // 任何工具（含只读）都要同意
-	consentPolicyOff    = "off"    // 都不询问（危险：仅在明确知道后果时使用）
+	ConsentPolicyGraded = "graded" // 只读免审；confirm/danger 需用户同意（默认）
+	ConsentPolicyAll    = "all"    // 任何工具（含只读）都要同意
+	ConsentPolicyOff    = "off"    // 都不询问（危险：仅在明确知道后果时使用）
+)
+
+// 内部短别名：本文件内的判定逻辑保持可读（与旧代码同名，避免大范围改字面量）。
+const (
+	consentPolicyGraded = ConsentPolicyGraded
+	consentPolicyAll    = ConsentPolicyAll
+	consentPolicyOff    = ConsentPolicyOff
 )
 
 // normalizeConsentPolicy 归一化审批策略（大小写/首尾空白容错）：
@@ -1860,6 +1878,13 @@ func effectiveConsentPolicy(policy, legacyMode string) string {
 		return normalizeConsentPolicy(policy)
 	}
 	return normalizeConsentPolicy(legacyMode)
+}
+
+// EffectiveConsentPolicy 是 effectiveConsentPolicy 的导出壳，供 API 层（settings/status）
+// 回传给前端"当前真正生效的策略"——否则空配置会被原样回传成 ""，页面只能各自猜默认值。
+// 语义与循环里用的判定完全一致（同一个函数），避免"显示 graded、实际 off"这类错位。
+func EffectiveConsentPolicy(policy, legacyMode string) string {
+	return effectiveConsentPolicy(policy, legacyMode)
 }
 
 // needsConsent 判断某等级的工具在当前策略下是否需要用户同意：

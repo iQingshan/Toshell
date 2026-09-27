@@ -17,7 +17,14 @@ export function Copilot() {
   const clearMessages = useCopilotStore((s) => s.clearMessages)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [status, setStatus] = useState<{ enabled: boolean; model: string; consent_mode?: string } | null>(null)
+  const [status, setStatus] = useState<{
+    enabled: boolean
+    model: string
+    /** v1.4.0 主键：graded（默认）/ all / off */
+    consent_policy?: string
+    /** 旧键，后端仍回传，用于老前端兼容 */
+    consent_mode?: string
+  } | null>(null)
   const [showTraces, setShowTraces] = useState<Record<number, boolean>>({})
   const bottomRef = useRef<HTMLDivElement>(null)
   const busyRef = useRef(false)
@@ -423,8 +430,14 @@ export function Copilot() {
           ) : (
             <span className="copilot-badge off">未配置</span>
           )}
-          {status?.consent_mode === 'normal' && (
-            <span className="copilot-badge guard" title="影响会话的操作执行前需你同意（任务流除外）。可在 configs/server.yaml 的 ai.consent_mode 调整">🛡 正常模式·需确认</span>
+          {status?.consent_policy === 'all' && (
+            <span className="copilot-badge guard" title="任何工具（含只读）执行前都需你同意。可在 设置 → AI 副驾驶 的「审批策略」调整">🛡 全部需确认</span>
+          )}
+          {status?.consent_policy !== 'all' && status?.consent_mode === 'normal' && (
+            <span className="copilot-badge guard" title="只读工具直接执行，查询/影响类工具执行前需你同意。可在 设置 → AI 副驾驶 的「审批策略」调整">🛡 分级审批·需确认</span>
+          )}
+          {status?.consent_policy === 'off' && (
+            <span className="copilot-badge off" title="全自动：工具调用不再询问你。可在 设置 → AI 副驾驶 的「审批策略」调整">⚠ 全自动·不询问</span>
           )}
         </div>
         {!status?.enabled && (

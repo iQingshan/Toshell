@@ -576,11 +576,16 @@ export interface ConsentReq {
 
 // AI 副驾驶：LLM 聊天 + 工具调用（端点 /copilot/status /copilot/chat /copilot/consent）
 export const copilotApi = {
-  status: () => api.get<{ enabled: boolean; model: string; consent_mode?: string }>('/copilot/status'),
+  status: () =>
+    api.get<{ enabled: boolean; model: string; consent_policy?: string; consent_mode?: string; notice?: string }>(
+      '/copilot/status',
+    ),
+  // v1.4.0 S2：/copilot/chat 与 /copilot/consent 的响应新增 trace_id / stop_reason
+  // （stop_reason: max_turns / max_tool_calls / max_wallclock / loop_detected / awaiting_consent）
   chat: (messages: { role: string; content: string }[]) =>
-    api.post<{ reply: string; traces: CopilotTrace[]; pending_consents?: ConsentReq[] }>('/copilot/chat', { messages }, { timeout: 240000 }),
+    api.post<{ reply: string; traces: CopilotTrace[]; pending_consents?: ConsentReq[]; trace_id?: string; stop_reason?: string }>('/copilot/chat', { messages }, { timeout: 240000 }),
   consent: (token: string, decision: 'allow' | 'deny') =>
-    api.post<{ reply: string; traces: CopilotTrace[]; pending_consents?: ConsentReq[] }>('/copilot/consent', { token, decision }, { timeout: 240000 }),
+    api.post<{ reply: string; traces: CopilotTrace[]; pending_consents?: ConsentReq[]; trace_id?: string; stop_reason?: string }>('/copilot/consent', { token, decision }, { timeout: 240000 }),
   playbooks: () => api.get<{ playbooks: Playbook[]; count: number }>('/copilot/playbooks'),
   runPlaybook: (playbook_id: string, session_id: string) =>
     api.post<{ run_id: string; status: string }>('/copilot/playbook/run', { playbook_id, session_id }),

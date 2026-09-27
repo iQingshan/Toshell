@@ -35,16 +35,24 @@ func (s *Server) copilotStatusHandler(w http.ResponseWriter, r *http.Request) {
 	cp := s.copilot
 	enabled := cp != nil && cp.Enabled()
 	model := ""
-	consentMode := "auto"
+	// 生效策略统一由 ai.EffectiveConsentPolicy 解析（与循环里的判定同一个函数）：
+	// consent_policy 是 v1.4.0 的新键，consent_mode 作为旧键继续回传（auto/normal 映射）。
+	policy := ai.EffectiveConsentPolicy("", "")
 	if cp != nil {
 		model = cp.Config().Model
-		consentMode = cp.Config().ConsentMode
+		cfg := cp.Config()
+		policy = ai.EffectiveConsentPolicy(cfg.ConsentPolicy, cfg.ConsentMode)
+	}
+	legacyMode := "normal"
+	if policy == ai.ConsentPolicyOff {
+		legacyMode = "auto"
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"enabled":      enabled,
-		"model":        model,
-		"consent_mode": consentMode,
-		"notice":       "AI 副驾驶：在 configs/server.yaml 配置 ai.base_url/api_key/model 后启用；ai.consent_mode=normal 时影响会话的操作需用户同意（任务流除外）",
+		"enabled":        enabled,
+		"model":          model,
+		"consent_policy": policy,
+		"consent_mode":   legacyMode,
+		"notice":         "AI 副驾驶：在 configs/server.yaml 配置 ai.base_url/api_key/model 后启用；ai.consent_policy=graded（默认）时查询/影响类工具需用户同意，all=全部需同意，off=全自动",
 	})
 }
 
@@ -94,6 +102,8 @@ func (s *Server) copilotChatHandler(w http.ResponseWriter, r *http.Request) {
 		"reply":            res.Reply,
 		"traces":           res.Traces,
 		"pending_consents": res.Pending,
+		"trace_id":         res.TraceID,
+		"stop_reason":      res.StopReason,
 	})
 }
 
@@ -129,6 +139,8 @@ func (s *Server) copilotConsentHandler(w http.ResponseWriter, r *http.Request) {
 		"reply":            res.Reply,
 		"traces":           res.Traces,
 		"pending_consents": res.Pending,
+		"trace_id":         res.TraceID,
+		"stop_reason":      res.StopReason,
 	})
 }
 
@@ -143,8 +155,8 @@ func (s *Server) copilotConsentHandler(w http.ResponseWriter, r *http.Request) {
 // session_id 用于续接同一个「自主记忆」会话：带空/不带则新建并返回新 run_id 作为 session_id。
 // 后续指令带上 session_id 即把新消息追加到同一上下文，保持 agent 的完整记忆。
 type agentChatRequest struct {
-	Messages   []ai.Message `json:"messages"`
-	SessionID  string       `json:"session_id"`
+	Messages  []ai.Message `json:"messages"`
+	SessionID string       `json:"session_id"`
 }
 
 // agentChatHandler 创建/续接异步 agent run：立即返回 run_id + session_id，ReAct 循环后台自主运行。
@@ -176,6 +188,7 @@ func (s *Server) agentChatHandler(w http.ResponseWriter, r *http.Request) {
 				"run_id":     run.ID,
 				"session_id": run.ID,
 				"status":     run.Status,
+				"trace_id":   run.TraceID,
 			})
 			return
 		}
@@ -200,6 +213,7 @@ func (s *Server) agentChatHandler(w http.ResponseWriter, r *http.Request) {
 		"run_id":     run.ID,
 		"session_id": run.ID, // 首次：session_id 即 run_id，前端存下来用于续接
 		"status":     run.Status,
+		"trace_id":   run.TraceID,
 	})
 }
 
@@ -276,13 +290,15 @@ func (s *Server) agentRunHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"run_id":    run.ID,
-		"status":    run.Status,
-		"objective": run.Objective,
-		"plan":      run.Plan,
-		"traces":    run.Traces,
-		"timeline":  run.Timeline,
-		"reply":     run.FinalReply,
+		"run_id":      run.ID,
+		"status":      run.Status,
+		"objective":   run.Objective,
+		"plan":        run.Plan,
+		"traces":      run.Traces,
+		"timeline":    run.Timeline,
+		"reply":       run.FinalReply,
+		"trace_id":    run.TraceID,
+		"stop_reason": run.StopReason,
 	})
 }
 

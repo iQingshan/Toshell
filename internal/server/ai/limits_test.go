@@ -106,27 +106,33 @@ func TestLimitsFromConfig(t *testing.T) {
 }
 
 // TestStopReasonText 预算停止的中文说明必须带上具体数值（用户与模型都要知道"为什么停"）。
+//
+// 这里刻意让 limits 与 usage 取值不同，并要求"上限值"和"实际用量"**同时**出现：
+// 只断言上限制会漏掉"实际 0 轮"这类收尾统计漏传参数的 bug（RunAgent 曾在收尾处
+// 构造 runUsage 时漏掉 Turns，提示恒为"实际 0 轮"）。
 func TestStopReasonText(t *testing.T) {
 	limits := runLimits{MaxTurns: 20, MaxToolCalls: 40, MaxWallclockSec: 900}
-	usage := runUsage{Turns: 20, ToolCalls: 40, ElapsedSec: 901}
+	usage := runUsage{Turns: 7, ToolCalls: 9, ElapsedSec: 123}
 	cases := []struct {
 		reason string
-		needle string
+		needle []string
 	}{
-		{stopReasonMaxTurns, "20"},
-		{stopReasonMaxToolCalls, "40"},
-		{stopReasonMaxWallclock, "900"},
-		{stopReasonLoopDetected, "相同"},
-		{stopReasonAwaitConsent, "审批"},
-		{"", "停止"},
+		{stopReasonMaxTurns, []string{"20 轮", "实际 7 轮"}},
+		{stopReasonMaxToolCalls, []string{"40 次"}},
+		{stopReasonMaxWallclock, []string{"900 秒", "实际 123 秒"}},
+		{stopReasonLoopDetected, []string{"相同"}},
+		{stopReasonAwaitConsent, []string{"审批"}},
+		{"", []string{"停止"}},
 	}
 	for _, tc := range cases {
 		got := stopReasonText(tc.reason, usage, limits)
 		if got == "" {
 			t.Fatalf("reason=%q 的说明为空", tc.reason)
 		}
-		if !strings.Contains(got, tc.needle) {
-			t.Errorf("reason=%q 的说明 %q 未包含 %q", tc.reason, got, tc.needle)
+		for _, n := range tc.needle {
+			if !strings.Contains(got, n) {
+				t.Errorf("reason=%q 的说明 %q 未包含 %q", tc.reason, got, n)
+			}
 		}
 	}
 }

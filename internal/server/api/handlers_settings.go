@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"toshell/internal/server/ai"
 	"toshell/internal/server/auth"
 	"toshell/internal/server/config"
 	"toshell/internal/server/logging"
@@ -242,9 +243,11 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"timeout":   cfg.AI.Timeout,
 			"max_turns": cfg.AI.MaxTurns,
 			// v1.4.0 S2：控制循环的另外两处硬上限与分级审批策略（旧 consent_mode 保留兼容）
-			"max_tool_calls":     cfg.AI.MaxToolCalls,
-			"max_wallclock_sec":  cfg.AI.MaxWallclockSec,
-			"consent_policy":     cfg.AI.ConsentPolicy,
+			"max_tool_calls":    cfg.AI.MaxToolCalls,
+			"max_wallclock_sec": cfg.AI.MaxWallclockSec,
+			// consent_policy 回传**生效值**（空配置→graded、旧键 auto/normal→off/graded），
+			// 前端与自动化读到的就是循环里真正会用的策略，不必各自猜默认。
+			"consent_policy":     ai.EffectiveConsentPolicy(cfg.AI.ConsentPolicy, cfg.AI.ConsentMode),
 			"consent_mode":       cfg.AI.ConsentMode,
 			"agent_concurrency":  cfg.AI.AgentConcurrency,
 			"download_allowlist": cfg.AI.DownloadAllowlist,
@@ -595,11 +598,15 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		if a.Timeout != nil && *a.Timeout > 0 {
 			updates["ai.timeout"] = *a.Timeout
 		}
-		if a.MaxTurns != nil && *a.MaxTurns > 0 {
-			updates["ai.max_turns"] = *a.MaxTurns
-		}
 		// v1.4.0 S2：控制循环的另外两处硬上限 + 分级审批策略。
 		// 上限给下限保护（0/负数会让循环直接停摆，比"不限制"更危险）。
+		if a.MaxTurns != nil {
+			if *a.MaxTurns < 1 || *a.MaxTurns > 1000 {
+				http.Error(w, `{"error":"ai.max_turns 范围 1-1000"}`, http.StatusBadRequest)
+				return
+			}
+			updates["ai.max_turns"] = *a.MaxTurns
+		}
 		if a.MaxToolCalls != nil {
 			if *a.MaxToolCalls < 1 || *a.MaxToolCalls > 1000 {
 				http.Error(w, `{"error":"ai.max_tool_calls 范围 1-1000"}`, http.StatusBadRequest)

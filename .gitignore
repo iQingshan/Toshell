@@ -26,6 +26,8 @@ configs/local.yaml
 
 # ── 测试 / 回归残留 ──
 .regress_hm/
+# 本地端到端验证沙箱：临时服务端二进制 + 隔离配置/DB + mock LLM 假服务（见 CHANGELOG 验证记录）
+.tmp-verify/
 *.db
 *.db-wal
 *.db-shm

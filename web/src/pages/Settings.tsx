@@ -434,9 +434,20 @@ export function Settings() {
     try {
       const payload: Record<string, any> = {}
       for (const g of dirtyGroups) {
-        // security / web 需要脱敏字段清洗，mcp 需要 CSV→数组 与只读字段清洗，放到下面统一处理
-        if (g === 'security' || g === 'web' || g === 'mcp') continue
+        // security / web 需要脱敏字段清洗，mcp 需要 CSV→数组 与只读字段清洗，
+        // ai 需要新旧审批键同步，均放到下面统一处理
+        if (g === 'security' || g === 'web' || g === 'mcp' || g === 'ai') continue
         payload[g] = { ...(draft[g] as Record<string, any>) }
+      }
+      if (dirtyGroups.includes('ai')) {
+        // 审批策略：v1.4.0 起主键是 consent_policy（graded/all/off），旧键 consent_mode 只作兼容。
+        // 这里把旧键按同一语义写回（off→auto，其余→normal），避免配置文件里新旧两键互相矛盾，
+        // 也让还在读 consent_mode 的老前端/脚本保持正确行为。
+        const a = { ...(draft.ai as Record<string, any>) }
+        const policy = String(a.consent_policy || 'graded')
+        a.consent_policy = policy
+        a.consent_mode = policy === 'off' ? 'auto' : 'normal'
+        payload.ai = a
       }
       if (dirtyGroups.includes('security')) {
         // 账户与鉴权：脱敏回显字段绝不回传：api_keys 是掩码展示值（回传会破坏真实密钥）、
@@ -1024,30 +1035,57 @@ export function Settings() {
                       onChange={(e) => setField('ai', 'timeout', Number(e.target.value))}
                     />
                   </Field>
-                  <Field label="最大工具轮数" hint="模型连续调用工具的上限（防死循环）">
+                  <Field label="最大工具轮数" hint="一次 run 内模型连续调用工具的上限（后端默认 20，防死循环）">
                     <input
                       type="number"
                       min={1}
-                      max={30}
+                      max={100}
                       className="ui-input"
-                      value={num(draft.ai.max_turns) || 8}
+                      value={num(draft.ai.max_turns) || 20}
                       onChange={(e) => setField('ai', 'max_turns', Number(e.target.value))}
                     />
                   </Field>
+                  <Field label="最大工具调用数" hint="一次 run 内工具调用总次数上限（后端默认 40；0/负数会被后端拒绝）">
+                    <input
+                      type="number"
+                      min={1}
+                      max={1000}
+                      className="ui-input"
+                      value={num(draft.ai.max_tool_calls) || 40}
+                      onChange={(e) => setField('ai', 'max_tool_calls', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="最长运行时长(秒)" hint="一次 run 的墙钟硬上限（后端默认 900，即 15 分钟）">
+                    <input
+                      type="number"
+                      min={30}
+                      max={86400}
+                      className="ui-input"
+                      value={num(draft.ai.max_wallclock_sec) || 900}
+                      onChange={(e) => setField('ai', 'max_wallclock_sec', Number(e.target.value))}
+                    />
+                  </Field>
                   <Field
-                    label="权限模式"
-                    hint="正常模式：影响会话的操作（命令下发/文件/进程/凭据/截屏/隧道/插件等）执行前需你确认，任务流除外；全自动：直接执行"
+                    label="审批策略"
+                    hint="分级（默认）：只读工具直接执行，查询/影响类先问你；全部确认：任何工具都要你同意；全自动：直接执行（危险，等价旧 auto）"
                     style={{ gridColumn: '1 / -1' }}
                   >
                     <select
                       className="ui-input"
-                      value={draft.ai.consent_mode || 'auto'}
-                      onChange={(e) => setField('ai', 'consent_mode', e.target.value)}
+                      value={draft.ai.consent_policy || 'graded'}
+                      onChange={(e) => setField('ai', 'consent_policy', e.target.value)}
                     >
-                      <option value="auto">全自动（默认）</option>
-                      <option value="normal">正常模式 · 需确认</option>
+                      <option value="graded">分级审批（默认）· 只读免确认</option>
+                      <option value="all">全部需确认 · 最小授权</option>
+                      <option value="off">全自动 · 不询问（危险）</option>
                     </select>
                   </Field>
+                  {draft.ai.consent_mode ? (
+                    <div className="settings-muted" style={{ gridColumn: '1 / -1' }}>
+                      配置文件里仍有旧键 <code>ai.consent_mode={String(draft.ai.consent_mode)}</code>：
+                      新键 <code>ai.consent_policy</code> 优先，保存后旧键会同步为等价值（off→auto，其余→normal）。
+                    </div>
+                  ) : null}
                 </div>
               </Section>
             )}
