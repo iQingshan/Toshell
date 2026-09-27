@@ -1,8 +1,10 @@
-/* 会话详情面板（v1.3.5 UI 优化）
+/* 会话详情面板（v1.3.5 UI 优化；tab 条改为"服务端能力驱动 + 数量自适应"）
  *
  * 单独一个文件而不是塞进 Sessions.css：详情面板的 tab 条有自己的问题要解 ——
- * Windows 会话最多 13 个 tab，窄面板里会挤成两三行、把内容区顶下去。这里改成
- * "单行横向滚动 + 两侧渐隐"，并把头部做成两行（主机名 + 系统/架构/地址）。 */
+ * tab 集合由 `GET /api/v1/sessions/{id}/capabilities` 的 tabs 决定，数量在
+ * 「light 载荷 4~6 个」到「full 载荷 13~14 个」之间浮动。这里的原则是：
+ *   单行、不换行、不挤压标签；放不下就横向滚动（细滚动条 + 两端渐隐），
+ *   当前选中的 tab 由组件自动滚进可见区。 */
 
 .session-detail-panel {
   display: flex;
@@ -50,21 +52,63 @@
   font-family: var(--font-mono);
 }
 
-/* tab 条：单行横向滚动，不再换行把内容顶下去 */
+/* ══════════════════════════════════════════════════════════════════════
+   tab 条：数量自适应 —— 单行不换行，放不下就横向滚动（不挤压、不溢出容器）
+   ══════════════════════════════════════════════════════════════════════ */
 .session-detail-panel .detail-tabs {
   display: flex;
   gap: 2px;
   padding: var(--sp-1) var(--sp-3) 0;
   border-bottom: 1px solid var(--color-border);
-  /* 注意：这里**不能**用 overflow 裁剪 —— 绝对定位的「更多」下拉会被裁掉
-     （用户反馈"更多点不出来"就是这个原因）。下拉已改为 fixed 定位，这里保持 visible，
-     放不下时允许换行（常见 tab 只有 5~6 个，换行也不会像 13 个那样顶掉内容）。 */
-  overflow: visible;
-  flex-wrap: wrap;
+  /* 单行横滚（不换行）：tab 数由服务端能力决定，13+ 个时换行会把内容区顶下去、
+     标签也会被挤窄；nowrap + overflow-x:auto 则让标签保持完整宽度。
+     注意：这里会裁剪绝对定位子元素 —— 旧版「更多」下拉已随本次改造移除，
+     不再有需要溢出显示的下拉，因此可以安全使用 overflow。 */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
   position: sticky;
   top: 0;
   z-index: 20;
   background: var(--color-bg-secondary);
+  /* 滚动条细化（标准属性 + WebKit 兜底见下方 ::-webkit-scrollbar） */
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+  /* 两端渐隐：由 can-scroll-left / can-scroll-right 打开；放得下时两个都是 0px，
+     等于不做任何遮罩。用 mask 而不是伪元素是为了不影响 scrollWidth / 布局。 */
+  --fade-l: 0px;
+  --fade-r: 0px;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 var(--fade-l),
+    #000 calc(100% - var(--fade-r)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 var(--fade-l),
+    #000 calc(100% - var(--fade-r)),
+    transparent 100%
+  );
+}
+.session-detail-panel .detail-tabs.can-scroll-left { --fade-l: 18px; }
+.session-detail-panel .detail-tabs.can-scroll-right { --fade-r: 18px; }
+
+/* 细滚动条：4px 高、只在悬停时变亮，避免抢视觉 */
+.session-detail-panel .detail-tabs::-webkit-scrollbar { height: 4px; }
+.session-detail-panel .detail-tabs::-webkit-scrollbar-track { background: transparent; }
+.session-detail-panel .detail-tabs::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 999px;
+}
+.session-detail-panel .detail-tabs::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
 }
 
 .session-detail-panel .detail-tabs .tab-btn {
@@ -77,7 +121,9 @@
   background: transparent;
   color: var(--color-text-secondary);
   font-size: var(--fs-sm);
+  /* 标签永不换行、永不收缩：横滚而不是"把标签挤成两个字" */
   white-space: nowrap;
+  flex: 0 0 auto;
   cursor: pointer;
   transition: color var(--transition), border-color var(--transition), background var(--transition);
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
@@ -92,6 +138,24 @@
   font-weight: 600;
 }
 .session-detail-panel .detail-tabs .tab-btn:focus-visible { outline: none; box-shadow: var(--ring); }
+
+/* tab 数量多（>8）时收紧内边距与间距：同样的宽度多露出 1~2 个 tab，
+   文字仍然完整（nowrap + flex:0 0 auto），也不改任何功能。 */
+.session-detail-panel .detail-tabs.detail-tabs-dense { gap: 0; }
+.session-detail-panel .detail-tabs.detail-tabs-dense .tab-btn { padding: 7px 8px; }
+
+/* 能力清单降级/为空时的说明（不显眼，但不静默降级） */
+.session-detail-panel .detail-tabs-note {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px var(--sp-3) 5px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  cursor: default;
+}
 
 /* 内容区：面板自己滚动，内边距统一 */
 .session-detail-panel .detail-content {
@@ -120,83 +184,4 @@
   color: var(--color-danger);
   background: rgba(239, 68, 68, 0.1);
   border-color: rgba(239, 68, 68, 0.3);
-}
-
-/* ══════════════════════════════════════════════════════════════════════
-   tab 收纳：「常用 tab 常驻 + 其余进『更多』下拉」
-   13 个 tab 在窄面板里既放不下、单行横滚又看不出能滚，所以改为显式收纳。
-   ══════════════════════════════════════════════════════════════════════ */
-
-.session-detail-panel .detail-tabs .tab-btn {
-  flex: 0 0 auto;
-}
-
-/* 「更多」按钮与它的下拉 */
-.session-detail-panel .detail-tabs-more {
-  position: relative;
-  margin-left: auto;   /* 靠右放，和常用 tab 区分开 */
-  flex: 0 0 auto;
-}
-.session-detail-panel .tab-more-btn {
-  gap: 4px;
-}
-.session-detail-panel .tab-more-count {
-  min-width: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-  color: var(--color-text-muted);
-  font-size: 10px;
-  line-height: 15px;
-  text-align: center;
-}
-
-.session-detail-panel .detail-tabs-menu {
-  /* fixed + 由 JS 按按钮实测坐标设置 top/right：不受任何祖先 overflow 影响 */
-  position: fixed;
-  z-index: 3000;
-  min-width: 190px;
-  padding: var(--sp-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-secondary);
-  box-shadow: var(--shadow-lg);
-}
-.session-detail-panel .detail-tabs-menu-group + .detail-tabs-menu-group {
-  margin-top: var(--sp-2);
-  padding-top: var(--sp-2);
-  border-top: 1px solid var(--color-border);
-}
-.session-detail-panel .detail-tabs-menu-title {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-  padding: 2px 8px 4px;
-}
-.session-detail-panel .detail-tabs-menu-item {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  width: 100%;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: var(--fs-base);
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--transition), color var(--transition);
-}
-.session-detail-panel .detail-tabs-menu-item:hover {
-  background: var(--color-bg-tertiary);
-  color: var(--color-text);
-}
-.session-detail-panel .detail-tabs-menu-item.active {
-  background: rgba(99, 102, 241, 0.16);
-  color: var(--color-primary-hover);
-  font-weight: 600;
 }

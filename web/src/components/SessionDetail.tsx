@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { Monitor, FolderOpen, Cpu, Network, Terminal, Upload, Shield, Camera, KeyRound, ShieldCheck, Zap, MonitorPlay, Share2, X, MoreHorizontal, Layers } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Monitor, FolderOpen, Cpu, Network, Terminal, Upload, Shield, Camera, KeyRound, ShieldCheck, Zap, MonitorPlay, Share2, X, Layers, Info } from 'lucide-react'
 import { format } from 'date-fns'
 import type { Session } from '../types'
 import { FileManager } from './FileManager'
@@ -20,58 +20,209 @@ import './SessionDetail.css'
 
 export type DetailTab = 'info' | 'files' | 'process' | 'injection' | 'shell' | 'bof' | 'persistence' | 'screenshot' | 'credentials' | 'av' | 'avops' | 'fileless' | 'screenstream' | 'relay'
 
+/** 面板声明：key 只是**数据键**（服务端 tabs 里的键、state/URL 里用的键）。 */
+export interface TabSpec {
+  key: DetailTab
+  label: string
+  icon: React.ReactNode
+  /** 面板内容组件：也放进声明表，省掉 JSX 里再写一遍 `effectiveTab === 'xxx' && <X/>` 链 */
+  render: (session: Session) => React.ReactNode
+  /**
+   * 可用性来源。**缺省 = 与服务端同名**：`GET /api/v1/sessions/{id}/capabilities` 的
+   * `tabs[key] === true` 才渲染（服务端 internal/common/features 的 tabFeatures 白名单
+   * 才是能力的唯一事实来源，前端不再自己按 OS 推一遍）。
+   */
+  capability?: {
+    /** 依赖的服务端能力键（tabs 里的键） */
+    key: string
+    /** true = 服务端 tabs 白名单里**没有**这个键，本条是前端本地补充规则（必须写 why） */
+    local: true
+    why: string
+  }
+}
+
+/**
+ * tab key → 标题 / 图标 / 组件 / 依赖能力 的**唯一**声明表。
+ *
+ * 允许在这里列全量：**是否渲染完全由服务端能力决定**（见 resolveTabs），这张表只回答
+ * "服务端说这个面板可用时，它长什么样、装的是哪个组件"。新增面板 = 在这里加一行。
+ */
+const TAB_SPECS: TabSpec[] = [
+  { key: 'info', label: '信息', icon: <Monitor size={14} />, render: (s) => <SessionInfoTab session={s} /> },
+  { key: 'files', label: '文件', icon: <FolderOpen size={14} />, render: (s) => <FileManager session={s} /> },
+  { key: 'process', label: '进程', icon: <Cpu size={14} />, render: (s) => <ProcessList session={s} /> },
+  { key: 'injection', label: '注入', icon: <Network size={14} />, render: (s) => <ProcessInjectionTab session={s} /> },
+  { key: 'shell', label: 'Shell', icon: <Terminal size={14} />, render: (s) => (
+    <TerminalComponent
+      wsPath={`/api/v1/sessions/${s.id}/shell`}
+      title={`Shell - ${s.hostname}`}
+      titleHighlight={s.hostname}
+      sessionId={s.id}
+      showNewTab
+    />
+  ) },
+  { key: 'bof', label: '插件', icon: <Upload size={14} />, render: (s) => <SessionPluginTab session={s} /> },
+  { key: 'persistence', label: '持久化', icon: <Shield size={14} />, render: (s) => <PersistencePanel session={s} /> },
+  { key: 'screenshot', label: '截图', icon: <Camera size={14} />, render: (s) => <ScreenshotPanel session={s} /> },
+  { key: 'credentials', label: '凭据', icon: <KeyRound size={14} />, render: (s) => <CredentialsPanel session={s} /> },
+  { key: 'av', label: '杀软', icon: <ShieldCheck size={14} />, render: (s) => <AVDetectTab session={s} /> },
+  {
+    key: 'avops',
+    label: '对抗分级',
+    icon: <Layers size={14} />,
+    render: (s) => <AVOpsPanel session={s} />,
+    // 为什么需要一条**本地**规则：avops（AV-Ops 分级对抗，v1.4.0 S6）是前端新增的
+    // "杀软"分级入口，而服务端 features.Tabs() 的 tabFeatures 白名单里**没有**
+    // 'avops' 键 —— 它是能力扩展通道而不是独立操作面板，服务端永远不会下发
+    // tabs.avops。所以它不能只靠服务端 tabs 判断，这里显式把可用性挂到 'av'
+    // 能力上：会话没有杀软能力就不显示对抗分级面板。
+    // （面板自身仍会处理接口 404/403：老服务端没有 /av-ops 时给说明而不是白屏。）
+    capability: { key: 'av', local: true, why: 'AV-Ops 是「杀软」面板的分级扩展，服务端 tabs 白名单里没有 avops 键，可用性跟随 av 能力' },
+  },
+  { key: 'fileless', label: '内存', icon: <Zap size={14} />, render: (s) => <FilelessExecPanel session={s} /> },
+  { key: 'screenstream', label: '屏幕流', icon: <MonitorPlay size={14} />, render: (s) => <ScreenStreamPanel session={s} /> },
+  { key: 'relay', label: '中继', icon: <Share2 size={14} />, render: (s) => <RelayPanel session={s} /> },
+]
+
+/** 服务端能力清单状态：server=拿到了 tabs；loading=请求中；degraded=老服务端或接口失败 */
+export type CapStatus = 'loading' | 'server' | 'degraded'
+
+/**
+ * 服务端能力清单 → 可用面板（**唯一的判定入口**）。
+ *
+ * - 正常（status=server）：严格按服务端 `capabilities.tabs` 过滤声明表，
+ *   `tabs[key] === true` 才渲染；`capability.local` 的键走声明表里写明的本地规则。
+ * - 退化（请求中 / tabs 缺失 / 404、403 / 网络错误）：显示**全部**面板，与引入能力清单
+ *   之前的行为一致 —— 不猜、不变空页面。注意这不是静默降级：调用方会渲染一条不显眼的
+ *   说明（`.detail-tabs-note`）。
+ */
+export function resolveTabs(status: CapStatus, tabs: Record<string, boolean>): { specs: TabSpec[]; degraded: boolean } {
+  if (status !== 'server') {
+    return { specs: TAB_SPECS, degraded: status === 'degraded' }
+  }
+  const specs = TAB_SPECS.filter((spec) => tabs[spec.capability?.key ?? spec.key] === true)
+  // 服务端明确说"一个面板都不可用"（tabs 全 false）：保持空列表、由 UI 说明原因，
+  // 而不是假装什么都能用（fail-closed，与 Go 侧 features 的口径一致）。
+  return { specs, degraded: false }
+}
+
 interface SessionDetailProps {
   session: Session
   onClose: () => void
 }
 
-const TABS: { key: DetailTab; icon: React.ReactNode; label: string }[] = [
-  { key: 'info', icon: <Monitor size={14} />, label: '信息' },
-  { key: 'files', icon: <FolderOpen size={14} />, label: '文件' },
-  { key: 'process', icon: <Cpu size={14} />, label: '进程' },
-  { key: 'injection', icon: <Network size={14} />, label: '注入' },
-  { key: 'shell', icon: <Terminal size={14} />, label: 'Shell' },
-  { key: 'bof', icon: <Upload size={14} />, label: '插件' },
-  { key: 'persistence', icon: <Shield size={14} />, label: '持久化' },
-  { key: 'screenshot', icon: <Camera size={14} />, label: '截图' },
-  { key: 'credentials', icon: <KeyRound size={14} />, label: '凭据' },
-  { key: 'av', icon: <ShieldCheck size={14} />, label: '杀软' },
-  // 杀软对抗分级（AV-Ops，v1.4.0 S6）：分级目录 + 逐动作可用性 + 二次确认下发。
-  // 与上面的「杀软」面板并存：那个是既有裸链（无分级、无前置检查、不写审计），这个是分级入口。
-  { key: 'avops', icon: <Layers size={14} />, label: '对抗分级' },
-  { key: 'fileless', icon: <Zap size={14} />, label: '内存' },
-  { key: 'screenstream', icon: <MonitorPlay size={14} />, label: '屏幕流' },
-  { key: 'relay', icon: <Share2 size={14} />, label: '中继' },
-]
-
-// 常驻显示的 tab（高频：看信息、传文件、看进程、开 Shell、跑内存执行）
-const PINNED_TABS: DetailTab[] = ['info', 'files', 'process', 'shell', 'fileless']
-// 「更多」下拉里的分组顺序（只影响收纳后的展示顺序，不改任何功能）
-const TAB_GROUPS: { title: string; keys: DetailTab[] }[] = [
-  { title: '执行与注入', keys: ['injection', 'bof'] },
-  { title: '环境与对抗', keys: ['av', 'avops', 'credentials', 'persistence'] },
-  { title: '屏幕', keys: ['screenshot', 'screenstream'] },
-  { title: '网络', keys: ['relay'] },
-]
-
 export function SessionDetail({ session, onClose }: SessionDetailProps) {
   const [activeTab, setActiveTab] = useState<DetailTab>('info')
-  // 「更多」下拉的展开状态（tab 太多时收纳用）
-  const [moreOpen, setMoreOpen] = useState(false)
-  // 下拉用 fixed 定位：按按钮实测坐标计算（top / 距右侧距离），避免被 tab 条的 overflow 裁掉
-  const [menuPos, setMenuPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 })
+  // 服务端能力清单（capabilities.tabs）：可用面板集合的**唯一来源**
+  const [capStatus, setCapStatus] = useState<CapStatus>('loading')
+  const [capTabs, setCapTabs] = useState<Record<string, boolean>>({})
+  const [capError, setCapError] = useState('')
   const tabsRef = useRef<HTMLDivElement | null>(null)
-  const moreBtnRef = useRef<HTMLButtonElement | null>(null)
-  // 服务端能力清单（tabs 白名单）；未加载时用本地 OS 推导兜底
-  const [capTabs, setCapTabs] = useState<Record<string, boolean> | null>(null)
+  const tabRefs = useRef<Partial<Record<DetailTab, HTMLButtonElement | null>>>({})
+  // 两端是否还有被滚出去的内容（用于渐隐提示；数量少到放得下时两个都是 false）
+  const [scrollHints, setScrollHints] = useState({ left: false, right: false })
 
+  // 取服务端能力清单。失败（老服务端 404 / 403 / 网络错误）或 200 但没有 tabs 字段
+  // 一律进 degraded：显示全部面板 + 一条说明，绝不静默降级、也不变成空页面。
   useEffect(() => {
-    setCapTabs(null)
+    let alive = true
+    setCapStatus('loading')
+    setCapTabs({})
+    setCapError('')
     sessionApi
       .getCapabilities(session.id)
-      .then((r) => r.data?.tabs && setCapTabs(r.data.tabs))
-      .catch(() => setCapTabs(null))
+      .then((r) => {
+        if (!alive) return
+        const tabs = r.data?.tabs
+        if (tabs && typeof tabs === 'object') {
+          setCapTabs(tabs)
+          setCapStatus('server')
+        } else {
+          setCapStatus('degraded')
+        }
+      })
+      .catch((e: any) => {
+        if (!alive) return
+        const code = e?.response?.status
+        setCapError(code ? `HTTP ${code}` : e instanceof Error ? e.message : String(e))
+        setCapStatus('degraded')
+      })
+    return () => {
+      alive = false
+    }
   }, [session.id])
+
+  const { specs: availableTabs, degraded } = useMemo(
+    () => resolveTabs(capStatus, capTabs),
+    [capStatus, capTabs],
+  )
+
+  // activeTab 指向的面板已不可用（例如切到没有杀软能力的会话）就回退到第一个可用面板：
+  // 常态下第一个就是 'info'，与旧行为一致；但不再假设 'info' 一定存在。
+  const effectiveTab: DetailTab = availableTabs.some((t) => t.key === activeTab)
+    ? activeTab
+    : availableTabs[0]?.key ?? 'info'
+  const activeSpec = availableTabs.find((t) => t.key === effectiveTab) ?? null
+
+  /** 切换面板；focus=true 时把焦点移到对应 tab（键盘导航用） */
+  const selectTab = useCallback((key: DetailTab, focus = false) => {
+    setActiveTab(key)
+    if (focus) {
+      // tabIndex 随选中态变化，等本次提交之后再聚焦
+      requestAnimationFrame(() => tabRefs.current[key]?.focus())
+    }
+  }, [])
+
+  /** 左右方向键在 tab 间移动（WAI-ARIA tablist 惯例），Home/End 跳首尾 */
+  const onTabKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
+    const n = availableTabs.length
+    let next = -1
+    if (e.key === 'ArrowRight') next = (idx + 1) % n
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + n) % n
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = n - 1
+    if (next < 0) return
+    e.preventDefault()
+    selectTab(availableTabs[next].key, true)
+  }
+
+  /** 重新计算两端渐隐（放得下 / 滚到边界时不留渐隐） */
+  const updateScrollHints = useCallback(() => {
+    const el = tabsRef.current
+    if (!el) return
+    const max = el.scrollWidth - el.clientWidth
+    setScrollHints({ left: el.scrollLeft > 2, right: max > 2 && el.scrollLeft < max - 2 })
+  }, [])
+
+  useEffect(() => {
+    const el = tabsRef.current
+    updateScrollHints()
+    if (!el) return
+    el.addEventListener('scroll', updateScrollHints, { passive: true })
+    window.addEventListener('resize', updateScrollHints)
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateScrollHints) : null
+    ro?.observe(el)
+    return () => {
+      el.removeEventListener('scroll', updateScrollHints)
+      window.removeEventListener('resize', updateScrollHints)
+      ro?.disconnect()
+    }
+  }, [updateScrollHints, availableTabs.length, session.id])
+
+  // 选中的 tab 必须留在可见区：tab 多了以后单行横滚，"切到视野外的面板"会看不出当前在哪一页
+  useEffect(() => {
+    const strip = tabsRef.current
+    const el = tabRefs.current[effectiveTab]
+    if (!strip || !el) return
+    const pad = 8
+    const stripBox = strip.getBoundingClientRect()
+    const box = el.getBoundingClientRect()
+    if (box.left < stripBox.left + pad) {
+      strip.scrollBy({ left: box.left - stripBox.left - pad, behavior: 'smooth' })
+    } else if (box.right > stripBox.right - pad) {
+      strip.scrollBy({ left: box.right - stripBox.right + pad, behavior: 'smooth' })
+    }
+  }, [effectiveTab, availableTabs.length, session.id])
 
   const getStatusBadge = (status: string) => {
     const statusMap: Record<string, { label: string; class: string }> = {
@@ -82,82 +233,24 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
     return statusMap[status] || { label: status, class: '' }
   }
 
-  // 按操作系统过滤功能 tab：Windows 全功能；
-  // Linux/macOS 仅显示通用能力（信息/文件/进程/Shell/插件/中继/内存）；
-  // 未知 OS 显示基础四项。优先使用服务端 capabilities 清单。
-  const isWindows = session.os?.toLowerCase().includes('windows')
-  const isLinux = session.os?.toLowerCase().includes('linux')
-  const isMac = session.os?.toLowerCase().includes('darwin')
+  // 非侵入式说明：只在"降级显示全部面板"或"服务端一个面板都没给"时出现
+  const capNote = availableTabs.length === 0
+    ? '服务端未报告任何可用面板（capabilities.tabs 为空）'
+    : degraded
+      ? '能力清单不可用，已显示全部面板'
+      : ''
+  const capNoteTitle = availableTabs.length === 0
+    ? 'GET /api/v1/sessions/{id}/capabilities 返回的 tabs 全为 false：该会话没有服务端认可的操作面板'
+    : `GET /api/v1/sessions/{id}/capabilities 未给出 tabs（老服务端或接口失败${capError ? `：${capError}` : ''}），已退化到显示全部面板（与旧版行为一致）`
 
-  const availableTabs = TABS.filter((tab) => {
-    // AV-Ops 面板（v1.4.0 S6）是**前端新增的面板**：服务端 capabilities 的 tabs 白名单
-    // （Go 侧 internal/common/features 的 tab 表）里没有 'avops' 这个键，所以它的可用性
-    // 跟随「杀软」面板。面板自己会处理接口 404/403（老服务端没有 /av-ops 时给说明而不是白屏）。
-    if (tab.key === 'avops') return capTabs ? capTabs.av === true : isWindows
-    // 服务端清单优先（capTabs[key] === true）
-    if (capTabs) return capTabs[tab.key] === true
-    if (isWindows) return true // Windows：全部
-    if (isLinux || isMac) {
-      // Unix 系：通用能力
-      const unixTabs: DetailTab[] = ['info', 'files', 'process', 'shell', 'bof', 'fileless', 'relay']
-      return unixTabs.includes(tab.key)
-    }
-    // 未知 OS：基础四项
-    const baseTabs: DetailTab[] = ['info', 'files', 'process', 'shell']
-    return baseTabs.includes(tab.key)
-  })
-
-  // activeTab 被过滤掉时自动回退到 'info'（避免渲染不存在的面板）
-  const effectiveTab = availableTabs.some((t) => t.key === activeTab) ? activeTab : 'info'
-
-  // 常驻 tab + 收纳 tab：**当前选中的 tab 永远放进可见区**（否则切到"更多"里的功能后
-  // 看不出自己在哪一页）。菜单里仍然列出全部被收纳项（当前项高亮），计数不随选择变化。
-  const pinnedSet = new Set<DetailTab>(PINNED_TABS)
-  const overflowTabs = availableTabs.filter((t) => !pinnedSet.has(t.key))
-  const visibleTabs = availableTabs.filter(
-    (t) => pinnedSet.has(t.key) || t.key === effectiveTab,
-  )
-
-  // 点空白处 / Esc 关闭「更多」下拉；打开与窗口变化时重算下拉坐标
-  useEffect(() => {
-    if (!moreOpen) return
-    const place = () => {
-      const el = moreBtnRef.current
-      if (!el) return
-      const r = el.getBoundingClientRect()
-      setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) })
-    }
-    place()
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node
-      // 点在按钮或菜单里都不关闭（菜单项自己会关）
-      if (moreBtnRef.current?.contains(t)) return
-      if (tabsRef.current && tabsRef.current.querySelector('.detail-tabs-menu')?.contains(t)) return
-      setMoreOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMoreOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    window.addEventListener('resize', place)
-    window.addEventListener('scroll', place, true)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-      window.removeEventListener('resize', place)
-      window.removeEventListener('scroll', place, true)
-    }
-  }, [moreOpen])
-
-  // Esc 关闭详情面板（与「更多」下拉的 Esc 不冲突：下拉关闭后事件仍冒泡，这里只在没有下拉时生效）
+  // Esc 关闭详情面板
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !moreOpen) onClose()
+      if (e.key === 'Escape') onClose()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [moreOpen, onClose])
+  }, [onClose])
 
   return (
     <div className="session-detail-panel">
@@ -186,95 +279,61 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
         </button>
       </div>
 
-      {/* tab 条：常用 tab 固定显示，其余收进「更多」下拉（按功能分组）。
-          Windows 会话最多 13 个 tab，窄面板里单行横滚等于"把 tab 藏起来"（看不出还能滚），
-          所以这里改成显式收纳：当前选中的 tab 永远出现在可见区。 */}
-      <div className="detail-tabs" ref={tabsRef}>
-        {visibleTabs.map((tab) => (
-          <button
-            key={tab.key}
-            className={`tab-btn ${effectiveTab === tab.key ? 'active' : ''}`}
-            onClick={() => setActiveTab(tab.key)}
-            title={tab.label}
-          >
-            {tab.icon} {tab.label}
-          </button>
-        ))}
-
-        {overflowTabs.length > 0 && (
-          <div className="detail-tabs-more">
+      {/* tab 条：**集合来自服务端能力**（TAB_SPECS + resolveTabs），这里不再写死
+          `{cond && <Tab/>}`；布局随数量自适应 —— 单行不换行，放不下就横向滚动
+          （细滚动条 + 两端渐隐），当前选中的 tab 自动滚进可见区。 */}
+      <div
+        ref={tabsRef}
+        className={
+          'detail-tabs' +
+          (availableTabs.length > 8 ? ' detail-tabs-dense' : '') +
+          (scrollHints.left ? ' can-scroll-left' : '') +
+          (scrollHints.right ? ' can-scroll-right' : '')
+        }
+        role="tablist"
+        aria-label="会话面板"
+      >
+        {availableTabs.map((spec, idx) => {
+          const selected = effectiveTab === spec.key
+          return (
             <button
-              ref={moreBtnRef}
-              className={`tab-btn tab-more-btn ${overflowTabs.some((t) => t.key === effectiveTab) ? 'active' : ''}`}
-              onClick={() => setMoreOpen((v) => !v)}
-              title="更多功能"
-              aria-expanded={moreOpen}
+              key={spec.key}
+              ref={(el) => {
+                tabRefs.current[spec.key] = el
+              }}
+              type="button"
+              role="tab"
+              id={`detail-tab-${spec.key}`}
+              className={`tab-btn ${selected ? 'active' : ''}`}
+              aria-selected={selected}
+              aria-controls={selected ? `detail-tabpanel-${spec.key}` : undefined}
+              tabIndex={selected ? 0 : -1}
+              title={spec.label}
+              onClick={() => selectTab(spec.key)}
+              onKeyDown={(e) => onTabKeyDown(e, idx)}
             >
-              <MoreHorizontal size={14} /> 更多
-              <span className="tab-more-count">{overflowTabs.length}</span>
+              {spec.icon} {spec.label}
             </button>
-            {moreOpen && (
-              <div
-                className="detail-tabs-menu"
-                role="menu"
-                /* fixed 定位 + 按按钮实测坐标计算：tab 条本身有 overflow（窄屏滚动兜底），
-                   绝对定位的下拉会被它裁掉（用户反馈"更多点不出来"就是这个原因）。
-                   fixed 定位不受任何祖先 overflow 影响。 */
-                style={{ top: menuPos.top, right: menuPos.right }}
-              >
-                {TAB_GROUPS.map((group) => {
-                  const items = group.keys
-                    .map((k) => overflowTabs.find((t) => t.key === k))
-                    .filter((t): t is (typeof overflowTabs)[number] => !!t)
-                  if (items.length === 0) return null
-                  return (
-                    <div key={group.title} className="detail-tabs-menu-group">
-                      <div className="detail-tabs-menu-title">{group.title}</div>
-                      {items.map((tab) => (
-                        <button
-                          key={tab.key}
-                          className={`detail-tabs-menu-item ${effectiveTab === tab.key ? 'active' : ''}`}
-                          onClick={() => {
-                            setActiveTab(tab.key)
-                            setMoreOpen(false)
-                          }}
-                          role="menuitem"
-                        >
-                          {tab.icon} {tab.label}
-                        </button>
-                      ))}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        )}
+          )
+        })}
       </div>
 
-      <div className="detail-content">
-        {effectiveTab === 'info' && <SessionInfoTab session={session} />}
-        {effectiveTab === 'files' && <FileManager session={session} />}
-        {effectiveTab === 'process' && <ProcessList session={session} />}
-        {effectiveTab === 'injection' && <ProcessInjectionTab session={session} />}
-        {effectiveTab === 'shell' && (
-          <TerminalComponent
-            wsPath={`/api/v1/sessions/${session.id}/shell`}
-            title={`Shell - ${session.hostname}`}
-            titleHighlight={session.hostname}
-            sessionId={session.id}
-            showNewTab
-          />
-        )}
-        {effectiveTab === 'bof' && <SessionPluginTab session={session} />}
-        {effectiveTab === 'persistence' && <PersistencePanel session={session} />}
-        {effectiveTab === 'screenshot' && <ScreenshotPanel session={session} />}
-        {effectiveTab === 'credentials' && <CredentialsPanel session={session} />}
-        {effectiveTab === 'av' && <AVDetectTab session={session} />}
-        {effectiveTab === 'avops' && <AVOpsPanel session={session} />}
-        {effectiveTab === 'fileless' && <FilelessExecPanel session={session} />}
-        {effectiveTab === 'screenstream' && <ScreenStreamPanel session={session} />}
-        {effectiveTab === 'relay' && <RelayPanel session={session} />}
+      {/* 降级/空清单说明：不显眼，但不静默 */}
+      {capNote && (
+        <div className="detail-tabs-note" title={capNoteTitle}>
+          <Info size={12} />
+          <span>{capNote}</span>
+        </div>
+      )}
+
+      <div
+        className="detail-content"
+        /* 有可用面板时才挂 tabpanel 语义：tabs 为空时没有可关联的 tab，不留下悬空引用 */
+        role={activeSpec ? 'tabpanel' : undefined}
+        id={activeSpec ? `detail-tabpanel-${effectiveTab}` : undefined}
+        aria-labelledby={activeSpec ? `detail-tab-${effectiveTab}` : undefined}
+      >
+        {activeSpec?.render(session)}
       </div>
     </div>
   )
