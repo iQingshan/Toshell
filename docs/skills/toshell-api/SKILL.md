@@ -226,7 +226,8 @@ Invoke-RestMethod -Method Post -Uri "$BASE/builders" -Headers $h -ContentType 'a
 ## 11. 错误处理与守则
 
 - `400`：参数非法（`jitter>100`、`api_port=0`、三种认证全关、DLL 导出名非法、fileless 预检 `reject` 未加 `force`）→ 读 `error`（及 `reasons`/`suggestion`）。
-- `401`：凭据缺失/过期或被 Web 防护拦下；`404`：路径/会话/任务/驱动/模板不存在（disguise 模式下未认证请求也可能是 404）；`429`：登录失败过多，等 5 分钟；`503`：AI 副驾驶未配置或剧本运行器不可用；`500`：构建/保存失败等，响应为合法 JSON `{"error":"..."}`（可能含多行编译器输出）。
+- `401`：凭据缺失/过期或被 Web 防护拦下；`404`：路径/会话/任务/驱动/模板不存在（disguise 模式下未认证请求也可能是 404）；`429`：登录失败过多，等 5 分钟；`503`：AI 副驾驶未配置、剧本运行器不可用、或 **listener 未就绪**；`500`：构建/保存失败等，响应为合法 JSON `{"error":"..."}`（可能含多行编译器输出）。
+- **会话级接口的错误码口径（v1.4.0 起统一）**：`/sessions/{id}/...` 下的下发类接口（files / processes / screenshot / credentials / fileless-exec / edr / relay / screen-stream / persistence / injection / privesc）在**会话不存在**时一律返回 `404 {"error":"session not found: <id>"}`，**不再**返回 5xx —— 会话 id 写错属于客户端输入问题，别重试、直接修正 id；`503 {"error":"listener not available"}` 才表示服务端暂时不可用（可退避重试）。`404` 与"路由不存在"同为 404：用响应体里的 `session not found` 区分。
 - 判断会话在线**只看** `session.status`（`active`）或原子执行返回的错误，不要臆测"掉线"。
 - 高危操作（删除会话、注入、凭据、内存加载、驱动加载/击杀、隧道、插件加载）先取得用户同意；`consent_mode=normal` 时走 `/copilot/consent` 或 `/agent/runs/{id}/consent`。
 - 输出可能很大：展示时截断；截图等 base64 只报"已获取/大小/用途"；API Key/JWT 用 `$KEY`/`<token>` 占位，不写进日志或对话正文。
