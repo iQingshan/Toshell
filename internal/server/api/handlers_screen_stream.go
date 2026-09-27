@@ -41,8 +41,12 @@ func (s *Server) screenStreamHandler(w http.ResponseWriter, r *http.Request) {
 	if action == "" {
 		action = "start"
 	}
-	if s.listener == nil {
-		http.Error(w, `{"error":"Listener not available"}`, http.StatusInternalServerError)
+	// 会话不存在 → 404、listener 未就绪 → 503：别把"客户端 id 写错"报成 5xx 服务端故障
+	// （见 handlers_session_guard.go 的语义约定；e2e 冒烟把这条列为验收点）。
+	if !s.requireListener(w) {
+		return
+	}
+	if !s.requireSession(w, id) {
 		return
 	}
 
