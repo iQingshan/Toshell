@@ -139,6 +139,41 @@ sleep mask 具体做了什么（便于自查与排错）：
 - **没有 `.rsrc` 是目前最扎眼的"非典型 PE"信号**：正常商业/系统程序几乎都带版本信息（公司名/产品名/文件描述/版本/原始文件名）、图标与 manifest，而我们交付的载荷一样都没有；这也正是计划里"PE 版本资源 / 图标 / 公司信息 / 时间戳"那一项要补的东西，且**必须插在 UPX 与签名之前**（顺序契约见 §2.4，`builder/finalize_order.go` 会拦住"sign 不在最后"的改动）。
 - 该项的验收口径（写在这里，落地时按它验）：① 产物出现 `.rsrc` 节；② `Get-ItemProperty <载荷> | Select-Object -ExpandProperty VersionInfo` 能读出我们写入的公司名/产品名/文件描述/版本；③ 资源查看器能看到图标；④ **顺序正确时签名仍有效**（签名在最后一步，改资源在它之前）—— 最后一条是整项的意义所在。
 
+#### 实测：PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批，已实现）
+
+**改观什么**：把"没有 `.rsrc`"这个最扎眼的非典型信号补上 —— 版本信息（`CompanyName`/`ProductName`/`FileDescription`/`FileVersion`/`ProductVersion`/`LegalCopyright`/`OriginalFilename`/`InternalName`，UTF-16LE）、图标（多尺寸，PNG 压缩项原样搬运）、以及一个"像正经发布版本"的 COFF 时间戳。实现是纯标准库的 PE 后处理（`internal/server/builder/patch_resources.go`），位置在指纹擦除之后、**UPX 与签名之前**（见下方"实测"与 §2.4）。
+
+实测数字（`windows/386`、`full` 档、`tcp`；按 1 MB = 10⁶ 字节）：
+
+| 档位 | 产物字节 | `.rsrc` | 变化 |
+|---|---|---|---|
+| exe **默认（不配置任何资源字段）** | 3,469,557 | 无 | **与改动前完全一致**（从 HEAD 拉干净副本构建对照，字节数相同） |
+| exe + 版本信息 + 1 个图标 + `random` 时间戳 | 3,471,605 | vs=1692 / rs=2048 / 熵 2.90 | **+2048（+0.059%）** |
+| dll + 版本信息 + 1 个图标 + `fixed` 时间戳 | 3,515,904 | vs=1688 / rs=2048 / 熵 2.89 | **+2048（+0.058%）**（基线 3,513,856） |
+
+> `.rsrc` 的熵只有 2.90，因为里面是 UTF-16 文本与图标，不是压缩数据 —— 加资源**不会**让节熵看起来像加壳（这是好事：UPX 那种 7.9+ 的熵才是"可疑"信号，见上面的判读）。
+
+读回来的证据（两条互相独立的实现读数一致：`builder.ReadPEResourceInfo` 与 `scripts/pe_footprint.ps1`）：
+
+- **Windows 自己的 `version.dll` 读得出全部八个字段**（`(Get-Item payload.exe).VersionInfo`）—— 这正是上面验收口径 ② 的落地结果，说明 `VS_VERSIONINFO`/StringFileInfo/Translation `040904B0` 的结构是 Windows 认可的，不是"我自己解析器看着对"。
+- 图标：`GRPICONDIR` 的 `nID` 与 `RT_ICON` 一一对应（尺寸清单按 ICO 目录项一个不少，相同图像只在 `RT_ICON` 层去重），`ExtractAssociatedIcon` 能取到 32x32 图标。
+- `VS_FIXEDFILEINFO`：`FileVersionMS=0x00010004`、`LS=0x00000000`（`1.4.0.0` 的 `MAKELONG(MS,LS)` 语义），`dwFileType=1`（`VFT_APP`，EXE）/ `2`（`VFT_DLL`，DLL）。
+- 时间戳：`fixed` = 2024-03-15 09:00:00 UTC（内置基准）、`random` = 2024-07-21 12:56:00 UTC（基准 + 抖动）；**任何策略都不会晚于构建机当前时间**（未来时间戳比 0 更可疑，`fixed` 配未来时间会直接拒绝构建）。
+- **结构自检**（`VerifyPELayout`：节表不重叠 / RVA 按 `SectionAlignment` 对齐且落在节内 / `SizeOfImage` 覆盖最后一节 / 资源目录可走通）在真实产物上通过；另外用 `LoadLibraryEx(LOAD_LIBRARY_AS_IMAGE_RESOURCE)` 让 **Windows loader 自己**按节表把这些节映射了一遍（exe / dll、默认 / 打资源四个产物全 OK）。
+- **运行期**（本机能跑起来的部分）：打资源的 exe 真跑起来并回连 C2 —— 6 个打资源的 exe 变体里 4 个成功执行并回连（图标+版本信息、只版本信息、只图标、以及"同配置重建"的一次），另 2 个（同一份文件、内容不同）在**创建进程阶段就被本机 360 拦掉**（见下一节）；打资源的 dll 在 32 位宿主里 `LoadLibrary` 成功、Go runtime 起来并回连（默认 dll 作为对照同样成功）；`rundll32 <dll>,Start` 对默认/打资源两种 dll 都返回退出码 0（导出函数被成功调用）。**结论：追加 `.rsrc` 节不会被 Windows loader 拒绝，也不影响载荷跑起来。**
+
+**不能改观什么（如实写）**：
+
+- **签名层被拒不是资源能解决的。** 本机（360 主动防御在跑）"未签名的新 PE 在创建进程阶段就被拒"这条**依旧成立**：实测中有一个打资源的 exe 被按**文件哈希**稳定拦下（`Start-Process` 报 `operation was canceled by the user`，重试 3 次 + 改名都不行），而**同一份配置重新构建**的载荷能正常执行 —— 拦截与"打没打资源"无关，是签名/信誉层的判定（见 §2.5 与 `builder/sign.go`）。资源改的是**静态特征**与"看起来像正经软件"，不改变"能不能被允许执行"。
+- 也**不能**降低静态查杀率：`.rsrc` 里的公司名/产品名本身就是**新的明文特征**（我们写的名字同样可以被规则命中）。所以这里刻意**默认不注入**、名字由操作员按自己的掩护身份填 —— 把它当成"减少'一看就不是正经软件'的观感"，不是"免杀"。
+
+**边界与取舍**（细节见 `patch_resources.go` 顶部注释与 CHANGELOG）：
+
+- 顺序：**必须**在 UPX 与签名之前（§2.4）；只对 Windows `exe`/`bin`/`dll` 生效，`shellcode`/`shellcode_bin`/`raw`/`so` 与非 Windows 目标显式跳过（资源会被 donut 转成垃圾，ELF/Mach-O 没有 `.rsrc`）；**C 植入端（mingw）本次未接入**（走独立管线）。
+- 原 PE 已有可用 `.rsrc`（数据目录指向节首且装得下）→ **原地替换 + 补零**；否则**追加新节**。追加会改 `NumberOfSections`/节头/`SizeOfImage`/`SizeOfHeaders`，`CheckSum` 一律置 0；头部空间不足（节表扩张会覆写第一个节的原始数据）时**明确报错**，不做整文件重排。
+- 图标只从**服务端本地路径**读（配置 `implant.icon_path` 或请求字段 `resource_icon_path`），四道校验（存在/是文件/`.ico` 后缀/≤1 MiB）+ ICO 结构校验；**不接受客户端上传字节**（否则等于接了一条"任意文件读取 + 攻击者可控字节进 `.rsrc`"的链）。
+- **一键中性预设 `resource_preset="neutral"`**：套用一套**自有品牌**的外观（公司名/产品名 `ToShell Ops Toolkit` + 文件描述/版权 + `InternalName=toshell-agent` + 原始文件名 `.exe`/`.dll` + `fixed` 时间戳），语义是"只填操作员没显式给的字段"（显式优先），**不猜版本号**（留空 → `1.0.0.0`），预设名拼错**直接构建报错**。**它不冒充任何真实厂商/系统组件**，所以别指望它在"看起来像系统文件"上有什么收益 —— 那是品牌冒充，需要时由操作员显式填公司名/描述（工具不替你做这个决定，也不把冒充字符串留在公开仓库里）。
+
 #### 实测发现的指纹漏点（v1.4.0 S3，已修）
 
 构建 `windows/386` 产物后逐字节计数（`\xff Go buildinf:` / `Go build ID:` / 正则 `go1\.[0-9]`）：
@@ -164,8 +199,8 @@ sleep mask 具体做了什么（便于自查与排错）：
 
 - 顺序契约集中在 `internal/server/builder/finalize_order.go`：步骤名常量 + `finalizeSteps()`（纯函数）+ `signOrderWarning()`（守卫）。
 - 每次构建开始打一行 `交付流水线（字节加工顺序，签名必须是最后一步）：步骤 → 步骤 → 签名`；一旦顺序被改坏（签名之后还有改字节的步骤）立刻打 **error 级**日志并点名违规步骤。
-- 当前顺序（`format=exe`，全开）：`scrub_fingerprint → scrub_version_string → upx → sign`。
-- 新增"会改字节"的步骤时必须：① 登记步骤名；② 插到 `upx` 与 `sign` **之前**（例如 PE 资源/图标/版本信息/时间戳修补）；③ 让 `finalize_order_test.go` 的表驱动用例继续通过（该用例遍历"平台 × 格式 × 开关"，断言"只要出现 sign 就必在最后"）。
+- 当前顺序（`format=exe`，全开）：`scrub_fingerprint → scrub_version_string → pe_resource_patch → upx → sign`。其中 `pe_resource_patch`（PE 版本资源/图标/公司信息/时间戳，v1.4.0 S3 第二批）**只在本次构建真的配置了资源字段时才出现**；实测日志里默认档不会出现它，因此"默认构建与改动前逐字节一致"这条也顺带被这行日志守着。
+- 新增"会改字节"的步骤时必须：① 登记步骤名常量（例如 `StepResourcePatch = "pe_resource_patch"`）；② 插到 `upx` 与 `sign` **之前**；③ 让 `finalize_order_test.go` 的表驱动用例继续通过（该用例遍历"平台 × 格式 × 资源 × UPX × 签名"，断言"只要出现 sign 就必在最后"，并额外断言"资源修补必在 upx/sign 之前"）。
 - 另外确认过：`sign_timestamp_url` 在两条签名路径上都真的传给了签名命令（`signWithSigntool` 用 `/tr <url> /td sha256`，PowerShell 路径走 `-TimestampServer`）—— 计划里"待确认"的那一项到此闭环。启用真实证书时**务必**配时间戳，否则证书过期后签名一次性全废。
 
 ### 2.5 已知做不到的（写在这里省得反复试）

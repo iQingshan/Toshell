@@ -27,6 +27,11 @@ const (
 	StepScrubFingerprint = "scrub_fingerprint"
 	// StepScrubVersion 全文件 Go 版本串（runtime.buildVersion，锚定窗口扫不到的那一份）。
 	StepScrubVersion = "scrub_version_string"
+	// StepResourcePatch PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）。
+	// 只做原地/追加式的 .rsrc 后处理（见 patch_resources.go），**必须**排在 StepUPX 与
+	// StepSign 之前：UPX 之后再补资源等于把压缩结果改坏，签名之后再动就是白签。
+	// 步骤名固定为 `pe_resource_patch`（finalize_order_test.go 里的违规用例直接用这个字面量）。
+	StepResourcePatch = "pe_resource_patch"
 	// StepUPX UPX 压缩（仅 Windows exe/bin 且 UPX 可用且开启）。
 	StepUPX = "upx"
 	// StepEncodeText shellcode 类格式的文本化（hex / base64 交付物）。
@@ -40,13 +45,18 @@ const (
 // 纯函数：只看入参，不做 IO —— 这样顺序契约能在 CI 里被表驱动地钉住，
 // 而不是靠人读 builder.go 的调用顺序。
 //
-//	language="c"（mingw C 植入端）→ 没有 Go 运行时指纹可擦
-//	format=shellcode/shellcode_bin → 交付物是文本/原始字节，不是 PE，不签名
-//	其余 Windows PE 格式（exe/bin/dll/raw）→ 可能签名
-func finalizeSteps(language, targetOS, format string, upxEnabled, signEnabled bool) []string {
-	steps := make([]string, 0, 5)
+//	language="c"（mingw C 植入端）→ 没有 Go 运行时指纹可擦，也不打 PE 资源（见 shouldPatchResources）
+//	format=shellcode/shellcode_bin → 交付物是文本/原始字节，不是 PE，不签名也不打资源
+//	其余 Windows PE 格式（exe/bin/dll）→ 可能打资源、可能签名
+func finalizeSteps(language, targetOS, format string, resourcePatch, upxEnabled, signEnabled bool) []string {
+	steps := make([]string, 0, 6)
 	if language != "c" {
 		steps = append(steps, StepScrubFingerprint, StepScrubVersion)
+	}
+	// 资源修补紧跟指纹擦除之后（擦除是等长置零，与资源写入互不干扰），
+	// 且在 UPX 与签名之前 —— 顺序理由见本文件顶部与 patch_resources.go 顶部注释。
+	if resourcePatch {
+		steps = append(steps, StepResourcePatch)
 	}
 	if upxEnabled {
 		steps = append(steps, StepUPX)
@@ -111,7 +121,8 @@ func signOrderWarning(steps []string) string {
 func (b *Builder) finalizePipelineSteps(opts BuildOptions, targetOS string) []string {
 	upx := b.useUPX && opts.UPXEnable && targetOS == "windows" &&
 		(opts.Format == "exe" || opts.Format == "bin")
-	return finalizeSteps(opts.Language, targetOS, opts.Format, upx, ResolveSignConfig(opts.SignEnabled).Enabled)
+	return finalizeSteps(opts.Language, targetOS, opts.Format,
+		shouldPatchResources(&opts, targetOS), upx, ResolveSignConfig(opts.SignEnabled).Enabled)
 }
 
 // logFinalizePipeline 构建开始时打印一次交付流水线，并在顺序被改坏时打 error。

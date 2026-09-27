@@ -149,6 +149,14 @@ func (s *Server) listBuildersHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				return out
 			}(),
+			// PE 资源注入能力（v1.4.0 S3 第二批）：**默认什么都不注入**，
+			// 只有请求里给了 resource_* 字段（或选了预设）才会往 .rsrc 里写东西。
+			// 这里把"可选预设"和"改字节的顺序位置"回显出来，避免前端/脚本自己硬编码口径。
+			"resource_presets": builder.ResourcePresetNames(),
+			"resource_default": "off", // off = 零值不注入（产物与不打资源的构建逐字节一致）
+			"resource_order":   builder.StepResourcePatch,
+			"resource_note": "资源/图标/时间戳在指纹擦除之后、UPX 与代码签名之前写入；" +
+				"图标只接受服务端本地 .ico 路径（implant.icon_path 或 resource_icon_path）",
 		},
 	})
 }
@@ -259,6 +267,23 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 		// 启动随机延迟：0 = 交给 builder 取服务端配置 / 内置默认
 		StartDelayMin: req.StartupDelayMin,
 		StartDelayMax: req.StartupDelayMax,
+		// PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）：
+		// **全部原样透传，默认零值 = 不注入**（builder 侧还会再兜一层 implant.icon_path）。
+		// 图标只接受服务端本地路径：请求里给的是路径而不是字节，理由见 api.go 该字段注释。
+		// ResourcePreset 只展开成"操作员没显式给"的字段（显式字段优先）；预设名不认识时
+		// 由 builder 在构建阶段报错（不在这里悄悄忽略 —— 哑失败比构建失败难查）。
+		ResourcePreset:           req.ResourcePreset,
+		ResourceIconPath:         req.ResourceIconPath,
+		ResourceCompanyName:      req.ResourceCompanyName,
+		ResourceProductName:      req.ResourceProductName,
+		ResourceFileDescription:  req.ResourceFileDescription,
+		ResourceFileVersion:      req.ResourceFileVersion,
+		ResourceProductVersion:   req.ResourceProductVersion,
+		ResourceLegalCopyright:   req.ResourceLegalCopyright,
+		ResourceOriginalFilename: req.ResourceOriginalFilename,
+		ResourceInternalName:     req.ResourceInternalName,
+		ResourceTimestampMode:    req.ResourceTimestampMode,
+		ResourceTimestamp:        req.ResourceTimestamp,
 	}
 
 	result, err := s.builder.Build(opts)
@@ -364,6 +389,13 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 			"evasion_scan":      req.EvasionScan,
 			"startup_delay_min": opts.StartDelayMin,
 			"startup_delay_max": opts.StartDelayMax,
+			// PE 资源注入参数（v1.4.0 S3 第二批）：落库便于事后核对"这个载荷有没有打资源/什么公司名"
+			"resource_preset":         req.ResourcePreset,
+			"resource_icon_path":      req.ResourceIconPath,
+			"resource_company_name":   req.ResourceCompanyName,
+			"resource_product_name":   req.ResourceProductName,
+			"resource_file_version":   req.ResourceFileVersion,
+			"resource_timestamp_mode": req.ResourceTimestampMode,
 		})
 		db.CreateImplant(&database.StoredImplant{
 			ID:          response.ID,

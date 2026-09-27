@@ -84,6 +84,37 @@ type BuildRequest struct {
 	// 再回退 2~10s。显式传值可覆盖（如 20/60 拉长"启动即行为"的时间窗）。
 	StartupDelayMin int `json:"startup_delay_min"`
 	StartupDelayMax int `json:"startup_delay_max"`
+
+	// ─── PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）───
+	//
+	// 命名口径：统一加 `resource_` 前缀（对应 builder.BuildOptions 的同名字段），因为这一组
+	// 参数**共同决定"要不要往 .rsrc 里写东西"** —— 请求日志、DB 里的构建参数、接口文档里
+	// 一眼能看出它们属于同一个动作，而不是散装的十个独立开关。
+	//
+	// **默认（全部零值/空串）= 什么都不注入**：产物与改动前逐字节一致（硬要求）。
+	// 任何一项非空即视为"操作员显式要求打资源"，且失败会**构建报错**（不静默跳过）。
+	//
+	// ResourcePreset 一键套用一套**中性预设**（当前只认 "neutral"，取值见
+	// builder.ResourcePresetNeutral 与 GET /builders 的 resource_presets）：
+	// 只填操作员**没显式给**的字段（显式字段永远优先），内容是自有的 "ToShell Ops Toolkit"
+	// 标识 —— **不冒充任何真实厂商/系统组件**。预设名不认识时**构建报错**，绝不静默按
+	// "没配资源"处理（写了 resource_preset 却没拿到资源，是比构建失败更难查的哑失败）。
+	ResourcePreset           string `json:"resource_preset"`
+	ResourceIconPath         string `json:"resource_icon_path"` // 服务端本地 .ico 路径；空 = 用 implant.icon_path
+	ResourceCompanyName      string `json:"resource_company_name"`
+	ResourceProductName      string `json:"resource_product_name"`
+	ResourceFileDescription  string `json:"resource_file_description"`
+	ResourceFileVersion      string `json:"resource_file_version"` // a.b.c.d，如 1.4.0.0
+	ResourceProductVersion   string `json:"resource_product_version"`
+	ResourceLegalCopyright   string `json:"resource_legal_copyright"`
+	ResourceOriginalFilename string `json:"resource_original_filename"`
+	ResourceInternalName     string `json:"resource_internal_name"`
+	// ResourceTimestampMode COFF 头 TimeDateStamp 策略：""/keep（保持原样，Go 链接器置 0）
+	// / fixed（用 resource_timestamp，空则内置 2024-03-15T09:00:00Z）/ random（固定基准起
+	// 随机偏移，且**绝不晚于构建机当前时间** —— 未来时间戳是比 0 更明显的伪造信号）。
+	ResourceTimestampMode string `json:"resource_timestamp_mode"`
+	// ResourceTimestamp fixed 策略的取值（RFC3339，如 2024-03-15T09:00:00Z）。
+	ResourceTimestamp string `json:"resource_timestamp"`
 }
 
 type BuildResponse struct {

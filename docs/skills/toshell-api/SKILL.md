@@ -93,6 +93,12 @@ curl -s -X POST "$BASE/mcp/tools/exec" -H "X-API-Key: $KEY" -H 'Content-Type: ap
 | `bof_enabled` | BOF（Beacon Object File）支持，**默认关 / opt-in**：开启会让载荷带整套 `Beacon*` API 名（22 处 pclntab 明文）。**兼容性选项，不是免杀功能**，只在确实要跑 BOF 时开 |
 | `dll_export` | 仅 `format=dll`：导出函数名（`rundll32 payload.dll,<名字>`），留空 = `Start`；须匹配 `^[A-Za-z_][A-Za-z0-9_]{0,63}$` |
 | `dll_autostart` | 仅 `format=dll`：是否"DLL 加载即启动"（白加黑宿主不一定调导出函数）。**不传/null = true**；`false` = 只导出、加载不自动启动 |
+| `resource_preset` | **v1.4.0 新增**：一键套用 PE 版本资源预设，当前只认 `neutral`（自有品牌 `ToShell Ops Toolkit`：公司名/产品名/描述/版权 + `toshell-agent.exe|dll` + `fixed` 时间戳）。**只填你没显式给的字段**；拼错预设名 → 构建报错 |
+| `resource_company_name`/`resource_product_name`/`resource_file_description`/`resource_file_version`/`resource_product_version`/`resource_legal_copyright`/`resource_original_filename`/`resource_internal_name` | **v1.4.0 新增**：写进 `.rsrc` 的 VS_VERSIONINFO 字段（`file_version` 形如 `1.4.0.0`，留空 → `1.0.0.0`）。**默认全空 = 不注入资源**，产物与不带这些字段时逐字节一致 |
+| `resource_icon_path` | **v1.4.0 新增**：服务端**本地** `.ico` 路径（空 = 跟随配置 `implant.icon_path`）；存在/是文件/`.ico`/≤1 MiB 四道校验。**不能上传字节** |
+| `resource_timestamp_mode`/`resource_timestamp` | **v1.4.0 新增**：COFF 时间戳策略 `keep`(默认，不改)/`fixed`（配 `resource_timestamp`，RFC3339，空 = 内置 2024-03-15T09:00:00Z）/`random`。任何策略都**不允许晚于构建机当前时间**（`fixed` 配未来时间直接报错） |
+
+> **资源注入的位置是契约**：它发生在指纹擦除之后、**UPX 与代码签名之前**（顺序常量 `pe_resource_patch`，见 `GET /builders` 的 `evasion.resource_order`）。只对 Windows `exe`/`bin`/`dll` 生效（`shellcode*`/`raw`/`so`、非 Windows、C 语言档都跳过）。默认关闭（`evasion.resource_default="off"`）。它改的是**静态特征**（"这份 PE 有公司名/图标/版本信息"），**改不了**"未签名 PE 在进程创建阶段被拒"这类签名/信誉层拦截 —— 别把它当免杀。
 
 响应 `BuildResponse`：
 
@@ -108,7 +114,7 @@ curl -s -X POST "$BASE/mcp/tools/exec" -H "X-API-Key: $KEY" -H 'Content-Type: ap
 - `id` 即 **build id**；下载用 `GET /implants/stored/{id}`（带认证）或免认证 `GET /implant/payload/{id}`，不要当文件名用。
 - `signed`/`signer`/`sign_method`/`sign_status`/`sign_message`：未启用签名时为零值/缺省；`sign_status` 可为 `Valid`/`NotSigned`/`UnknownError`（自签根未导入时 `UnknownError` = "已签名但链不受信任"，属预期）；`sign_message` 是中文失败/跳过原因；`sign_fail_closed=true` 时签名失败直接让构建报错。
 - `loader_advice_title`/`loader_advice_tips`：按平台/格式 + 本次是否签名给出的**落地链建议**。
-- 免杀表述按项目三分法：**落地 delivery**（代码签名、白加黑 DLL 侧加载、计划任务+已签名宿主、内存加载 shellcode）/ **动态免杀**（休眠期内存加密 sleep mask、去 RWX、`NtDelayExecution` 替代 `Sleep`、AMSI/ETW patch）/ **静态降特征**（字符串混淆、pclntab 中性化、BOF 按需编译、Go 指纹擦除、UPX/garble）。静态降特征 ≠ 免杀，免杀 ≠ 能落地；`bof_enabled` 属兼容性选项。
+- 免杀表述按项目三分法：**落地 delivery**（代码签名、白加黑 DLL 侧加载、计划任务+已签名宿主、内存加载 shellcode）/ **动态免杀**（休眠期内存加密 sleep mask、去 RWX、`NtDelayExecution` 替代 `Sleep`、AMSI/ETW patch）/ **静态降特征**（字符串混淆、pclntab 中性化、BOF 按需编译、Go 指纹擦除、PE 版本资源/图标/时间戳、UPX/garble）。静态降特征 ≠ 免杀，免杀 ≠ 能落地；`bof_enabled` 属兼容性选项。
 
 ## 5. 构建/免杀能力：`GET /api/v1/builders`
 
@@ -119,6 +125,7 @@ curl -s -X POST "$BASE/mcp/tools/exec" -H "X-API-Key: $KEY" -H 'Content-Type: ap
 - `garble_available`/`garble_message`、`upx_available`：构建机是否具备 garble / UPX。
 - `sign_configured`/`sign_message`：是否已配好签名证书（PFX 或证书指纹）与用哪套签名栈。
 - `bof_default: false`：BOF 默认不编译（勾选才带 `Beacon*`）。
+- `resource_presets`（如 `["neutral"]`）、`resource_default: "off"`、`resource_order: "pe_resource_patch"`、`resource_note`：**v1.4.0 新增** —— PE 资源注入的可用预设、默认状态（off = 不带 `resource_*` 字段时逐字节不变）与"改字节的顺序位置"（资源必须在 UPX 与签名之前写入）。细节见 §4 的 `resource_*` 字段与 `docs/EVASION.md` §2.3。
 - `dll_available`/`dll_message`：**amd64** 的兼容字段；**按架构判断请读 `dll_arch`**（每项含 `available`+`message`），如：
 
 ```json
