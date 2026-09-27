@@ -417,6 +417,8 @@ func (l *HTTPListener) handleHeartbeatHTTP(w http.ResponseWriter, r *http.Reques
 	sessionID := fmt.Sprintf("%x", packet.ID)
 
 	// 更新心跳
+	// 能力位（v1.4.0 S4）：HTTP 轮询通道同样带能力位，写回会话供控制台渲染面板。
+	applyHeartbeatModules(l.sessionMgr, sessionID, packet.Payload)
 	if sess, err := l.sessionMgr.Get(sessionID); err == nil && sess != nil {
 		now := time.Now()
 		sess.LastSeen = now

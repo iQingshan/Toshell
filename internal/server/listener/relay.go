@@ -362,6 +362,8 @@ func (l *TCPListener) handleRegisterRelayed(childSessionID, relaySessionID strin
 
 // handleHeartbeatRelayed 处理中继子会话心跳。
 func (l *TCPListener) handleHeartbeatRelayed(childSessionID string, pkt *protocol.Packet) {
+	// 能力位（v1.4.0 S4）：中继链上的子会话同样上报能力位，不能只在直连时解析。
+	applyHeartbeatModules(l.sessionMgr, childSessionID, pkt.Payload)
 	if sess, err := l.sessionMgr.Get(childSessionID); err == nil && sess != nil {
 		sess.LastSeen = time.Now()
 		sess.Info.LastSeen = time.Now()

@@ -899,6 +899,9 @@ func (l *TCPListener) handleRegister(conn net.Conn, packet *protocol.Packet) {
 
 func (l *TCPListener) handleHeartbeat(conn net.Conn, packet *protocol.Packet) {
 	sessionID := fmt.Sprintf("%x", packet.ID)
+	// 能力位（v1.4.0 S4）：心跳带上载荷自报的能力位图，写回会话供控制台渲染面板。
+	// 这一步以前缺失，导致 ActiveModules 恒为空、能力只能按 OS 猜。
+	applyHeartbeatModules(l.sessionMgr, sessionID, packet.Payload)
 	sess, err := l.sessionMgr.Get(sessionID)
 	if err == nil && sess != nil {
 		now := time.Now()

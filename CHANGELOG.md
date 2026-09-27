@@ -102,7 +102,16 @@
 - 文档：`docs/EVASION.md` 新增 §2.4「签名顺序约束（防白签）」，§2.3 补上版本串漏点的实测前后对照表，自查口径加上 `go1.x` 版本串。
 
 ### 📦 S4 植入端体积分档与内存加载
-- （待填）
+
+- **会话能力位图（前置阻塞项，已修）**：`/sessions/{id}/capabilities` 的注释写着"按 OS + 通道 + 档案推导"，实现却**只按 OS** —— 用 `light` 档构建的载荷，控制台照样点亮注入/截图/凭据/EDR/BYOVD 面板，点下去只得到"未包含在精简构建中"，操作员会误以为是自己环境的问题。现在改成"**载荷自报优先、老载荷按 OS 兜底**"：
+  - 新增 `internal/common/features`：把"档案 + 通道 + BOF/侦察开关 + OS/arch"→ 能力集合的推导做成**唯一一份纯函数**（构建侧烘位图、服务端展示共用同一份判定），并带 `Tabs()`（面板 ← 支撑能力，前端契约的 `tabs` 键名不变）、位掩码 `Bitmask/Decode`、`Resolve(reported, os)`（**上报优先，缺省按 OS 兜底**，并返回 `source: reported|os_fallback`）；未知档案 **fail-closed 归入 light**（宁可少功能也不撒谎，且与 `buildTagList` 的实际编译结果一致）。
+  - 构建侧：把能力位图编码成 `cap:v1:<hex>` 令牌，随 `injectBuildConstants` 一起烘进模板源码（**并且照旧走字符串混淆**，不给静态特征添新明文），植入端运行时解出。
+  - 植入端：注册与心跳把该令牌放进**已有的** `Modules []string`（不新增协议字段），四条传输路径（http 轮询 / tcp / relay / mqtt）一致；服务端 `listener` 侧新增 `heartbeat_modules.go` 把心跳 `Modules` 落到会话 `ActiveModules`。
+  - **老载荷兼容**：`ActiveModules` 为空时沿用旧口径（按 OS 推导），但响应里带 `source: "os_fallback"` + `source_note` 明确"这是兜底推导、未必等于载荷真实能力"——不把兜底当事实。
+  - **验证**：`go test ./...` → **15 个包全 ok**（新增 `internal/common/features` 与 `internal/server/listener` 两个测试包，含"位表只增不改且唯一、未知档案 fail-closed、令牌烘焙后仍被混淆、心跳携带令牌、上报优先/老载荷兜底"等 15 个用例）；`scripts/mcp_smoke.ps1` **18/18**；**真实载荷端到端**（本地沙箱：构建 → 执行 → 等上线 → 查能力接口）：
+    - `profile=light` → `source=reported`、**features 11 条**（command/file_list/.../av_detect）、`tabs` 只有 av/files/info/process/shell，**注入/截图/凭据/EDR/BYOVD/BOF 全部不在**
+    - `profile=full` → `source=reported`、**features 31 条**，注入/截图/凭据/EDR/BYOVD/插件面板按实际编译结果点亮
+  - CI 门禁补上 `./internal/server/listener/...`（新测试包不能只在本机跑）。
 
 ### 🛰 S5 新增低特征通道
 - （待填）

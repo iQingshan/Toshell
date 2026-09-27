@@ -74,15 +74,15 @@ func NewListener(cfg *config.ListenerConfig, sessMgr *session.Manager, taskMgr T
 
 	wsServer := transport.NewServer()
 	listener := &Listener{
-		sessionMgr:   sessMgr,
-		taskMgr:      taskMgr,
-		encryptor:    enc,
-		encKey:       key,
-		wsServer:     wsServer,
-		cfg:          cfg,
-		stopChan:     make(chan struct{}),
-		stopOnce:     sync.Once{},
-		checkerOnce:  sync.Once{},
+		sessionMgr:  sessMgr,
+		taskMgr:     taskMgr,
+		encryptor:   enc,
+		encKey:      key,
+		wsServer:    wsServer,
+		cfg:         cfg,
+		stopChan:    make(chan struct{}),
+		stopOnce:    sync.Once{},
+		checkerOnce: sync.Once{},
 	}
 	if cfg.HeartbeatTimeout > 0 {
 		listener.heartbeatTimeout = cfg.HeartbeatTimeout
@@ -300,7 +300,7 @@ func (l *Listener) SendTunnelPacket(sessionID string, tunnelPacket *tunnel.Tunne
 	}
 
 	encodedPacket := tunnel.EncodeTunnelPacket(tunnelPacket)
-	
+
 	payload := make([]byte, 4+len(encodedPacket))
 	binary.BigEndian.PutUint32(payload[:4], uint32(len(encodedPacket)))
 	copy(payload[4:], encodedPacket)
@@ -699,6 +699,8 @@ func (l *Listener) handleRegister(conn *transport.Conn, packet *protocol.Packet,
 
 func (l *Listener) handleHeartbeat(conn *transport.Conn, packet *protocol.Packet) {
 	sessionID := fmt.Sprintf("%x", packet.ID)
+	// 能力位（v1.4.0 S4）：与 TCP 监听器一致，解析心跳负载里的能力位图。
+	applyHeartbeatModules(l.sessionMgr, sessionID, packet.Payload)
 
 	sess, err := l.sessionMgr.Get(sessionID)
 	if err != nil {

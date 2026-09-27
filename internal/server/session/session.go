@@ -324,6 +324,50 @@ func (m *Manager) UpdateHeartbeat(id string, hb *protocol.Heartbeat) error {
 	return nil
 }
 
+// SetActiveModules 更新会话上报的能力位（SessionInfo.ActiveModules），返回是否发生变化。
+//
+// 为什么要单独一个方法：能力位只由植入端心跳携带（protocol.Heartbeat.Modules，
+// v1.4.0 S4 起载荷会把构建期烘焙的能力位图放在这里），而心跳默认几秒一次 ——
+// 复用 UpdateHeartbeat/UpdateSession 会把 SQLite 写放大到与心跳同频。
+// 这里只在能力位**确实变化**时落库（首次上报、重连换载荷时各写一次）。
+// 老载荷（Modules 为空）不会被清空：调用方不会用空值覆盖既有值。
+func (m *Manager) SetActiveModules(id string, modules []string) bool {
+	if len(modules) == 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session, ok := m.sessions[id]
+	if !ok || session.Info == nil {
+		return false
+	}
+	if sameStrings(session.Info.ActiveModules, modules) {
+		return false
+	}
+	session.Info.ActiveModules = append([]string(nil), modules...)
+	session.Info.LastSeen = time.Now()
+
+	if db := database.Get(); db != nil {
+		db.UpdateSession(session.Info)
+	}
+	logging.Info("session", "Session %s reported capabilities: %v", id, modules)
+	return true
+}
+
+// sameStrings 逐元素比较（避免为一个比较引入新依赖）。
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *Manager) Remove(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

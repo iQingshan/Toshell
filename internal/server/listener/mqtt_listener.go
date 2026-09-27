@@ -163,6 +163,8 @@ func (l *MQTTListener) handleMessage(_ mqtt.Client, msg mqtt.Message) {
 		l.handleRegister(sid, packet)
 	case protocol.TypeHeartbeat:
 		l.touch(sid)
+		// 能力位（v1.4.0 S4）：各通道口径一致，MQTT 也要解析心跳里的能力位图。
+		applyHeartbeatModules(l.sessionMgr, sid, packet.Payload)
 		// 心跳时批量下发 pending 任务（对齐 HTTP 轮询通道的 GetNextBatch）
 		l.flushPendingTasks(sid)
 		l.sendAck(sid, packet)

