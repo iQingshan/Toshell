@@ -183,6 +183,15 @@ func (r *listenerRouter) PushFileUpload(sessionID, uploadID, filename, targetPat
 	return p.PushFileUpload(sessionID, uploadID, filename, targetPath, size, taskID)
 }
 
+// PushModuleBlob 把一个模块二进制帧路由到会话所属监听器（v1.4.0 S4）。
+func (r *listenerRouter) PushModuleBlob(sessionID, token string, payload []byte) error {
+	p := r.resolve(sessionID)
+	if p == nil {
+		return fmt.Errorf("no listener available for session %s", sessionID)
+	}
+	return p.PushModuleBlob(sessionID, token, payload)
+}
+
 func (r *listenerRouter) SendTunnelPacket(sessionID string, tunnelPacket *tunnel.TunnelPacket) error {
 	p := r.resolve(sessionID)
 	if p == nil {

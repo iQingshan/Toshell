@@ -50,6 +50,8 @@ curl -s -X POST "$BASE/mcp/tools/exec" -H "X-API-Key: $KEY" -H 'Content-Type: ap
 
 原子读类结果：`{session_id,task_id,task_type,command,status:"completed|failed|timeout",output,exit_code,error}`；`timeout:true` = 等待超时但任务仍在跑。会话不存在或非 `active` 时**立即**报错，不空等满超时。
 
+> **有意不在工具面里的一项**：内存模块下发（§6.1 `/sessions/{id}/module`）**没有**对应的 MCP 工具。它是"带一次性凭据 + 9 步校验链"的授权动作，需要操作员/控制台显式发起；把它塞进 AI 可自主调用的工具面会让"谁批准了这次模块下发"变得不可判定。脚本可以直接打 REST 端点。
+
 ### 3.1 大结果：统一信封 + 句柄 + 分页回读（v1.4.0）
 
 任何工具的结果超过内联上限（`mcp.inline_limit`，默认 8192 字节）时，返回给你的**不是被截断的原文**，而是统一信封：
@@ -142,6 +144,36 @@ curl -s -X POST "$BASE/mcp/tools/exec" -H "X-API-Key: $KEY" -H 'Content-Type: ap
 - `force:true` 是**逃生门**：`reject` 也照常下发，但服务端 Warn 日志留痕、响应回传被拒原因 + "目标机可能崩溃/掉线"提示。不加 `force` 时 `reject` 返回 **HTTP 400 JSON**：`{error,reasons[],suggestion,pe_info{machine,is_64bit,is_dll,has_tls,has_clr,is_go},preflight_verdict,go_evidence?}`，**不下发任务**。
 - 成功响应 `{task_id,task_type,kind,args,message}`，按需附 `warnings[]`/`suggestion`/`pe_info`/`preflight_verdict`。
 - 诚实说明：预检是**静态 PE 头判定**，只能拦住已知崩宿主边界；"内存执行在目标机上是否成功/是否被 AV 拦"只能在授权目标机实测。
+
+### 6.1 内存模块：`/sessions/{id}/module`（v1.4.0 新增）
+
+`POST /api/v1/sessions/{id}/module` —— 把**原生 C 模块**经加密 C2 下发到植入体内**反射映射执行**（不落磁盘、全程无 RWX、字节不写任务表）。与 `fileless-exec` 的区别：模块是**操作员登记过的、带清单与哈希的常备件**，有 ABI 与三层版本握手、有一次性 token 授权，`GET` 可列出并复用（不必每次上传 base64）。请求体：
+
+```json
+{"module":"cred_probe","args":"reg:SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Winlogon|DefaultUserName"}
+```
+
+- **`module`**（必填，清单主键 `id`）· **`args`**（可选，**服务端不解析、原样透传**给模块，上限 `moduleabi.MaxArgsLen`）· **`token`**（可选：带上就是"重放/重试上一次的凭据"，服务端会明确回 `token_reused`；留空 = 本次新签发一个并**立刻核销**）。
+- **模块登记**：`data/modules/manifest.json`（`{version:1,modules:[…]}`，版本不认即拒），每个条目含 `id`/`name`/`description`/`file`/`sha256`/`size`/`abi`/`os`/`arch`/`entry`/`args_schema`/`source`/`build_cmd`。`file` **只能是文件名**（含路径分隔符/`..` 一律判清单非法，防清单被写坏后变成任意文件读取）；`abi` 必须等于服务端 ABI；每次 `POST` 都**重读清单**，所以"改模块不用重启服务端"。
+- **`GET /api/v1/sessions/{id}/module`** → `{ok,session_id,dir,exec_module,host_arch,host_os,abi_version,abi_token,module_count,manifest_loaded,modules[]}`，`modules[]` 每项是清单条目 **+ `usable` + `problems[]`**（逐条给出"这个会话为什么不能用"：未上报能力位 / 架构不符 / sha256 不符…）。排障先看这里，不要靠"下发一次试试"。
+- **能力门控**：载荷未编入 `exec_module`（构建时没加 `-tags execmodule`）时 `POST` 在第 1 步就拒绝且**不下发任何字节**（`implant_exec_module_unsupported`）；`GET /sessions/{id}/capabilities` 的 `features[]` 里会出现 `exec_module`（能力位第 32 位）。注意它**不进 `tabs`** —— 它是能力扩展通道，不是控制台面板。
+- **9 步校验链**（每步都在响应 `checks[]` 里留 `{step,name,ok,detail}`，失败时一并回传已通过的步骤）：
+  | 步 | 校验 | 失败码 |
+  |---|---|---|
+  | 1 | 会话存在且 `active`；载荷能力位含 `exec_module` | `session_not_found` / `session_inactive` / `implant_exec_module_unsupported` |
+  | 2 | 清单可解析、模块已登记 | `module_manifest_invalid` / `module_not_registered` |
+  | 3 | **sha256 + 字节数硬拦** | `module_hash_mismatch` / `module_size_mismatch` |
+  | 4 | 合法 PE；清单 OS/架构 = 宿主；**PE 头实际位宽 = 清单声明** | `module_pe_invalid` / `module_os_mismatch` / `module_arch_mismatch` |
+  | 5 | 必需导出 `tsh_module_abi`+`tsh_module_main` 存在；**非 Go / 非 CLR / 无 TLS 目录** | `module_abi_exports_missing` / `module_not_native` |
+  | 6 | 三层版本握手（清单 → 任务头 → 植入端回调） | `module_abi_version_mismatch` |
+  | 7 | 一次性 token：有效 / 未过期 / 未复用 / 绑定 session+module | `token_not_found` / `token_expired` / `token_reused` / `token_session_mismatch` / `token_module_mismatch` |
+  | 8 | 推二进制帧 `TypeModuleData(0x0E)` + 建任务 + 下发（fail-closed） | `module_push_failed` / `module_task_create_failed` / `module_too_large` |
+  | 9 | 审计（事件 `module_blob_pushed` / `module_exec_ok` / `module_exec_rejected`） | — |
+  错误响应统一 `{ok:false,code,error,checks[]}`（HTTP：会话不存在 404；字节/版本/架构/能力冲突 **409**；服务端自身问题 500/503）。**被拒的越权尝试不消耗 token**（第 7 步之前失败同理）。
+- **成功响应**：`{ok,task_id,task_type,module,token,sha256,size,abi,arch,exports[],checks[],audit{},pe_info,message}`。`token` 已在下发瞬间核销，回传只为审计关联。
+- **模块 ABI v1**：`int32 tsh_module_abi(void)` + `int32 tsh_module_main(tsh_module_ctx*)`。ctx **只用 ≤4 字节标量与指针**（会话 id 拆 `lo/hi`，避开 64 位对齐差异），386 导出用 `__stdcall` + `-Wl,--kill-at`。返回码 `0` 成功 / `-1` ABI 不符 / `-2` 参数错 / `-3` 被拒 / `-4` 输出失败 / `-5` 模块内异常 / `-6` 宿主不支持；服务端与植入端同一张中文文案表。头文件 `internal/server/builder/implant_c/module/tsh_module.h`，示例模块 `cred_probe.c`（`-nostdlib`，7,680 字节）。
+- **构建模块（386 示例）**：`i686-w64-mingw32-gcc -shared -nostdlib -Wl,--kill-at -o cred_probe.dll cred_probe.c`，然后按实际字节填 `manifest.json` 的 `sha256`/`size`。模块必须是**原生 PE**：Go 编译的模块会被硬拒（反射映射宿主里会出现两个 Go runtime，实测崩宿主）。
+- 诚实说明：`exec_module` 买到的是"**最小载荷 + 按需全功能 + 模块可服务端更新**"，**不是**体积数量级下降（门控本身 +26,112 字节，体积大头在传输栈）。二进制帧**单帧上限 4 MiB、未做分块**；token 只在服务端内存（服务端重启会使在途 token 失效，重新发起即可）；模块自身字符串是明文（只存在于操作员 `data/modules/`，经加密 C2 按需下发，不落目标磁盘）；`exec_module` **未暴露给 MCP/Agent 工具面**（保守口径，见 §3）。
 
 ## 7. 实时事件（WebSocket）
 

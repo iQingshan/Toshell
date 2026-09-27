@@ -251,6 +251,7 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 		UPXEnable:    req.UPXEnable,
 		EvasionScan:  req.EvasionScan,
 		BofEnabled:   req.BofEnabled,
+		ExecModule:   req.ExecModule,
 		SignEnabled:  req.SignEnabled,
 		// DLL：导出名与"加载即启动"（仅 format=dll 生效；dll_autostart 缺省 true）
 		DLLExport:    req.DLLExport,

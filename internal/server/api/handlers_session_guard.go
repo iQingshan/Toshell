@@ -18,12 +18,16 @@ import (
 //
 // 语义约定（本文件是全项目这一约定的唯一出处，新 handler 请复用）：
 //
-//	会话不存在 / 非 active → 404 session_not_found（客户端输入问题，别重试）
+//	会话不存在            → 404 session_not_found（客户端输入问题，别重试）
+//	会话存在但需要 active  → 由 handler 自己判（见下），本文件不代劳
 //	listener 未就绪       → 503 listener_unavailable（服务端暂时不可用，可退避重试）
 //	其余框架内部错误       → 保持 500（真正的服务端故障）
 //
-// 注意：这里只做**存在性**判定，与 `task.Manager.Create` 的校验口径保持一致（它也只 Get 一次），
-// 不额外要求会话 active —— 已下线的会话仍允许创建任务（心跳恢复后会被取走），这是既有语义。
+// ⚠️ **这里只判"存在性"，不判 active**（v1.4.0 S5 复核时明确）：口径与 `task.Manager.Create`
+// 完全一致（它也只 Get 一次），因为"已下线但仍在库/内存里的会话"依然允许创建任务（心跳恢复后
+// 会被取走），这是既有语义。**需要 active 的下发路径请在 handler 里自己加判定**
+// （例如 `internal/server/api/handlers_modules.go` 的模块下发就显式要求 active；
+// 不要指望本函数——曾经本文件的注释写成"非 active → 404"，与实现不符，容易误导后来者）。
 func (s *Server) requireSession(w http.ResponseWriter, id string) bool {
 	if s.sessionMgr == nil {
 		return true // 未装配会话管理器（单测/精简装配）时不拦截，交给下游判定

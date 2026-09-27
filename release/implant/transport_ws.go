@@ -201,6 +201,9 @@ func wsPollRun() {
 			handleShellClose()
 		case TypeFileUp:
 			handleFileUp(pkt)
+		case TypeModuleData:
+			// v1.4.0 S4：内存模块二进制帧（解析+校验+按 token 暂存）
+			handleXData(pkt)
 		case TypeTunnel:
 			if len(pkt.Payload) >= 4 {
 				totalLen := uint32(pkt.Payload[0])<<24 | uint32(pkt.Payload[1])<<16 | uint32(pkt.Payload[2])<<8 | uint32(pkt.Payload[3])

@@ -103,6 +103,19 @@
 
 ### 📦 S4 植入端体积分档与内存加载
 
+- **`exec_module`：内存模块按需加载（本轮核心增量）**
+  - **解决什么**：`light` 档与 `full` 档之间隔着 **573 KB** 的可选功能（注入/EDR/凭据/BYOVD/截图/插件/中继）。以前只有两条路：要么编 full（体积大），要么编 light（功能少）。现在多了第三条：**载荷保持最小，功能按需经加密 C2 下发到内存执行**，模块还能在服务端更新而**不必重编载荷**。
+  - **ABI 是唯一契约**（新包 `internal/common/moduleabi` + C 头 `builder/implant_c/module/tsh_module.h`，三处副本由单测钉住版本与字段顺序）：必须导出 `tsh_module_abi()` 与 `tsh_module_main(tsh_module_ctx*)`，上下文只用 ≤4 字节标量与指针（会话 id 拆 lo/hi 避开 uint64 对齐差异），386 导出用 `__stdcall` + `-Wl,--kill-at`；返回码 `0/-1 ABI/-2 ARGS/-3 DENIED/-4 OUTPUT/-5 PANIC/-6 HOST` 服务端与植入端同表中文文案。**版本握手三层**：清单 → 任务头 → 植入端映射后回调 `tsh_module_abi()`，任一不符即拒绝并回传双方版本（不存在"加载了但行为诡异"）。
+  - **模块格式硬约束**：只接受**原生 PE（C + `-nostdlib`）**；Go/CLR/含 TLS 目录的模块一律硬拒 —— 宿主是反射映射（不走 `LoadLibrary`、不注册 TLS），Go 载荷进 Go 宿主会出现两个 Go runtime，这是仓库里早有实测结论的硬边界（`pecheck.go CheckMemoryExec`）。
+  - **交付链路**：新接口 `POST /api/v1/sessions/{id}/module`（+ 同路径 `GET` 列模块并给可用性判定），交付复用既有任务体系，因此任务表 / 结果外置与 `result_read` / `task_wait` / SSE / 分级审批全部照旧。模块字节走新帧 `TypeModuleData(0x0E)`（裸字节，不 base64，不写进 tasks 表）；**一次性 token**（128 位随机、绑定 session+module+sha256+size+abi、TTL 120s、内存态、用后即废）承载授权，重放/跨会话/过期各有独立错误码。
+  - **9 步校验链**（每步机器可读 code + 中文文案 + 结构化审计）：① 会话存在且 **active** ② 模块已登记 ③ **sha256/大小硬拦**（绝无"警告后继续"）④ 架构/OS 匹配（复用 `InspectPE`，且 PE 实际架构必须等于清单声明）⑤ ABI 导出存在（新增 `builder.ExportedNames` 解析真实导出表）+ 非 Go/CLR/TLS ⑥ 版本握手 ⑦ token 有效/未过期/未复用/绑定正确（**被拒的越权尝试不消耗凭据**）⑧ 下发二进制帧 + 任务（失败 fail-closed）⑨ 审计。能力位不含 `exec_module` 的载荷直接拒绝，不推字节。
+  - **默认载荷行为不变**：新能力用 `-tags execmodule` 门控，默认构建走空实现桩（**+512 字节**，因为新任务/帧类型必须在 `main.go` 有分发点，否则连"未包含在本次构建中"这句明确错误都给不出；权衡后接受这 0.018%，而不是退化成 `Unknown task type`）。能力位只追加第 32 位、**不加 `tabs`**（它是能力扩展通道不是操作面板，加空面板只会误导），前端零改动。
+  - **示例模块 `cred_probe`**（C + `-nostdlib`，**7,680 字节**）：读取 Winlogon 自动登录凭据痕迹 + 回显 ctx；实测本机 `DefaultUserName=123`、`AutoAdminLogon=0`（32 位载荷读 `HKLM\SOFTWARE` 会命中 WOW64 重定向视图，模块已显式用 `KEY_WOW64_64KEY`）。
+  - **实测体积**（windows/386，同参数）：light/tcp **2,895,605**；light+execmodule **2,921,717**（门控 +26,112）；把 `credentials` 搬成模块可省 **67,584**（模块自身只 7,680）。**判读（如实）**：`exec_module` 换的是"一份最小载荷按需拿全功能 + 模块可服务端更新"，**不是**把 2.9 MB 压到很小；体积大头是**传输栈**（http/ws/mqtt 各 +2.1~2.5 MB，见 ROADMAP 的实测矩阵）。
+  - **静态特征**：植入端模板里的模块导出名/任务类型写成会走混淆的形式，实测载荷内 6 个模块相关特征串**均无明文**；并**把 `exec_module_windows.go` 与桩文件改名为中性的 `xload_*.go`、函数改为 `handleXLoad`/`handleXData`** —— 消除 pclntab 里"这个载荷能加载模块"的能力广告（E2E 从 `[WARN] 1 处残留` 变为 `[OK] 0 处`），与仓库既有的 pclntab 中性化惯例一致。
+  - **验证**：`go build`/`go vet`/`gofmt`（改动文件）干净；`go test ./...` → **17 个测试包全 ok**；`scripts/mcp_smoke.ps1` **18/18**；**真机 E2E 21/21**（模块构建→主载荷上线→能力位上报→既有 command 任务回归→9 步校验链→模块执行并回传→token 复用/未登记/哈希不符/架构不符四条失败路径→失败后可恢复→体积对比→清理）；两份植入端镜像 **63 文件 SHA-256 逐一一致**。
+  - **已知边界（如实）**：只真机测了 TCP 通道（HTTP/WS/MQTT 的下行已接线并编译通过，未真机跑；HTTP 轮询下二进制随下次心跳到达）；模块单帧下发上限 4 MiB（未做分块）；模块自身字符串是明文（只存在于操作员 `data/modules/`，经加密 C2 按需下发、不落目标磁盘）；token 只在内存（服务端重启使在途 token 失效，重试一次即可）；`exec_module` 未暴露给 MCP/Agent 工具面（保守口径）。
+
 - **会话能力位图（前置阻塞项，已修）**：`/sessions/{id}/capabilities` 的注释写着"按 OS + 通道 + 档案推导"，实现却**只按 OS** —— 用 `light` 档构建的载荷，控制台照样点亮注入/截图/凭据/EDR/BYOVD 面板，点下去只得到"未包含在精简构建中"，操作员会误以为是自己环境的问题。现在改成"**载荷自报优先、老载荷按 OS 兜底**"：
   - 新增 `internal/common/features`：把"档案 + 通道 + BOF/侦察开关 + OS/arch"→ 能力集合的推导做成**唯一一份纯函数**（构建侧烘位图、服务端展示共用同一份判定），并带 `Tabs()`（面板 ← 支撑能力，前端契约的 `tabs` 键名不变）、位掩码 `Bitmask/Decode`、`Resolve(reported, os)`（**上报优先，缺省按 OS 兜底**，并返回 `source: reported|os_fallback`）；未知档案 **fail-closed 归入 light**（宁可少功能也不撒谎，且与 `buildTagList` 的实际编译结果一致）。
   - 构建侧：把能力位图编码成 `cap:v1:<hex>` 令牌，随 `injectBuildConstants` 一起烘进模板源码（**并且照旧走字符串混淆**，不给静态特征添新明文），植入端运行时解出。

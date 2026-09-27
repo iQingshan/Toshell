@@ -24,11 +24,16 @@ import (
 //   - Agent 恢复用 s.resumeRun 桩（默认真实实现是 resumeAgentAsync）；
 //   - 需要落库的用例建临时 sqlite（database.AgentSchemaStatements 的真实 schema）。
 
-// fakePusher 假的 TaskPusher：只记录下发过的任务 id。
+// fakePusher 假的 TaskPusher：只记录下发过的任务 id（以及 v1.4.0 S4 的模块二进制帧）。
 type fakePusher struct {
 	mu     sync.Mutex
 	pushed []uint64
 	err    error
+	// v1.4.0 S4：记录下发的模块二进制帧（token → 帧负载），供校验链用例断言
+	// "第 7 步消耗掉的 token 与第 8 步推下去的字节是同一份"。
+	moduleTokens  []string
+	modulePayload [][]byte
+	moduleErr     error
 }
 
 func (f *fakePusher) PushTask(sessionID string, t *types.TaskInfo) error {
@@ -49,6 +54,28 @@ func (f *fakePusher) SendTunnelPacket(sessionID string, packet *tunnel.TunnelPac
 }
 func (f *fakePusher) SendTunnelRaw(sessionID string, raw []byte) error { return nil }
 func (f *fakePusher) ListRelayNodes() []types.RelayNode                { return nil }
+
+// PushModuleBlob 记录模块二进制帧（v1.4.0 S4）。
+func (f *fakePusher) PushModuleBlob(sessionID, token string, payload []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.moduleErr != nil {
+		return f.moduleErr
+	}
+	f.moduleTokens = append(f.moduleTokens, token)
+	f.modulePayload = append(f.modulePayload, payload)
+	return nil
+}
+
+// lastModuleBlob 返回最近一次下发的模块帧（token, 负载）。
+func (f *fakePusher) lastModuleBlob() (string, []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.moduleTokens) == 0 {
+		return "", nil
+	}
+	return f.moduleTokens[len(f.moduleTokens)-1], f.modulePayload[len(f.modulePayload)-1]
+}
 
 func (f *fakePusher) count() int {
 	f.mu.Lock()

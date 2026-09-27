@@ -560,3 +560,17 @@ func (l *MQTTListener) startEmbeddedBroker() error {
 	logging.Info("listener", "MQTT embedded broker listening on %s", addr)
 	return nil
 }
+
+// ─── 内存模块二进制下发（v1.4.0 S4）───────────────────────────────────────────
+
+// PushModuleBlob 把模块二进制作为一帧 TypeModuleData 发布到会话主题（MQTT 通道）。
+func (l *MQTTListener) PushModuleBlob(sid, token string, payload []byte) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("empty module blob")
+	}
+	if err := l.sendControl(sid, protocol.TypeModuleData, payload); err != nil {
+		return fmt.Errorf("mqtt push module blob failed: %w", err)
+	}
+	logging.Info("listener", "module blob pushed to session %s (token=%s size=%d)", sid, shortToken(token), len(payload))
+	return nil
+}

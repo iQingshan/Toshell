@@ -33,7 +33,7 @@ func TestBuildTagListNormalizesUnknownProfile(t *testing.T) {
 		{"FULLX", "light"}, // 拼错 → 按最小集
 	}
 	for _, c := range cases {
-		if got := buildTagList("tcp", c.profile, false, false); got != c.want {
+		if got := buildTagList("tcp", c.profile, false, false, false); got != c.want {
 			t.Errorf("buildTagList(tcp,%q) = %q, want %q", c.profile, got, c.want)
 		}
 	}

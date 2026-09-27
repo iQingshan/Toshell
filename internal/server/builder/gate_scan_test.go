@@ -30,17 +30,24 @@ func TestBuildTagList(t *testing.T) {
 		{"mqtt", "full", false, false, "transport_mqtt"},
 	}
 	for _, c := range cases {
-		if got := buildTagList(c.transport, c.profile, c.evasionScan, c.bof); got != c.want {
+		if got := buildTagList(c.transport, c.profile, c.evasionScan, c.bof, false); got != c.want {
 			t.Errorf("buildTagList(%q,%q,%v,%v) = %q, want %q", c.transport, c.profile, c.evasionScan, c.bof, got, c.want)
 		}
 	}
-	// 默认载荷（不勾选任何免杀选项）绝不能带 evasionscan / bof。
-	def := buildTagList("tcp", "full", false, false)
+	// 默认载荷（不勾选任何免杀选项）绝不能带 evasionscan / bof / execmodule。
+	def := buildTagList("tcp", "full", false, false, false)
 	if strings.Contains(def, "evasionscan") {
 		t.Fatal("default build must not include evasionscan")
 	}
 	if strings.Contains(def, "bof") {
 		t.Fatal("default build must not include bof (Beacon API 面默认不进载荷)")
+	}
+	// v1.4.0 S4：exec_module 同样是显式勾选项，默认载荷里不能有这条能力路径。
+	if strings.Contains(def, "execmodule") {
+		t.Fatal("default build must not include execmodule (内存模块能力默认不进载荷)")
+	}
+	if got := buildTagList("tcp", "light", false, false, true); got != "light execmodule" {
+		t.Fatalf("buildTagList(tcp,light,...,execmodule=true) = %q, want %q（light 档也能按需加载模块，这是 S4 的核心价值）", got, "light execmodule")
 	}
 }
 

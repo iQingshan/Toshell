@@ -117,3 +117,42 @@ func withWritable(addr, size uintptr, fn func()) error {
 	fn()
 	return restoreProtect(addr, size, old)
 }
+
+// memRelease = MEM_RELEASE：VirtualFree 整块交还（size 必须为 0）。
+const memRelease = 0x8000
+
+// freeMem 释放 allocRW/allocExec 申请的内存（整块交还，不保留）。
+//
+// 为什么单独抽出来（v1.4.0 S4 exec_module 用到）：模块执行完必须把镜像与手工缓冲
+// 交还进程，否则每执行一次模块就泄漏一份镜像（几 MB），是"跑几次就 OOM"的经典坑。
+// 用 MEM_RELEASE 而不是 MEM_DECOMMIT：这些块本来是给一次性用途的，没有复用价值。
+func freeMem(addr uintptr) error {
+	if addr == 0 {
+		return nil
+	}
+	ok, _, callErr := resolveAPI("kernel32.dll", "VirtualFree").
+		Call(addr, 0, memRelease)
+	if ok == 0 {
+		return fmt.Errorf("VirtualFree(0x%x, MEM_RELEASE) failed: %v", addr, callErr)
+	}
+	return nil
+}
+
+// zeroMemRange 把 [addr, addr+size) 清零（分块写，避免为超大区域构造一个巨型切片头）。
+//
+// ⚠️ 只对**可写**内存调用：镜像的代码页被 protectImageSections 收紧成 RX，
+// 往那里写会直接触发访问违例（进程崩），所以镜像一律不"擦除"、直接 VirtualFree。
+func zeroMemRange(addr, size uintptr) {
+	if addr == 0 || size == 0 {
+		return
+	}
+	const chunk = 4096
+	for off := uintptr(0); off < size; off += chunk {
+		n := size - off
+		if n > chunk {
+			n = chunk
+		}
+		view := (*[chunk]byte)(unsafe.Pointer(addr + off))
+		zeroBytes(view[:n])
+	}
+}

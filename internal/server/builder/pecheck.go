@@ -66,6 +66,9 @@ type PESection struct {
 	VSize           uint32 // VirtualSize：内存中的实际大小
 	RawSize         uint32 // SizeOfRawData：文件中的大小
 	Characteristics uint32 // 节属性（IMAGE_SCN_*）
+	// RawOffset（v1.4.0 S4 追加）：PointerToRawData，RVA → 文件偏移映射用。
+	// 追加字段不影响既有字段的语义，也不改变任何对外行为。
+	RawOffset uint32
 }
 
 // Executable 该节是否可执行（IMAGE_SCN_MEM_EXECUTE）。
@@ -245,6 +248,7 @@ func InspectPE(data []byte) (*PEInfo, error) {
 			VSize:           binary.LittleEndian.Uint32(data[off+8 : off+12]),
 			RVA:             binary.LittleEndian.Uint32(data[off+12 : off+16]),
 			RawSize:         binary.LittleEndian.Uint32(data[off+16 : off+20]),
+			RawOffset:       binary.LittleEndian.Uint32(data[off+20 : off+24]),
 			Characteristics: binary.LittleEndian.Uint32(data[off+36 : off+40]),
 		})
 	}

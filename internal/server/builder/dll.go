@@ -178,7 +178,7 @@ func (b *Builder) compileSharedLibrary(tmpDir, targetOS, arch string, opts Build
 	if transport == "" {
 		transport = transportForProtocol(opts.Protocol)
 	}
-	if extra := buildTagList(transport, opts.Profile, opts.EvasionScan, opts.BofEnabled); extra != "" {
+	if extra := buildTagList(transport, opts.Profile, opts.EvasionScan, opts.BofEnabled, opts.ExecModule); extra != "" {
 		tags = append(tags, strings.Fields(extra)...)
 	}
 	tagArg := strings.Join(tags, " ")

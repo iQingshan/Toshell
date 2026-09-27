@@ -62,6 +62,11 @@ const (
 	FeaturePluginEXE       = "plugin_exe"
 	FeaturePluginDLL       = "plugin_dll"
 	FeaturePluginShellcode = "plugin_shellcode"
+	// FeatureExecModule（v1.4.0 S4）：载荷具备"按需内存加载模块"的能力
+	// （构建时加 -tags execmodule）。它不是"某个面板"，而是"这个载荷可以
+	// 临时获得任何被批准模块的能力"——因此**没有对应的 tabs 键**：
+	// tabs 是前端操作面板的开关，exec_module 是能力扩展通道，多一个空面板只会误导。
+	FeatureExecModule = "exec_module"
 )
 
 // ─── 操作面板（tabs）键名，与 web/src/components/SessionDetail.tsx 的 TABS 对齐 ───
@@ -119,6 +124,8 @@ var bitNames = []string{
 	FeaturePluginEXE,       // 29
 	FeaturePluginDLL,       // 30
 	FeaturePluginShellcode, // 31
+	// 32（v1.4.0 S4 追加）：位序只允许在尾部追加，见上方 bitNames 的警告。
+	FeatureExecModule, // 32
 }
 
 // maxBits 位图容量（uint64）。当前用到 32 位，留一半给后续能力。
@@ -190,6 +197,13 @@ type Input struct {
 	// 是"隐蔽行为"而不是"操作员可见功能"，能力表里没有对应键 —— 显式保留入参，
 	// 避免以后误以为"勾了它就该多一个按钮"。
 	EvasionScan bool
+	// ExecModule：-tags execmodule（v1.4.0 S4 内存模块按需加载）。
+	//
+	// 它点亮 FeatureExecModule —— 语义是"这个载荷能按需加载模块"，而不是
+	// "载荷自带更多功能"。注意**故意不受 light 约束**：exec_module 的整个价值
+	// 就是让最小载荷也能按需拿到全功能（light + execmodule 是推荐组合），
+	// 若还要求 !light，这条路径就永远只在 full 档可用，等于白做。
+	ExecModule bool
 	// OS：windows / linux / darwin…（**空 = 未知**，按最小集处理，不猜 windows ——
 	// builder 会在调用前把空 OS 收敛成它的默认目标 windows，见 capabilityInput）。
 	OS   string
@@ -237,6 +251,12 @@ func Derive(in Input) []string {
 		// 没有 light 约束 → light 档也有。只在 Windows 点亮：指纹库
 		// data/av_fingerprints.json 是 Windows 进程名，别的平台没有可比对的数据。
 		add(FeatureAVDetect)
+		// exec_module（v1.4.0 S4）：实现文件 xload_windows.go 带
+		// `windows && execmodule`，且反射加载底座 blob_windows.go 在 light 档也保留。
+		// 所以判定只需"勾了 execmodule 且目标是 Windows"，与档案无关（见 Input.ExecModule）。
+		if in.ExecModule {
+			add(FeatureExecModule)
+		}
 		if !light {
 			// 以下全部来自带 "windows && !light" 的文件，light 档里只有
 			// features_stub_light.go 的 "未包含在精简构建中" 空实现。

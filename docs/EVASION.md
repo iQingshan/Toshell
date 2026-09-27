@@ -42,10 +42,18 @@
 | 8 条加载器链 + 降级建议 | `internal/server/api/oneliner.go`（`loaderChainVariants` / `LoaderAdvice`）、`docs/LOADERS.md` | ⚠️ 命令生成已实测（含单测 `oneliner_loader_test.go`）；**端到端成功率未验证**（需要自备宿主 exe / 放行环境） |
 | 真 DLL（c-shared，加载即启动、导出名可配） | `internal/server/builder/dll.go`（`sharedGCC` / `compileSharedLibrary` / 胶水生成）；入口拆分 `internal/server/builder/implant/entry_exec.go` + `main.go` 的 `startImplant()` | ✅ **静态实测**：386 DLL `IMAGE_FILE_DLL=true` + 导出表含 `Start` / 自定义 `GetFileVersionInfoW`；**未验证**运行加载是否上线 |
 | PE 头解析 + 内存执行预检（`fileless-exec` 下发前） | `internal/server/builder/pecheck.go`（接线 `internal/server/api/handlers_fileless.go`，`CheckMemoryExec` / `DetectGoBinary`） | ✅ **静态实测**（`pecheck_test.go`）：Go 载荷、架构不符、带 CLR 目录 → 拒绝；TLS 回调 / 无重定位表 / DLL 误用 `exe_mem` → 警告。**未验证**目标机上的实际加载行为 |
-| 一份模板两处镜像（发布包不漏模板） | `internal/server/builder/implant/` ↔ `release/implant/` | ✅ 逐文件比对：两份目录各 61 个文件，**文件名集合与 SHA-256 全部相同**（含 `sleepmask_*`、`memprotect_*`、`main.go`、`gate_scan_*`） |
+| 内存模块按需加载（`exec_module`，v1.4.0） | ABI/清单 `internal/common/moduleabi`、`internal/server/modules`；端点 `internal/server/api/handlers_modules.go`；植入端 `internal/server/builder/implant/xload_windows.go`（门控 `//go:build windows && execmodule`）+ 既有反射加载底座 `blob_windows.go` | ✅ **真机实测**（TCP，21/21 E2E）：模块构建 → 登记 → 9 步校验链 → 二进制帧下发 → 反射映射执行 → 结果回传 → token 复用/未登记/哈希不符/架构不符四条失败路径均被拒。**未验证**：HTTP/WS/MQTT 三通道的下行（已接线、编译通过）；目标机上是否触发 AV 的内存扫描 |
+| 一份模板两处镜像（发布包不漏模板） | `internal/server/builder/implant/` ↔ `release/implant/` | ✅ 逐文件比对：两份目录各 63 个文件，**文件名集合与 SHA-256 全部相同**（含 `sleepmask_*`、`memprotect_*`、`xload_*`、`main.go`、`gate_scan_*`） |
 
 > **如实说明（避免误读）**：`pecheck.go` 只做 **PE 头解析**（machine / 是否 DLL / TLS 目录 / CLR 目录 / 重定位表 / 节表属性），
 > 它**不判定 W^X**；"绝不请求 RWX"的实现在植入端 `memprotect_windows.go`（见 2.2）。两者不是同一件事，不要混着引用。
+
+**内存模块（`exec_module`）的免杀姿态 —— 它改变了什么、没改变什么**：
+
+- **落地面（delivery）**：模块字节**走的是既有加密 C2 通道**（与任务同一条连接、同一套 SM4 隧道密钥），目标机上**不落盘**、不进任务表、不留下载缓存；模块自身只存在于操作员服务端的 `data/modules/`。这条改善的是"工具二进制要不要落到被监控的机器上"，不是"载荷本身好不好看"。
+- **动态面（evasion）**：模块与载荷**同进程**执行，走的是既有反射映射底座（`blob_windows.go`：RW 申请 → 写字节 → RX 执行，全程无 RWX，见 2.2）。**不新增任何可疑 API 序列**（不 `LoadLibrary`、不 `CreateRemoteThread`、不注册 TLS）；代价是模块崩溃会带走宿主进程，所以服务端在**下发之前**就硬拒会导致崩溃的组合（Go 模块 / CLR / TLS 目录 / 架构不符）——这属于"别把能崩的东西发出去"，不是免杀。
+- **静态面（footprint）**：模块的容器代码（分发点 + 反射加载调用）在载荷里**是明文特征**，因此把它做成两件事：① 用 `-tags execmodule` 门控，默认载荷根本不含（默认构建只 +512 B 的分发点，给出"未包含在本次构建中"的明确错误）；② 模板里的模块导出名/任务类型串**照旧走字符串混淆**，并把文件名/函数名中性化（`xload_windows.go` / `handleXLoad` / `handleXData`）——实测 pclntab 内模块相关残留 **1 处 → 0 处**。
+- **没改变什么（别过度承诺）**：模块**自身的字符串是明文**（它是给宿主进程读的裸 PE，没有第二层混淆）；反射映射**不擦模块自身在内存中的镜像**（执行完清零释放的是宿主侧暂存缓冲与 token，模块映射区的清理取决于模块自己）；也**不做**模块级别的 syscall 直连/ETW 绕过 —— 这些仍属 2.2/2.3 的载荷级手段。
 
 ### 2.2 动态免杀 evasion
 

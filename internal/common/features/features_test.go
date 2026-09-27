@@ -376,3 +376,65 @@ func TestResolve(t *testing.T) {
 		t.Errorf("未知 OS 兜底应沿用旧口径：src=%q tabs=%v", srcU, tabsUnknown)
 	}
 }
+
+// ─── v1.4.0 S4：exec_module 能力位 ──────────────────────────────────────────
+//
+// 这条能力位与其它位的语义差别很大，必须单独钉住：
+//   - 它是"载荷能按需获得别的能力"的元能力，**不受 light 约束**（light+execmodule
+//     正是推荐组合：一份最小载荷按需拿到全功能）；
+//   - 它只由 -tags execmodule 决定，默认构建必须没有它（否则默认载荷的能力面就变了）；
+//   - 它在尾部第 32 位（前 32 位是已冻结的 v1 顺序，不能被挤动）；
+//   - **没有对应 tabs 键**：它不是面板而是能力通道，多一个空面板只会误导操作员。
+func TestExecModuleCapabilityBit(t *testing.T) {
+	if idx := bitIndex(FeatureExecModule); idx != 32 {
+		t.Fatalf("exec_module 应在位序 32（尾部追加），实际 %d", idx)
+	}
+	// 位图只在第 32 位上有差别。
+	mask := Bitmask([]string{FeatureExecModule})
+	if mask != 1<<32 {
+		t.Fatalf("exec_module 位图 = 0x%016X, want 0x%016X", mask, uint64(1)<<32)
+	}
+
+	// 默认构建（不带 execmodule）绝不出现该位 —— 这正是"默认行为不变"的可断言形式。
+	for _, profile := range []string{"light", "full", ""} {
+		f := Derive(Input{Profile: profile, OS: "windows", Arch: "386"})
+		for _, name := range f {
+			if name == FeatureExecModule {
+				t.Fatalf("profile=%q 未勾选 execmodule 却点亮了 %s", profile, FeatureExecModule)
+			}
+		}
+	}
+	// light + execmodule：必须有（这是 S4 的核心价值）。
+	light := Derive(Input{Profile: "light", OS: "windows", Arch: "386", ExecModule: true})
+	if !contains(light, FeatureExecModule) {
+		t.Fatalf("light+execmodule 必须点亮 exec_module：%v", light)
+	}
+	// 非 Windows 目标：内存模块只有 Windows 实现 → 不点亮（fail-closed）。
+	lin := Derive(Input{Profile: "full", OS: "linux", Arch: "amd64", ExecModule: true})
+	if contains(lin, FeatureExecModule) {
+		t.Fatalf("非 Windows 目标不该点亮 exec_module：%v", lin)
+	}
+	// 令牌往返（烘焙/上报路径）
+	tok := EncodeToken(Input{Profile: "light", OS: "windows", Arch: "386", ExecModule: true})
+	decoded, ok := ParseToken(tok)
+	if !ok {
+		t.Fatalf("令牌不可解析：%s", tok)
+	}
+	if !contains(Decode(decoded), FeatureExecModule) {
+		t.Fatalf("令牌解码后没有 exec_module：%s -> %v", tok, Decode(decoded))
+	}
+	// 不是面板：tabs 里不该出现任何与它相关的新键（tabs 只有既有的 13 个键）。
+	tabs := Tabs([]string{FeatureExecModule})
+	if len(tabs) != 0 {
+		t.Fatalf("exec_module 不应点亮任何 tabs（它不是操作面板）：%v", tabs)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

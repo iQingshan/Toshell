@@ -36,7 +36,7 @@
 | **S1** | 开放 MCP 服务接口 + 公共执行基础设施 | 工具注册表单源化、统一结果信封与外置句柄、MCP 协议层（stdio/HTTP）、三档分级与审批门、审计 | 新建（同时是 S2 的地基） |
 | **S2** | 内置 Agent：长任务可靠性 | 异步任务状态机 + 状态落盘 + 断线恢复、长结果外置与回读、上下文分层预算、三处硬上限、审批分级、trace 回放 | **P1 全部** |
 | **S3** | 免杀：分层治理（落地 / 动态 / 静态） | 验收环境与分层判定矩阵、签名链路与顺序约束、落地链（白加黑 / 不落 PE）、动态批次 2、静态降特征 | **P0-5 待做 1/2/5/6** |
-| **S4** | 植入端体积分档与内存加载 | 能力位图（前置）、nano/light/full 分档与构建命令、内存模块 build tag 化、`exec_module` 契约与 ABI、工具库远程加载 | **P0-5 待做 3/4 + P2 全部** |
+| **S4** | 植入端体积分档与内存加载 | ✅ 能力位图（前置）、✅ `exec_module` 契约与 ABI + 一次性 token + 9 步校验链、维度实测矩阵；剩余：传输栈模块化（最大杠杆）、nano 载体决策、工具库远程加载 | **P0-5 待做 3/4 + P2 全部** |
 | **S5** | 新增低特征通道 | WS 补域前置/拟态/uTLS（零新库）、首个新通道端到端、多通道热切换 | 新建 |
 | **S6** | 杀软对抗能力分级 + 工程收尾 | AV-L0 侦察 / AV-L1 温和、驱动选路与清场、内存执行加固、屏幕流跨平台、e2e 接 CI、可观测性、服务端在线更新 | **P0-1 / P0-2 / P0-3 / P0-4 + P3 全部** |
 
@@ -93,7 +93,11 @@
     | V7 full / mqtt | 5,921,526 | +3,026,433 | 最重组合 |
   - **判读（决定后续优先级）**：① 体积大头是**传输栈**（http/ws/mqtt 各 +2.1~2.5 MB），比所有功能 tag 加起来（+0.57 MB）还大一个量级 —— 要小就核心走极简 socket，重型传输按需模块化；② light/tcp 的 2.90 MB 里，2.01 MB 是**核心标准库地板**（`net`+`json`+`fmt`；nano 目标本身就低于地板），我们的代码只占约 0.89 MB；③ 因此 **`light` ≤2.4 MB 只能靠 stdlib 瘦身**（手写 JSON/精简 fmt、避开 `crypto/tls`），`nano` ≤1.8 MB 在 Go 里**做不到**，要用 C 植入端或换收发层。
 - **内存模块 build tag 化**：`injection / edr / stomp / imgexec` 等按需裁剪（P0-5 待做 3）。✅ 现有 `light` 档已裁掉注入/EDR/凭据/BYOVD/截图/插件/中继（实测 full−light = 573 KB，见上表 V6）。
-- **`exec_module` 契约与 ABI**：复用已有反射式加载底座（`blob_windows.go` 在 light 档也保留、全程无 RWX），补 `tsh_module_ctx` + `tsh_module_main` ABI（现有导出是**零参调用**，拿不到参数/返回值）；传输走一次性 token（取代"内联 base64 塞任务"）；9 步校验链（sha256 硬拦 + 复用 `pecheck.go`）。
+- ✅ **`exec_module` 契约与 ABI（v1.4.0 已完成）**：新增 `internal/common/moduleabi`（ABI v1 + C 头 `builder/implant_c/module/tsh_module.h`，三份副本由单测钉住）+ `internal/server/modules`（清单/sha256 硬拦/一次性 token）+ 接口 `POST|GET /api/v1/sessions/{id}/module` + 二进制帧 `TypeModuleData(0x0E)`。模块**只接受原生 C PE**（Go/CLR/TLS 目录硬拒 —— 反射映射宿主里跑 Go 模块会出两个 runtime），`tsh_module_main(ctx*)` 拿得到参数与返回值（ctx 只用 ≤4 字节标量，386 用 `__stdcall`）。9 步校验链全部返回机器可读 code + 中文文案：会话 active / 已登记 / **sha256 与大小硬拦** / 架构与 PE 实际位宽一致 / ABI 导出存在（新增 `builder.ExportedNames`）/ 三层版本握手 / token（绑定 session+module+sha256+size+abi、TTL 120s、用后即废） / 下发 fail-closed / 审计。能力位只追加第 32 位、**不加空面板**，默认载荷零行为变化（无 tag 时 +512 B，给出"未包含在本次构建中"明确错误而非 `Unknown task type`）。
+  - **实测**（windows/386，同参数）：light/tcp 2,895,605 → light+execmodule 2,921,717（门控 **+26,112**）；示例模块 `cred_probe`（C + `-nostdlib`）**7,680 字节**，把 `credentials` 搬成模块可省 **67,584**。**判读**：`exec_module` 买到的是"最小载荷 + 按需全功能 + 模块可服务端更新"，**不是**体积数量级下降 —— 真正的数量级在传输栈（见上表）。
+  - **模板文件名/函数名中性化**：`exec_module_windows.go`/桩 → `xload_windows.go`/`xload_stub.go`，`handleXLoad`/`handleXData`；E2E 复测 pclntab 内模块相关残留 **1 处 → 0 处**。
+- **传输栈瘦身与模块化（当前最大杠杆，未做）**：实测 http/ws/mqtt 各 **+2.1~2.5 MB**（V3/V4/V5），比全部功能 tag 之和（+573 KB）大一个数量级。方向：核心只留极简 socket（tcp + 轮询），`net/http`+`crypto/tls`、websocket、mqtt 各自按 tag 编；`http` 若必须保留则评估 uTLS/自实现最小 TLS 客户端。
+- **`nano` 档（≤1.8 MB，Go 做不到）**：核心标准库地板已 2.01 MB（V0 表），nano 只能走 **C 植入端**或手写收发层/精简 `fmt`+JSON。等传输栈模块化后重新测量再决定 nano 的实现载体。
 - **工具库与远程加载（P2）**：`data/tools/<os>/<arch>/` + `manifest.json`（sha256/来源/许可），预置自研脚本、第三方按需下载校验；内网探测 / 横向 / 凭据利用 / 规避载荷全部**远程加载**，植入端体积不随能力增长。
 - **验收**：各档体积落到目标区间（构建机实测）；`light` 载荷在界面上不再显示未编译能力；远程模块能完成「下载→校验→内存加载→执行→回传→清理」闭环，哈希不符即拒绝。
 

@@ -295,6 +295,11 @@ func dispatchDown(p *Packet) {
 			}
 			httpSendFrame(rp)
 		}
+	case TypeModuleData:
+		// v1.4.0 S4：内存模块二进制帧。HTTP 轮询通道里它随心跳响应的 down 列表到达，
+		// 而任务在同一次响应里（down 先于 tasks 处理，见 httpPollRun），因此任务执行时
+		// 二进制通常已经在暂存表里。
+		handleXData(p)
 	}
 }
 

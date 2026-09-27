@@ -79,6 +79,8 @@ jobs:
         #   task   ：v1.4.0 S2 新增的任务终结通知原语（订阅/等待/超时/消失/等待者不泄漏）
         #            —— 事件驱动等待的地基，漏进 CI 等于没人守
         #   listener：v1.4.0 S4 新增的心跳能力位落库（心跳 Modules → 会话 ActiveModules）
+        #   modules：v1.4.0 S4 内存模块的清单解析/哈希硬校验/架构归一/一次性 token 生命周期
+        #            （纯逻辑 + 临时目录，Linux runner 可跑；模块字节的 PE 校验在 builder 包）
         # 这些测试用桩函数替代 WinVerifyTrust、用假 Executor 替代真实会话，Linux runner 可跑。
         run: |
           go test ./internal/common/... ./internal/server/config/... \
@@ -87,4 +89,5 @@ jobs:
                   ./internal/server/agentstore/... ./internal/server/api/... \
                   ./internal/server/auth/... ./internal/server/session/... \
                   ./internal/server/webhook/... ./internal/server/avdetect/... \
-                  ./internal/server/task/... ./internal/server/listener/...
+                  ./internal/server/task/... ./internal/server/listener/... \
+                  ./internal/server/modules/...
