@@ -535,7 +535,7 @@ func LoaderAdvice(targetOS, format string, signed bool) (title string, tips []st
 				}
 			}
 			return "Windows shellcode 载荷：只走内存加载链（不落地未签名 PE）", []string{
-				"在装有 360 安全卫士/腾讯电脑管的机器上，未签名 PE 一落地执行就会被拒绝并删除，所以不要为了「先跑起来」把 shellcode 还原成 exe 再落地。",
+				"在装有 360 安全卫士/腾讯电脑管的机器上，未签名 PE 一落地执行就会被拒绝并删除，所以只走内存加载：不要为了「先跑起来」把 shellcode 还原成 exe 再落地。",
 				"首选：powershell -enc 拉取 shellcode 并注入当前 powershell.exe（微软签名进程），磁盘上不出现 PE。",
 				"下载物是 hex 文本（shellcode 格式）或原始字节（shellcode_bin），注入脚本要按对应形式解码，别直接当字节用。",
 				"需要拆开「出网进程」与「注入进程」时用 mshta 骨架：mshta 出网拉 hex，签名 powershell 负责注入。",

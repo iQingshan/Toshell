@@ -73,9 +73,14 @@ jobs:
         #   ai     ：Agent 工具面必须都能在注册表里找到；审批判定 fail-closed（含 delegate 越权回归）
         #   agentstore：长任务状态落盘（4 张表的 CRUD、step 恢复游标与幂等、tool_call 幂等、
         #            结果 TTL 清理、同参重复计数）—— 用临时 sqlite，Linux runner 可跑
+        #   api/auth/session/webhook/avdetect：加载器链与落地建议文案、命令编码/解码、鉴权闸、
+        #            会话广播、AV 识别等纯逻辑与 httptest（v1.4.0 起纳入 —— 此前 api 包不在
+        #            CI 范围内，本机又被杀软拦着跑不了，结果 4 个用例红了很久没人发现）
         # 这些测试用桩函数替代 WinVerifyTrust、用假 Executor 替代真实会话，Linux runner 可跑。
         run: |
           go test ./internal/common/... ./internal/server/config/... \
                   ./internal/server/builder/... ./internal/server/drivers/... \
                   ./internal/server/mcp/... ./internal/server/ai/... \
-                  ./internal/server/agentstore/...
+                  ./internal/server/agentstore/... ./internal/server/api/... \
+                  ./internal/server/auth/... ./internal/server/session/... \
+                  ./internal/server/webhook/... ./internal/server/avdetect/...

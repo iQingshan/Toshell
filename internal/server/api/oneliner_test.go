@@ -153,21 +153,46 @@ func TestOneLinerVariants(t *testing.T) {
 
 // decodeEncCommand 解开 powershell -enc 的内层脚本，便于断言命令内容；
 // 非 -enc 命令原样返回。
+//
+// 一条命令里可能出现多个 `-enc `，其中部分是**模板占位符**（例如 mshta 骨架里的
+// `powershell -w hidden -nop -enc <注入器Base64>`，由操作员手工填入），对占位符做
+// Base64 解码必然失败。所以这里从头扫描所有 `-enc ` 出现位置，只对**能成功解码成
+// UTF-16LE 文本**的片段做展开，一个都没有时原样返回（保持"扫原文"的语义）。
 func decodeEncCommand(t *testing.T, cmd string) string {
 	t.Helper()
-	idx := strings.LastIndex(cmd, "-enc ")
-	if idx < 0 {
+	var out strings.Builder
+	rest := cmd
+	decodedAny := false
+	for {
+		idx := strings.Index(rest, "-enc ")
+		if idx < 0 {
+			out.WriteString(rest)
+			break
+		}
+		out.WriteString(rest[:idx+len("-enc ")])
+		rest = rest[idx+len("-enc "):]
+		// 取到下一个空白/引号/分号为止的候选串（Base64 里不会出现这些字符）
+		end := strings.IndexAny(rest, " \"';\n\r\t)")
+		cand := rest
+		if end >= 0 {
+			cand = rest[:end]
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cand))
+		if err != nil || len(raw) < 2 || len(raw)%2 != 0 {
+			continue // 占位符/非 Base64：保留原文，继续往后找
+		}
+		u16 := make([]uint16, 0, len(raw)/2)
+		for i := 0; i+1 < len(raw); i += 2 {
+			u16 = append(u16, uint16(raw[i])|uint16(raw[i+1])<<8)
+		}
+		out.WriteString(string(utf16.Decode(u16)))
+		rest = rest[len(cand):]
+		decodedAny = true
+	}
+	if !decodedAny {
 		return cmd
 	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cmd[idx+len("-enc "):]))
-	if err != nil {
-		t.Fatalf("decode -enc payload: %v", err)
-	}
-	u16 := make([]uint16, 0, len(raw)/2)
-	for i := 0; i+1 < len(raw); i += 2 {
-		u16 = append(u16, uint16(raw[i])|uint16(raw[i+1])<<8)
-	}
-	return string(utf16.Decode(u16))
+	return out.String()
 }
 
 func TestSupportsOneLiner(t *testing.T) {

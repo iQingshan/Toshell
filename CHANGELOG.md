@@ -42,7 +42,12 @@
   - `max_turns=3` 时 3 次工具调用后停止，`stop_reason=max_turns`，最终回复给出"已达轮次上限（3 轮，实际 3 轮）"——顺带修掉收尾统计漏传 `Turns` 导致恒显示"实际 0 轮"的 bug。
   - 同一只读工具（`session_list`）重复调用 3 次**不**触发防死循环（豁免生效）；同一 confirm 级工具（`user_info`）同参数：第 1 次执行、第 2 次执行并追加 `loop_warn` 提示、**第 3 次在调用前停止**，`stop_reason=loop_detected`，timeline 里记明是哪只工具与参数。
   - `consent_policy=graded` 下 confirm 级工具在**执行前**挂起（`status/stop_reason=awaiting_consent`，`traces=0`，未下发命令），deny 后恢复并记录"已跳过"轨迹；`off` 下不再询问。
-- **仍未做**（S2 剩余）：异步任务状态机（工具调用改成"提交 → 句柄 → 事件驱动恢复"）、长结果外置接入（把 `truncate(out, 4000)` 换成信封 + `tool_results` 句柄）、上下文四层与 token 预算、SSE `id`/`Last-Event-ID` 断点续传、评估门禁。单测（`limits_test.go`/`consent_test.go`/`store_test.go`）在本机被 360 拦截未能执行（编译成功、执行 `Access is denied`），将由 CI 覆盖。
+- **工程质量（本机杀软关闭后首次跑全量单测暴露出来的问题，已修）**：
+  - `agentstore` 的 6 个用例本身全绿，但在 Windows 上因**临时 sqlite 没关**导致 `t.TempDir` 清理失败（`unlinkat ... being used by another process`），整体判 FAIL；`newTestStore`/`TestMaxTaskID`/`TestSchemaCreatesAgentTables` 全部补 `t.Cleanup(Close)`。
+  - `internal/server/api` 有 **4 个用例长期红着却没人发现**：`TestLoaderChainVariantsCoverage`/`TestLoaderChainHasNoBundledThirdParty` 挂在测试助手 `decodeEncCommand` 上——它取**最后一个** `-enc ` 去 Base64 解码，而 mshta 骨架里是 `-enc <注入器Base64>` 这种**占位符**，必然解码失败；改为扫描全部 `-enc ` 片段、只展开能成功解码的，占位符原样保留。`TestLoaderAdvice/windows_shellcode_未签名` 要求 tips 里出现"内存加载"，而文案写的是"注入当前 powershell.exe"，已把该条改成明确说"只走内存加载"（与项目既有词汇一致）。
+  - **CI 测试范围补上 `api`/`auth`/`session`/`webhook`/`avdetect`**：此前 `./internal/server/api/...` 根本不在 CI 里，而本机又被杀软拦着跑不了 → 上面 4 个红灯得以"存活"很久。这类"没人跑"的包从此纳入门禁。
+- **本地单测门禁恢复**：关闭 360 后本机可执行测试 PE，`go test ./...` 已跑通（除本轮在做的 S2 增量外全绿）：`common/crypto`、`server/{agentstore,auth,avdetect,builder,config,drivers,mcp,session,webhook}` 全 ok。
+- **仍未做**（S2 剩余）：异步任务状态机（工具调用改成"提交 → 句柄 → 事件驱动恢复"）、上下文四层与 token 预算、SSE `id`/`Last-Event-ID` 断点续传、评估门禁（长结果外置 + 句柄回读见下条增量）。
 
 ### 🥷 S3 免杀：分层治理（落地 / 动态 / 静态）
 - （待填）

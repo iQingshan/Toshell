@@ -9,6 +9,9 @@ import (
 
 // newTestStore 用真实 schema（database.AgentSchemaStatements）建一个临时库。
 // 这样测试同时验证了 DDL 本身可用——schema 只有一处定义，不会与生产漂移。
+//
+// 必须在 t.Cleanup 里关库：Windows 上 SQLite 文件被占用时 `t.TempDir` 的 RemoveAll
+// 会失败，测试用例本身全绿却报 `unlinkat ... being used by another process` 而整体 FAIL。
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "agentstore.db")
@@ -16,6 +19,7 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("database.New: %v", err)
 	}
+	t.Cleanup(func() { _ = d.Close() })
 	s, err := New(d.SQL())
 	if err != nil {
 		t.Fatalf("agentstore.New: %v", err)
@@ -29,6 +33,7 @@ func TestSchemaCreatesAgentTables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("database.New: %v", err)
 	}
+	t.Cleanup(func() { _ = d.Close() })
 	want := []string{"agent_runs", "agent_steps", "agent_tool_calls", "tool_results"}
 	for _, tbl := range want {
 		var name string
@@ -38,9 +43,11 @@ func TestSchemaCreatesAgentTables(t *testing.T) {
 		}
 	}
 	// 幂等：对同一个库再初始化一次不应报错（老库升级路径，全部 IF NOT EXISTS）
-	if _, err := database.New("sqlite", dbPath); err != nil {
+	d2, err := database.New("sqlite", dbPath)
+	if err != nil {
 		t.Fatalf("重复初始化应幂等（老库升级路径）: %v", err)
 	}
+	_ = d2.Close() // 同上：不关会挡住 t.TempDir 的清理
 }
 
 func TestRunLifecycleAndResume(t *testing.T) {
@@ -274,6 +281,7 @@ func TestMaxTaskID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("database.New: %v", err)
 	}
+	t.Cleanup(func() { _ = d.Close() })
 	s, _ := New(d.SQL())
 	if n, err := s.MaxTaskID(); err != nil || n != 0 {
 		t.Fatalf("空表 MaxTaskID = %d err=%v, want 0", n, err)
