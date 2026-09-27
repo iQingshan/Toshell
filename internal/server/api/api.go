@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 	"toshell/internal/common/tunnel"
 	"toshell/internal/common/types"
+	"toshell/internal/server/agentstore"
 	"toshell/internal/server/ai"
 	"toshell/internal/server/auth"
 	"toshell/internal/server/builder"
@@ -167,6 +168,23 @@ type Server struct {
 	// mcp.enabled=false，但内置 Agent 同样会产生截图/systeminfo 这类超长结果，必须在
 	// 上下文里换成"摘要 + 句柄"而不是被字符串硬截断。nil = 目录不可用（退化为显式截断）。
 	agentResults *mcp.ResultStore
+
+	// taskWait 任务终结通知源（v1.4.0 S2）：默认就是 taskMgr。
+	//
+	// 单独留一个字段而不是直接用 taskMgr，是为了让"等任务终结 / 长任务挂起 / 重启恢复"
+	// 这套编排能被单测覆盖——测试注入一个假的任务源即可，不需要真实植入端与真实任务表。
+	taskWait agentTaskSource
+
+	// agentStore Agent 长任务状态的持久化层（agent_runs/agent_steps/agent_tool_calls）。
+	// nil = 无数据库（长任务仍能挂起/恢复，只是不具备跨重启恢复与幂等保证）。
+	agentStore *agentstore.Store
+
+	// resumeRun 恢复一个挂起 run 的执行入口（默认 = resumeAgentAsync）。
+	// 同样是为可测性留的缝：恢复编排只负责"分类 + 落库 + 订阅"，执行交给它。
+	resumeRun func(*ai.AgentRun)
+
+	// agentTasks 长任务挂起/恢复桥（内部任务完成 → 唤醒对应 run）。
+	agentTasks *agentTaskBridge
 }
 
 // SetOnConfigApplied 注册配置热应用回调（设置 API 保存后触发）。
@@ -200,6 +218,15 @@ func New(cfg *config.Config, sessMgr *session.Manager, taskMgr *task.Manager) *S
 	server.startResultGC()
 	// 异步自主 Agent 运行时：并发上限由 config.AI.AgentConcurrency 决定（默认 2）
 	server.agentMgr = ai.NewAgentManager(cfg.AI.AgentConcurrency)
+	// 任务终结通知源（等待/挂起/恢复共用；测试可替换）
+	server.taskWait = taskMgr
+	// 长任务挂起/恢复桥（v1.4.0 S2）：把"内部任务完成通知"接到"恢复对应 run"上
+	server.agentTasks = newAgentTaskBridge(server)
+	// 恢复 run 的默认执行入口（与审批恢复同一条路径）
+	server.resumeRun = server.resumeAgentAsync
+	// 把长任务通道注入 Copilot：循环里遇到"预估耗时 ≥ 阈值"的工具即改为
+	// 「提交 → 挂起 → 释放并发槽位」，由任务完成事件驱动恢复。
+	server.applyLongTaskExecutor(server.copilot)
 	// 剧本化执行引擎：executor 同样复用 Server 的 invokeTool（MCP 工具面）
 	server.playbookR = ai.NewPlaybookRunner(server)
 	// 剧本完成后自动生成 AI 总结建议（复用副驾驶 LLM，未配置则跳过）

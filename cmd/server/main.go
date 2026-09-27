@@ -292,6 +292,14 @@ func NewServer(cfgPath string) (*Server, error) {
 		apiServer.SetAgentStore(agentStore)
 	}
 
+	// 重启恢复（v1.4.0 S2）：进程上次退出时若有 run 停在「等待任务」态（长任务挂起），
+	// 这里按 internal_task_id 对齐 tasks 表：任务已完成→接回结果继续；仍在跑→重新订阅；
+	// 任务已丢失→给 run 明确终态与中文说明（绝不静默卡在等待态）。
+	// 放在 SetAgentStore 之后：恢复要用到 agentstore 的 run/step/tool_call CRUD。
+	if agentStore != nil {
+		apiServer.StartAgentTaskRecovery()
+	}
+
 	// 注入嵌入式前端文件系统（单二进制部署时嵌入 web/dist）。
 	// embed.FS 与 http.FileServer 存在路径规范化冲突：FileServer 传入以 "/" 开头的路径，
 	// 而 http.FS(embed.FS) 内部会做 fs.ValidPath 校验（要求不以 "/" 开头），

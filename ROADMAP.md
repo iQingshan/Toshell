@@ -57,7 +57,7 @@
   - 顺带确认：`ai` 事件通道**已是 8192**（无需再改），SSE 满通道丢弃策略仍待改成"可续传"。
 - **已在真实服务端 + mock LLM 上跑通的循环行为**（不依赖任何真实模型/植入端）：`max_turns` 触发即停且提示里带真实轮次；同一 confirm 级工具同参数第 3 次**在调用前**停止并记 `loop_detected`（只读工具重复不误杀）；`graded` 下 confirm 级工具执行前挂起（`status/stop_reason=awaiting_consent`，未下发命令），deny 后恢复并留"已跳过"轨迹。
 - 待做（按依赖顺序）：
-  1. **异步任务状态机**：工具调用改成「提交 → 立即返回句柄 → 由事件/轮询驱动恢复」，禁止在调用线程 sleep 轮询（现状 `pushAndAwait` 就是 sleep 500ms 轮询到超时）；恢复时按 `agent_tool_calls` 的 `internal_task_id` 对齐 `tasks` 表。
+  1. ✅ **异步任务状态机**（已完成）：`task.Manager` 增加终结通知原语（`Subscribe`/`WaitSettled`，注册与状态判定同锁防丢通知、等待者摘除不泄漏），`pushAndAwait`/`task_wait`/`execAndAwait`/剧本 `waitForTask` 全部改为**事件驱动等待**（不再 sleep 轮询，对外契约逐字段不变）；Agent 侧对预估超时 ≥ `ai.long_task_threshold_sec`（默认 150s）的工具改为「提交 → `awaiting_task` 挂起并落库 `waiting_on` → **释放并发槽位** → 任务完成通知唤醒 → 结果接回 → 重入循环」；启动时对账 `agent_runs` 与 `tasks`（已完成→接回、仍在跑→重新订阅、丢失→明确终态 `task_lost`），顺带修掉"重启前下发的任务结果永远丢失"。**收益有专门用例**（并发上限 1 时挂起后槽位可再获取）。剩余：`tasks.output` 截断 500 字节限制了重启恢复的结果长度；挂起会重置 `max_wallclock`/`max_turns` 预算（应接入 `agent_runs` 用量字段）。
   2. ✅ **长结果外置 + 句柄内联 + 分页回读**（已完成，设计见 `docs/AGENT-RESULT-OFFLOAD.md`）：唯一转换点 `mcp.InlineForModel`（≤8 KiB 原文；超限只给"摘要 + 句柄 + 显式截断说明"的合法 JSON 信封；外置失败则给预览 + 说明）；`result_read` 从"只在注册表里"补成真实现并加入 Agent 工具面（slice/tail + 游标，页大小自适应收缩）；删掉 8 处字符串硬截断，顺带修掉"截图 base64 被切成非法 JSON"（根因在服务端，植入端未改）与"integer 工具参数被静默丢弃"（回读翻不动页的真因）。
   3. **上下文分层与 token 预算**：常驻 / 任务 / 工作 / 历史四层，压缩优先于扩窗，稳定前缀做缓存。
   4. ✅ **控制循环三处硬上限 + 防死循环**（已完成）：`ai.max_turns=20`（统一）、`ai.max_tool_calls=40`、`ai.max_wallclock_sec=900`，触发即停并记 `stop_reason`；同工具同参数签名第 2 次提示换策略、第 3 次判 `loop_detected`（只读工具豁免）。判定逻辑为纯函数（`shouldStopRun`/`loopSignature`），有单测。

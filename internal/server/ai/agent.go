@@ -34,6 +34,10 @@ const (
 	// 单独发一条而不是塞进 thinking/message：那两个事件的 data 是**字符串**，
 	// 加字段会变成对象，老前端解析会退化；独立事件名老前端不认识会直接忽略。
 	AgentEventTrace AgentEventKind = "trace"
+	// AgentEventTaskWait run 因等待内部任务（长任务）结果而挂起（v1.4.0 S2 新增）。
+	// 老前端不认识该事件名会走 SSE 默认分支忽略；新前端可据此显示"等待任务 #N 结果"
+	// 而不是把"没有事件"误当成卡死。run 的 status 也会同时变成 awaiting_task。
+	AgentEventTaskWait AgentEventKind = "task_wait"
 )
 
 // AgentEvent 一次 Agent 事件。
@@ -69,6 +73,18 @@ type DoneInfo struct {
 	StopReason string `json:"stop_reason,omitempty"`
 }
 
+// TaskWaitInfo 事件 kind=task_wait 的载荷（v1.4.0 S2 新增）：
+// run 已释放并发槽位、正在等某个内部任务的结果；任务完成时会被自动唤醒恢复。
+type TaskWaitInfo struct {
+	RunID         string `json:"run_id"`
+	TaskID        uint64 `json:"task_id"`
+	Tool          string `json:"tool"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+	TimeoutSec    int    `json:"timeout_sec,omitempty"`
+	Status        string `json:"status"` // awaiting_task
+	TraceID       string `json:"trace_id,omitempty"`
+}
+
 // ToolStart 工具开始执行事件。
 type ToolStart struct {
 	Name string            `json:"name"`
@@ -102,6 +118,12 @@ const (
 	AgentDone        AgentStatus = "done"
 	AgentError       AgentStatus = "error"
 	AgentWaitConsent AgentStatus = "awaiting_consent"
+	// AgentWaitTask 等待内部任务（长任务）结果（v1.4.0 S2 新增）。
+	//
+	// 与 AgentWaitConsent 一样是**非终态**：run 的循环已退出（并发槽位已释放），
+	// 由"任务完成通知"驱动恢复。命名刻意与 agentstore.RunAwaitingTask 对齐——
+	// 同一个状态在内存与库里的字符串必须是同一个，否则恢复扫描对不上。
+	AgentWaitTask AgentStatus = "awaiting_task"
 )
 
 // RunEvent run 的结构化时间线事件（供前端展示 goal→step→tool→result 及失败原因）。
@@ -146,6 +168,11 @@ type AgentRun struct {
 	// StopReason 循环停止原因（v1.4.0 S2 新增）：
 	// max_turns / max_tool_calls / max_wallclock / loop_detected，空=正常产出最终答复。
 	StopReason string `json:"stop_reason,omitempty"`
+	// WaitingOn 当前挂起在等什么（v1.4.0 S2 新增，JSON 字符串；空闲为空串）。
+	// 语义与 agentstore.Run.WaitingOn 一致（kind=consent 或 kind=task），
+	// 由持久化层构造、执行层透传，保证内存与库里是同一份描述。
+	// GET /api/v1/agent/runs/{id} 会回传它：新等待态必须"看得见"。
+	WaitingOn string `json:"waiting_on,omitempty"`
 
 	// events 缓冲事件通道（有缓冲，避免阻塞循环）。
 	events chan AgentEvent
@@ -155,6 +182,11 @@ type AgentRun struct {
 	cancel context.CancelFunc
 	// Pending 待审批（awaiting_consent 时的挂起状态）。
 	Pending *pendingState `json:"-"`
+	// PendingTask 长任务挂起状态（awaiting_task 时非 nil）。
+	PendingTask *pendingTaskState `json:"-"`
+	// stepSeq 本 run 已分配的步骤序号（挂起/恢复的 correlation_id 靠它保证唯一）。
+	// 从 0 开始自增；重启恢复时由持久化层按 agent_steps 的 MAX(step_no) 校准。
+	stepSeq int
 
 	// execSeen 本 run 已执行过的命令缓存（规范键 → 结果），用于命令级去重：
 	// 相同命令只下发一次，重复调用直接回放上次结果，杜绝信息收集反复重跑同一命令。
@@ -459,6 +491,12 @@ func (r *AgentRun) setStopReason(reason string) {
 	r.mu.Unlock()
 }
 
+// SetStopReason 记录停止原因（导出给恢复编排使用；与 setStopReason 同一份状态）。
+func (r *AgentRun) SetStopReason(reason string) { r.setStopReason(reason) }
+
+// SetReply 写入最终答复（导出给恢复编排使用，线程安全）。
+func (r *AgentRun) SetReply(reply string) { r.setReply(reply) }
+
 func (r *AgentRun) setStatus(s AgentStatus) {
 	r.mu.Lock()
 	r.Status = s
@@ -488,6 +526,59 @@ func (r *AgentRun) Cancel() {
 	r.mu.Unlock()
 }
 
+// NextStep 取下一个步骤序号（挂起/恢复的 correlation_id 用它保证唯一；线程安全）。
+//
+// 为什么必须在 run 上维护而不是每次从库里查：一次 run 可能连续挂起多次，
+// 而 agent_steps 只有在挂起点才写一行；只用 MAX(step_no)+1 会让同一 run 的第二次
+// 挂起拿到重复的 step_no → correlation_id 冲突 → 幂等 upsert 把两次调用合并成一条。
+func (r *AgentRun) NextStep() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stepSeq++
+	return r.stepSeq
+}
+
+// SetStepSeq 校准步骤序号（重启恢复时按持久化的 MAX(step_no) 续号）。
+func (r *AgentRun) SetStepSeq(n int) {
+	r.mu.Lock()
+	if n > r.stepSeq {
+		r.stepSeq = n
+	}
+	r.mu.Unlock()
+}
+
+// WaitState 读取当前状态与等待描述（线程安全）。
+func (r *AgentRun) WaitState() (AgentStatus, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Status, r.WaitingOn
+}
+
+// SetMessages 整体替换消息序列（重启恢复重建最小上下文时使用；线程安全）。
+func (r *AgentRun) SetMessages(msgs []Message) {
+	r.mu.Lock()
+	r.Messages = msgs
+	r.mu.Unlock()
+}
+
+// PendingTaskInfo 返回当前长任务等待的目标：任务 id 与等待超时（秒）。
+// 无等待时返回 (0, 0)。供可观测性（GET /agent/runs/{id} 展示"在等哪个任务"）。
+func (r *AgentRun) PendingTaskInfo() (uint64, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.PendingTask == nil {
+		return 0, 0
+	}
+	return r.PendingTask.handle.TaskID, r.PendingTask.handle.TimeoutSec
+}
+
+// SnapshotMessages 复制一份消息序列（供恢复路径构造上下文快照）。
+func (r *AgentRun) SnapshotMessages() []Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Message(nil), r.Messages...)
+}
+
 // AppendMessages 往 run 的长期记忆追加消息（跨指令续接，保持完整上下文）。
 func (r *AgentRun) AppendMessages(msgs []Message) {
 	r.mu.Lock()
@@ -504,12 +595,43 @@ func (r *AgentRun) ResetForResume() {
 	r.Status = AgentQueued
 	r.FinalReply = ""
 	r.Pending = nil
+	r.PendingTask = nil
+	r.WaitingOn = ""
 	r.cancel = nil
 	r.StopReason = ""
 	r.TraceID = newTraceID()
 	r.events = make(chan AgentEvent, 256)
 	r.once = sync.Once{}
 	r.mu.Unlock()
+}
+
+// RestoreRun 用持久化的 id / trace 重建一个内存 run（重启恢复用；不覆盖已存在的同类 run）。
+//
+// 为什么需要它：run id 与 trace id 是**对外可见的引用**（GET /agent/runs/{id}、审计日志、
+// 前端续接都按它索引）。重启恢复若新生成一个 id，恢复出来的 run 在外部看来就是"另一个任务"，
+// 原来的 id 永远停在等待态。
+func (m *AgentManager) RestoreRun(id, traceID string, history []Message, maxTurns int) *AgentRun {
+	if id == "" {
+		return m.NewRun(history, maxTurns)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if existing, ok := m.runs[id]; ok && existing != nil {
+		return existing
+	}
+	run := &AgentRun{
+		ID:        id,
+		Status:    AgentQueued,
+		Messages:  append([]Message(nil), history...),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		MaxTurns:  maxTurns,
+		TraceID:   ensureTraceID(traceID),
+		events:    make(chan AgentEvent, 8192),
+		Traces:    []ToolTrace{},
+	}
+	m.runs[run.ID] = run
+	return run
 }
 
 // ResetTaskView 清空任务视图状态（目标/计划/时间线/轨迹）——纯聊短回复等
@@ -533,4 +655,7 @@ func newAgentID() string {
 var (
 	errAgentCancelled = errors.New("agent cancelled")
 	errAgentPaused    = errors.New("agent paused for consent")
+	// errAgentAwaitTask run 已挂起等内部任务结果：**不是失败**，循环退出是为了释放并发槽位，
+	// 任务完成通知会把它唤醒（见 api 的任务桥与 ai.CompleteTaskResume）。
+	errAgentAwaitTask = errors.New("agent awaiting internal task")
 )

@@ -251,6 +251,9 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"consent_mode":       cfg.AI.ConsentMode,
 			"agent_concurrency":  cfg.AI.AgentConcurrency,
 			"download_allowlist": cfg.AI.DownloadAllowlist,
+			// v1.4.0 S2：长任务挂起阈值（预估超时 ≥ 该值的工具会改走"提交→挂起→事件恢复"，
+			// 释放并发槽位）。回传**生效值**（0/负数→默认），与循环里的判定同源。
+			"long_task_threshold_sec": ai.LongTaskThresholdFromConfig(cfg.AI),
 		},
 		Web: map[string]interface{}{
 			"basic_auth_enabled": cfg.Web.BasicAuthEnabled,

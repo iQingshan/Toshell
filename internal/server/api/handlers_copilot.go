@@ -27,6 +27,10 @@ func (s *Server) ReconfigureCopilot(cfg config.AIConfig) {
 		// 重建出来的 Copilot 必须重新注入结果外置存储：否则热更新一次之后
 		// "超限结果外置 + result_read 回读"就静默退化成无句柄的内联截断（很难发现）。
 		s.applyResultStore(s.copilot)
+		// 同理必须重新注入长任务通道：否则"AI 原本未启用、后来在设置页启用"这条路径上
+		// 造出来的 Copilot 没有 longTasks，所有工具都会静默退回同步等待（并发槽位重新被
+		// 分钟级工具占满），而且不会有任何报错 —— 只有重启服务端才会恢复。
+		s.applyLongTaskExecutor(s.copilot)
 		return
 	}
 	s.copilot.Reconfigure(cfg)
@@ -249,9 +253,15 @@ func (s *Server) runAgentAsync(parent context.Context, run *ai.AgentRun) {
 	_, err := cp.RunAgent(ctx, run)
 	if err != nil { /* RunAgent 内部已 emit error 事件 */
 	}
+	// 挂起（等审批 / 等长任务）**不是终态**：run 必须留在内存里等外部事件唤醒恢复，
+	// 绝不能按"已完成"清理——清掉就再也没有东西能把它接回来了。
+	status, _ := run.WaitState()
+	if status == ai.AgentWaitConsent || status == ai.AgentWaitTask {
+		return
+	}
 	// 完成后延迟清理：作为「自主记忆」会话保留较久（30 分钟），
 	// 以便前端带 session_id 续接时仍能复用同一 run 的完整上下文。
-	if run.Status == ai.AgentDone || run.Status == ai.AgentError {
+	if status == ai.AgentDone || status == ai.AgentError {
 		go func() {
 			time.Sleep(30 * time.Minute)
 			s.agentMgr.Remove(run.ID)
@@ -275,7 +285,11 @@ func (s *Server) resumeAgentAsync(run *ai.AgentRun) {
 		_, err := cp.RunAgent(ctx, run)
 		if err != nil { /* RunAgent 内部已 emit error/无事件 */
 		}
-		if run.Status == ai.AgentDone || run.Status == ai.AgentError {
+		status, _ := run.WaitState()
+		if status == ai.AgentWaitConsent || status == ai.AgentWaitTask {
+			return
+		}
+		if status == ai.AgentDone || status == ai.AgentError {
 			go func() {
 				time.Sleep(30 * time.Minute)
 				s.agentMgr.Remove(run.ID)
@@ -292,16 +306,23 @@ func (s *Server) agentRunHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"run not found"}`, http.StatusNotFound)
 		return
 	}
+	// 等待态必须"看得见"：status 会是 awaiting_task/awaiting_consent，
+	// waiting_on 描述在等谁（新增可选字段，既有字段名与语义不变）。
+	status, waitingOn := run.WaitState()
+	taskID, taskTimeout := run.PendingTaskInfo()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"run_id":      run.ID,
-		"status":      run.Status,
-		"objective":   run.Objective,
-		"plan":        run.Plan,
-		"traces":      run.Traces,
-		"timeline":    run.Timeline,
-		"reply":       run.FinalReply,
-		"trace_id":    run.TraceID,
-		"stop_reason": run.StopReason,
+		"run_id":           run.ID,
+		"status":           status,
+		"objective":        run.Objective,
+		"plan":             run.Plan,
+		"traces":           run.Traces,
+		"timeline":         run.Timeline,
+		"reply":            run.FinalReply,
+		"trace_id":         run.TraceID,
+		"stop_reason":      run.StopReason,
+		"waiting_on":       waitingOn,
+		"task_id":          taskID,
+		"task_timeout_sec": taskTimeout,
 	})
 }
 

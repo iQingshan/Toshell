@@ -2,7 +2,6 @@ package api
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -25,7 +24,6 @@ import (
 	"toshell/internal/server/logging"
 	"toshell/internal/server/mcp"
 	"toshell/internal/server/plugin"
-	"toshell/internal/server/task"
 )
 
 // ─── AI 副驾驶：MCP 工具端点 ────────────────────────────────────────
@@ -191,115 +189,47 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if err != nil || tid == 0 {
 			return nil, fmt.Errorf("invalid task_id")
 		}
-		timeout := 60 * time.Second
-		if sec, perr := strconv.Atoi(params["timeout_sec"]); perr == nil && sec > 0 && sec <= 300 {
-			timeout = time.Duration(sec) * time.Second
-		}
-		// 轮询等待任务进入终态（completed/failed/timeout）
-		deadline := time.Now().Add(timeout)
-		for time.Now().Before(deadline) {
-			t, gerr := s.taskMgr.Get(tid)
-			if gerr != nil || t == nil {
-				// 任务不存在：立即返回错误，绝不空转到 timeout。
-				// 否则 agent 等一个编造/已删除的 task_id 会卡满 timeout（前端 fetch 超时报 network error）。
-				return nil, fmt.Errorf("task not found: %d", tid)
-			}
-			if t.Status == "completed" || t.Status == "failed" || t.Status == "timeout" {
-				return map[string]interface{}{
-					"task_id": t.ID, "task_type": t.TaskType, "command": t.Command,
-					"session_id": t.SessionID, "status": t.Status,
-					"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
-					"exit_code": t.ExitCode, "completed_at": t.CompletedAt,
-				}, nil
-			}
-			// 会话离线检测：任务仍没终态但所属会话已断开（asleep 或不存在），
-			// 立即返回错误，避免 agent 干等 300s 导致卡死（network error 无后续）。
-			if t.SessionID != "" {
-				if st, serr := s.sessionMgr.GetStatus(t.SessionID); serr != nil || st == "asleep" {
-					return nil, fmt.Errorf("session %s offline (任务 #%d 未完成): 会话已断开", t.SessionID, tid)
-				}
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		t, _ := s.taskMgr.Get(tid)
-		if t == nil {
+		// 任务不存在：立即返回错误，绝不空转到 timeout。
+		// 否则 agent 等一个编造/已删除的 task_id 会卡满 timeout（前端 fetch 超时报 network error）。
+		t, gerr := s.taskMgr.Get(tid)
+		if gerr != nil || t == nil {
 			return nil, fmt.Errorf("task not found: %d", tid)
 		}
+		timeoutSec := taskWaitDefaultSec
+		if sec, perr := strconv.Atoi(params["timeout_sec"]); perr == nil && sec > 0 && sec <= taskWaitMaxSec {
+			timeoutSec = sec
+		}
+		// 事件驱动等待任务进入终态（completed/failed/timeout）：不再 sleep 轮询。
+		res := s.awaitTaskSettled(t, timeoutSec)
+		if res.Gone {
+			return nil, fmt.Errorf("task not found: %d", tid)
+		}
+		if res.SessionOffline != "" {
+			return nil, fmt.Errorf("session %s offline (任务 #%d 未完成): 会话已断开", res.SessionOffline, tid)
+		}
+		cur := res.Task
+		if res.Timeout {
+			return map[string]interface{}{
+				"task_id": cur.ID, "task_type": cur.TaskType, "command": cur.Command,
+				"session_id": cur.SessionID, "status": cur.Status,
+				"output": taskOutput(cur), "output_bytes": len(cur.Output), "error": cur.Error,
+				"exit_code": cur.ExitCode, "timeout": true,
+				"message": "等待超时，任务仍在执行",
+			}, nil
+		}
 		return map[string]interface{}{
-			"task_id": t.ID, "task_type": t.TaskType, "command": t.Command,
-			"session_id": t.SessionID, "status": t.Status,
-			"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
-			"exit_code": t.ExitCode, "timeout": true,
-			"message": "等待超时，任务仍在执行",
+			"task_id": cur.ID, "task_type": cur.TaskType, "command": cur.Command,
+			"session_id": cur.SessionID, "status": cur.Status,
+			"output": taskOutput(cur), "output_bytes": len(cur.Output), "error": cur.Error,
+			"exit_code": cur.ExitCode, "completed_at": cur.CompletedAt,
 		}, nil
-	case "file_list":
-		sid := params["session_id"]
-		path := params["path"]
-		if sid == "" || path == "" {
-			return nil, fmt.Errorf("session_id and path required")
-		}
-		task, err := s.taskMgr.CreateFileList(sid, path)
-		if err != nil {
-			return nil, err
-		}
-		return s.pushAndAwait(sid, task, 60)
-	case "file_download":
-		sid := params["session_id"]
-		path := params["path"]
-		if sid == "" || path == "" {
-			return nil, fmt.Errorf("session_id and path required")
-		}
-		task, err := s.taskMgr.CreateFileDownload(sid, path)
-		if err != nil {
-			return nil, err
-		}
-		return s.pushAndAwait(sid, task, 300)
-	case "process_list":
-		sid := params["session_id"]
-		if sid == "" {
-			return nil, fmt.Errorf("session_id required")
-		}
-		task, err := s.taskMgr.CreateProcessList(sid)
-		if err != nil {
-			return nil, err
-		}
-		return s.pushAndAwait(sid, task, 60)
-	case "process_kill":
-		sid := params["session_id"]
-		pid, perr := strconv.ParseUint(params["pid"], 10, 32)
-		if sid == "" || perr != nil {
-			return nil, fmt.Errorf("session_id and pid required")
-		}
-		task, err := s.taskMgr.CreateProcessKill(sid, uint32(pid))
-		if err != nil {
-			return nil, err
-		}
-		return s.pushAndAwait(sid, task, 60)
-	case "screenshot":
-		sid := params["session_id"]
-		if sid == "" {
-			return nil, fmt.Errorf("session_id required")
-		}
-		task, err := s.taskMgr.Create(sid, task.TaskParams{TaskType: "screenshot"})
-		if err != nil {
-			return nil, err
-		}
-		return s.pushAndAwait(sid, task, 90)
-	case "credentials":
-		sid := params["session_id"]
-		action := params["action"]
-		if sid == "" {
-			return nil, fmt.Errorf("session_id required")
-		}
-		if action == "" {
-			action = "all"
-		}
-		credData, _ := json.Marshal(map[string]string{"action": action})
-		task, err := s.taskMgr.Create(sid, task.TaskParams{TaskType: "credentials", Data: string(credData)})
-		if err != nil {
-			return nil, err
-		}
-		return s.pushAndAwait(sid, task, 180)
+	// 任务类工具的**唯一出口**：创建内部任务 → 下发 → 事件驱动等待终态。
+	// 具体超时与创建参数见 tool_tasks.go 的超时表（单一来源）。
+	case "file_list", "file_download", "process_list", "process_kill",
+		"screenshot", "credentials", "fileless_exec",
+		"exec", "run_command", "user_info", "system_info", "service_list",
+		"check_av", "net_info", "net_connections", "env_vars", "scheduled_tasks":
+		return s.invokeTaskToolSync(name, params)
 	case "session_kill":
 		sid := params["session_id"]
 		if sid == "" {
@@ -465,68 +395,6 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 			"id": p.ID, "name": p.Name, "type": p.Type, "size": len(data),
 			"message": "已上传到插件库，可用 plugin_load 加载到会话执行",
 		}, nil
-	case "fileless_exec":
-		sid := params["session_id"]
-		src := params["source"]
-		if sid == "" || src == "" {
-			return nil, fmt.Errorf("session_id and source (file in data/tools) required")
-		}
-		kind := params["kind"]
-		if kind == "" {
-			kind = guessToolKind(src)
-		}
-		toolPath, terr := resolveToolPath(src)
-		if terr != nil {
-			return nil, terr
-		}
-		data, rerr := os.ReadFile(toolPath)
-		if rerr != nil {
-			return nil, fmt.Errorf("read tool failed: %w", rerr)
-		}
-		// exe/exe_mem：args 会作为被内存执行程序的命令行参数注入
-		waitMs := 0
-		if v := params["wait_ms"]; v != "" {
-			if n, aerr := strconv.Atoi(v); aerr == nil {
-				waitMs = n
-			}
-		}
-		taskInfo, cerr := s.taskMgr.CreateFilelessExec(sid, kind, base64.StdEncoding.EncodeToString(data), params["args"], params["entry"], waitMs)
-		if cerr != nil {
-			return nil, cerr
-		}
-		return s.pushAndAwait(sid, taskInfo, 180)
-	case "exec":
-		// TaskOrchestrator 原子执行：下发一次性命令并等待最终结果（Agent 一次调用拿结果）
-		sid := params["session_id"]
-		cmd := params["command"]
-		if cmd == "" {
-			// 允许用内置语义命令（如 exec 带 user_info/system_info/check_av）
-			cmd = builtinCommand(params["kind"], params["command"])
-		}
-		if sid == "" || cmd == "" {
-			return nil, fmt.Errorf("exec: session_id and command (or kind) required")
-		}
-		timeout := 120
-		if sec, perr := strconv.Atoi(params["timeout_sec"]); perr == nil && sec > 0 {
-			timeout = sec
-		}
-		return s.execAndAwait(sid, cmd, timeout)
-	case "run_command", "user_info", "system_info", "service_list",
-		"check_av", "net_info", "net_connections", "env_vars", "scheduled_tasks":
-		sid := params["session_id"]
-		if sid == "" {
-			return nil, fmt.Errorf("session_id required")
-		}
-		cmd := builtinCommand(name, params["command"])
-		if cmd == "" {
-			return nil, fmt.Errorf("empty command for %s", name)
-		}
-		// 原子执行并返回最终结果（与 exec 同语义）：一次性拿结果，不再走 task_wait
-		timeout := 120
-		if sec, perr := strconv.Atoi(params["timeout_sec"]); perr == nil && sec > 0 {
-			timeout = sec
-		}
-		return s.execAndAwait(sid, cmd, timeout)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -980,16 +848,15 @@ func (s *Server) mcpPushResult(sid string, taskInfo *types.TaskInfo) map[string]
 // pushAndAwait 对「已创建」的任务立即推送并原子等待终态（同 task_wait 语义）。
 // 返回最终结果 map（含 output/status/exit_code），供各类一次性工具原子化：
 // agent 一次调用即拿结果，无需再拼 task_id / 调 task_wait，杜绝编造 task_id。
+//
+// v1.4.0 S2：等待改为**事件驱动**（任务终结通知 + 一次性 deadline 定时器 +
+// 会话判活翻转点，见 task_await.go）。返回结构与超时语义与改造前逐字一致；
+// 变的只是"怎么等到结果"，不再有 500ms 轮询。
 func (s *Server) pushAndAwait(sid string, taskInfo *types.TaskInfo, timeoutSec int) (map[string]interface{}, error) {
 	if taskInfo == nil {
 		return nil, fmt.Errorf("empty task")
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = 60
-	}
-	if timeoutSec > 300 {
-		timeoutSec = 300
-	}
+	timeoutSec = clampToolWait(timeoutSec)
 	// 会话必须存在且活跃，否则直接失败（不等轮询）
 	if st, serr := s.sessionMgr.GetStatus(sid); serr != nil || st != "active" {
 		return nil, fmt.Errorf("session %s not active (offline): 无法下发任务", sid)
@@ -999,47 +866,19 @@ func (s *Server) pushAndAwait(sid string, taskInfo *types.TaskInfo, timeoutSec i
 			logging.Warn("api", "pushAndAwait push to %s failed: %v", sid, err)
 		}
 	}
-	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
-	for time.Now().Before(deadline) {
-		t, gerr := s.taskMgr.Get(taskInfo.ID)
-		if gerr != nil || t == nil {
-			return nil, fmt.Errorf("task %d vanished", taskInfo.ID)
-		}
-		switch t.Status {
-		case "completed":
-			return map[string]interface{}{
-				"session_id": sid, "task_id": t.ID, "task_type": t.TaskType,
-				"command": t.Command, "status": "completed",
-				"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
-				"exit_code": t.ExitCode, "completed_at": t.CompletedAt,
-			}, nil
-		case "failed", "timeout":
-			return map[string]interface{}{
-				"session_id": sid, "task_id": t.ID, "task_type": t.TaskType,
-				"command": t.Command, "status": t.Status,
-				"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
-				"exit_code": t.ExitCode,
-			}, nil
-		}
-		// 会话离线：立即失败，不等满超时
-		if t.SessionID != "" {
-			if st, serr := s.sessionMgr.GetStatus(t.SessionID); serr != nil || st == "asleep" {
-				return nil, fmt.Errorf("session %s went offline while task #%d running", t.SessionID, taskInfo.ID)
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	// 超时：返回当前状态 + timeout 标记
-	t, _ := s.taskMgr.Get(taskInfo.ID)
-	if t == nil {
+	res := s.awaitTaskSettled(taskInfo, timeoutSec)
+	switch {
+	case res.Gone:
 		return nil, fmt.Errorf("task %d vanished", taskInfo.ID)
+	case res.SessionOffline != "":
+		// 会话离线：立即失败，不等满超时（既有熔断语义）
+		return nil, fmt.Errorf("session %s went offline while task #%d running", res.SessionOffline, taskInfo.ID)
+	case res.Timeout:
+		// 超时：返回当前状态 + timeout 标记
+		return taskTimeoutResult(sid, res.Task), nil
+	default:
+		return taskEnvelopeByStatus(sid, res.Task), nil
 	}
-	return map[string]interface{}{
-		"session_id": sid, "task_id": t.ID, "command": t.Command,
-		"status": t.Status, "output": taskOutput(t), "output_bytes": len(t.Output),
-		"error": t.Error, "exit_code": t.ExitCode, "timeout": true,
-		"message": "任务超时仍在执行",
-	}, nil
 }
 
 // taskOutput 返回任务输出原文。
@@ -1062,9 +901,13 @@ func taskOutput(t *types.TaskInfo) string {
 }
 
 // execAndAwait TaskOrchestrator 核心：在指定会话下发一次性命令并原子等待结果。
-// 服务端统一完成 创建→推送→轮询→归位，返回最终输出/退出码。
+// 服务端统一完成 创建→推送→等待→归位，返回最终输出/退出码。
 // Agent 只需调用一次（无需自己拼 task_id / task_wait，杜绝编造 task_id 与乱序）。
 // 熔断语义：会话离线立即返回明确错误；任务超时返回 timeout 标记。
+//
+// v1.4.0 S2：创建与等待都收敛到 tool_tasks.go 的同一份映射（超时表 + planToolTask），
+// 这里只保留"更早的会话熔断"这一步——它必须发生在创建任务**之前**，否则离线时
+// 会先凭空落一条任务记录（既有行为，语义不动）。
 func (s *Server) execAndAwait(sid, cmd string, timeoutSec int) (map[string]interface{}, error) {
 	if sid == "" || cmd == "" {
 		return nil, fmt.Errorf("session_id and command required")
@@ -1073,15 +916,10 @@ func (s *Server) execAndAwait(sid, cmd string, timeoutSec int) (map[string]inter
 	if st, serr := s.sessionMgr.GetStatus(sid); serr != nil || st != "active" {
 		return nil, fmt.Errorf("session %s not active (offline): 无法下发命令", sid)
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = 60
+	params := map[string]string{
+		"session_id":  sid,
+		"command":     cmd,
+		"timeout_sec": strconv.Itoa(timeoutSec),
 	}
-	if timeoutSec > 300 {
-		timeoutSec = 300
-	}
-	taskInfo, err := s.taskMgr.CreateCommand(sid, cmd, nil, uint32(timeoutSec))
-	if err != nil {
-		return nil, err
-	}
-	return s.pushAndAwait(sid, taskInfo, timeoutSec)
+	return s.invokeTaskToolSync("exec", params)
 }

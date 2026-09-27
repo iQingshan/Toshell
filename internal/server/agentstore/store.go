@@ -24,10 +24,17 @@ const (
 	RunQueued          = "queued"
 	RunRunning         = "running"
 	RunAwaitingConsent = "awaiting_consent"
-	RunSucceeded       = "succeeded"
-	RunFailed          = "failed"
-	RunTimeout         = "timeout"
-	RunCancelled       = "cancelled"
+	// RunAwaitingTask run 正在等一个内部任务（tasks 表）的结果（v1.4.0 S2 新增）。
+	//
+	// 与 RunAwaitingConsent 的区别：审批挂起等的是"人"，本态等的是"任务完成事件"。
+	// 两者都是**非终态**：run 的循环已退出（并发槽位已释放），由外部事件唤醒后恢复。
+	// 恢复所需的全部信息在 waiting_on（kind="task"）+ agent_tool_calls（internal_task_id）
+	// 里，重启后据此重新对齐 tasks 表。
+	RunAwaitingTask = "awaiting_task"
+	RunSucceeded    = "succeeded"
+	RunFailed       = "failed"
+	RunTimeout      = "timeout"
+	RunCancelled    = "cancelled"
 
 	CallSubmitted  = "submitted"
 	CallDispatched = "dispatched"
@@ -102,6 +109,54 @@ func WaitingOnConsent(tool, correlationID string) string {
 		"kind": "consent", "tool": tool, "correlation_id": correlationID,
 	})
 	return string(b)
+}
+
+// WaitingTaskRef waiting_on 里 kind="task" 的语义：谁在等、等哪个内部任务、等到什么时候。
+//
+// 定义在持久化层而不是执行层：这份 JSON 是**写进库、重启后要读回来**的契约，
+// 构造（WaitingOnTask）与解析（ParseWaitingOn）必须成对演进，放一起才不会漂移。
+type WaitingTaskRef struct {
+	Kind string `json:"kind"`
+	// Tool 发起本次工具调用的工具名（恢复时要按它构造 tool 消息/轨迹）。
+	Tool string `json:"tool"`
+	// CorrelationID 工具调用的幂等键（run_id:step_no:attempt），用于回查 agent_tool_calls。
+	CorrelationID string `json:"correlation_id"`
+	// InternalTaskID tasks 表里的任务 id（重启后按它对账）。
+	InternalTaskID uint64 `json:"internal_task_id"`
+	// DeadlineTS 等待截止时刻（Unix 秒，0 = 不限）。超过它就不再等，按"仍在跑"继续。
+	DeadlineTS int64 `json:"deadline_ts,omitempty"`
+	// CallID LLM 给出的 tool_call id：恢复时追加的 tool 消息必须与它配对，
+	// 否则上游 chat/completions 会因"tool 消息没有对应的 assistant.tool_calls"直接报错。
+	CallID string `json:"call_id,omitempty"`
+	// StepNo 步骤游标（与 agent_steps 的 step_no 一致）。
+	StepNo int `json:"step_no,omitempty"`
+	// TraceID 贯穿本次执行的 trace id（恢复后仍要能串起审计）。
+	TraceID string `json:"trace_id,omitempty"`
+	// TimeoutSec 本次等待的超时预算（秒）。
+	TimeoutSec int `json:"timeout_sec,omitempty"`
+}
+
+// WaitingOnTask 构造"在等某个内部任务结果"的 waiting_on JSON。
+func WaitingOnTask(ref WaitingTaskRef) string {
+	ref.Kind = "task"
+	b, _ := json.Marshal(ref)
+	return string(b)
+}
+
+// ParseWaitingOn 解析 waiting_on；仅当 kind="task" 且带 internal_task_id 时返回 ok=true。
+// 解析失败按"无法恢复的等待"处理（调用方给 run 一个明确终态，而不是静默卡住）。
+func ParseWaitingOn(raw string) (*WaitingTaskRef, bool) {
+	if raw == "" {
+		return nil, false
+	}
+	var ref WaitingTaskRef
+	if err := json.Unmarshal([]byte(raw), &ref); err != nil {
+		return nil, false
+	}
+	if ref.Kind != "task" || ref.InternalTaskID == 0 {
+		return nil, false
+	}
+	return &ref, true
 }
 
 // IsTerminalRun 判断 run 是否已进入终态（终态不再恢复）。
@@ -205,10 +260,19 @@ func (s *Store) GetRun(id string) (*Run, error) {
 }
 
 // ListResumableRuns 列出"还没进终态"的 run（进程重启后的恢复入口）。
+// 含 awaiting_task：它同样是"循环已退出、等外部事件唤醒"的非终态。
 func (s *Store) ListResumableRuns(limit int) ([]*Run, error) {
 	return s.queryRuns(`SELECT `+runCols+` FROM agent_runs
-		WHERE status IN (?,?,?) ORDER BY created_at ASC LIMIT ?`,
-		RunQueued, RunRunning, RunAwaitingConsent, limitOrDefault(limit, 50))
+		WHERE status IN (?,?,?,?) ORDER BY created_at ASC LIMIT ?`,
+		RunQueued, RunRunning, RunAwaitingConsent, RunAwaitingTask, limitOrDefault(limit, 50))
+}
+
+// ListRunsAwaitingTask 列出所有"正在等内部任务结果"的 run（重启恢复扫描用）。
+// 单独一个查询而不是复用 ListResumableRuns：恢复要按下标对齐 tasks 表，
+// 混进 queued/running 的 run 会让扫描逻辑被迫做无意义的过滤。
+func (s *Store) ListRunsAwaitingTask(limit int) ([]*Run, error) {
+	return s.queryRuns(`SELECT `+runCols+` FROM agent_runs
+		WHERE status=? ORDER BY created_at ASC LIMIT ?`, RunAwaitingTask, limitOrDefault(limit, 200))
 }
 
 // ListRunsBySession 按会话列出历史 run（前端"该会话跑过哪些 run"）。

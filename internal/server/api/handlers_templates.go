@@ -98,31 +98,44 @@ func (s *Server) pushTemplateTask(sessionID string, tt TemplateTask) (*WorkflowT
 	}, nil
 }
 
-// waitForTask polls the task status until it completes or fails.
+// waitForTask 等待任务终结（任务流执行用）。
+//
+// v1.4.0 S2：等待方式从"1s ticker 轮询"改为**任务终结通知 + 一次性 deadline**，
+// 判定逻辑与返回值（completed/failed/timeout）完全不变：超时仍把任务标记失败并返回
+// "timeout"（这是任务流的既有语义，与 REST 同步路径的"超时返回仍在跑"不同，故不走
+// awaitTaskSettled）。任务被删除/查不到时同样返回 "failed"。
 func (s *Server) waitForTask(taskID uint64, timeoutSec int) string {
 	if timeoutSec <= 0 {
 		timeoutSec = 60
 	}
-	deadline := time.After(time.Duration(timeoutSec) * time.Second)
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	mgr := s.taskWaiter()
+	if mgr == nil {
+		return "failed"
+	}
+	ch, unsubscribe := mgr.Subscribe(taskID)
+	defer unsubscribe()
+	timer := time.NewTimer(time.Duration(timeoutSec) * time.Second)
+	defer timer.Stop()
+	// waitCh 一次性通知通道：触发一次后置 nil，避免已关闭通道导致 select 每轮立刻就绪。
+	var waitCh <-chan struct{} = ch
 
 	for {
+		t, err := mgr.Get(taskID)
+		if err != nil || t == nil {
+			return "failed"
+		}
+		switch t.Status {
+		case task.StatusCompleted:
+			return "completed"
+		case task.StatusFailed, task.StatusTimeout:
+			return "failed"
+		}
 		select {
-		case <-deadline:
+		case <-waitCh:
+			waitCh = nil
+		case <-timer.C:
 			s.taskMgr.Fail(taskID, "workflow task timeout")
 			return "timeout"
-		case <-ticker.C:
-			t, err := s.taskMgr.Get(taskID)
-			if err != nil {
-				return "failed"
-			}
-			switch t.Status {
-			case task.StatusCompleted:
-				return "completed"
-			case task.StatusFailed, task.StatusTimeout:
-				return "failed"
-			}
 		}
 	}
 }

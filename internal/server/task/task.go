@@ -28,6 +28,11 @@ type Manager struct {
 	// 实例字段会在重启时丢失，导致断点续传失效（退化为全量重推）。
 	transferMu sync.RWMutex
 	transfers  map[uint64]*TransferState
+
+	// waiters 任务终结通知的等待者（taskID → 等待者列表），受 m.mu 保护。
+	// 与任务状态**共用同一把锁**：注册与状态变更必须互为原子点，否则会丢通知
+	// （详见 wait.go 的 Subscribe 注释）。
+	waiters map[uint64][]*waiter
 }
 
 // TransferState 记录一个进行中的大文件直传断点（服务端视角，taskID 关联）。
@@ -111,15 +116,29 @@ type TaskParams struct {
 
 func New(sessMgr *session.Manager) *Manager {
 	once.Do(func() {
-		manager = &Manager{
-			tasks:      make(map[uint64]*types.TaskInfo),
-			pending:    make([]*types.TaskInfo, 0),
-			completed:  make([]*types.TaskInfo, 0),
-			sessionMgr: sessMgr,
-			transfers:  make(map[uint64]*TransferState),
-		}
+		manager = newManager(sessMgr)
 	})
 	return manager
+}
+
+// NewIsolated 创建一个**不与全局单例共享状态**的 Manager。
+//
+// 存在的理由：New 是 sync.Once 单例，多个测试（或嵌入式多实例场景）共用同一个实例会
+// 互相污染——一个用例清空的 pending 会出现在另一个用例里，任务 id 也会串号。
+// 生产路径仍走 New；这里只把「构造一个干净的 Manager」这一步开放出来。
+func NewIsolated(sessMgr *session.Manager) *Manager {
+	return newManager(sessMgr)
+}
+
+func newManager(sessMgr *session.Manager) *Manager {
+	return &Manager{
+		tasks:      make(map[uint64]*types.TaskInfo),
+		pending:    make([]*types.TaskInfo, 0),
+		completed:  make([]*types.TaskInfo, 0),
+		sessionMgr: sessMgr,
+		transfers:  make(map[uint64]*TransferState),
+		waiters:    make(map[uint64][]*waiter),
+	}
 }
 
 func Get() *Manager {
@@ -524,11 +543,40 @@ func (m *Manager) GetNextBatch(sessionID string, max int) []*types.TaskInfo {
 	return out
 }
 
+// lookupLocked 取任务；内存缺失时回落到 sqlite `tasks` 表并回填内存（需持有 m.mu）。
+//
+// 为什么要回落：结果帧到达时任务可能**不在内存**——进程重启后内存 map 是空的，而植入端
+// 仍在执行重启前下发的任务，结果会照常上报。旧实现此时直接返回 "task not found"，
+// 于是「重启前下发的任务」结果永远丢失（表现为任务卡在 sent，Agent 等不到结果）。
+// 回填内存后，该任务的后续结果帧与终结通知都能正常工作（v1.4.0 S2 重启恢复依赖它）。
+//
+// 幂等性不受影响：回填出来的状态就是库里的终态，Complete/Fail 的终态去重照常生效，
+// 重复结果帧依然被忽略。
+func (m *Manager) lookupLocked(id uint64) (*types.TaskInfo, bool) {
+	if task, ok := m.tasks[id]; ok && task != nil {
+		return task, true
+	}
+	db := database.Get()
+	if db == nil {
+		return nil, false
+	}
+	task, err := db.GetTask(id)
+	if err != nil || task == nil {
+		return nil, false
+	}
+	if m.tasks == nil {
+		m.tasks = make(map[uint64]*types.TaskInfo)
+	}
+	m.tasks[id] = task
+	logging.Info("task", "Task %d 从库中恢复（重启后仍在上报结果）: status=%s", id, task.Status)
+	return task, true
+}
+
 func (m *Manager) Complete(id uint64, exitCode int32, output, errorMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	task, ok := m.tasks[id]
+	task, ok := m.lookupLocked(id)
 	if !ok {
 		return fmt.Errorf("task not found: %d", id)
 	}
@@ -574,6 +622,9 @@ func (m *Manager) Complete(id uint64, exitCode int32, output, errorMsg string) e
 		db.UpdateTask(task)
 	}
 
+	// 终态变更点：唤醒所有等待者（事件驱动等待的唯一通知源）。
+	m.notifyLocked(id)
+
 	logging.Info("task", "Task %d completed with exit code %d", id, exitCode)
 	return nil
 }
@@ -582,7 +633,7 @@ func (m *Manager) Fail(id uint64, errorMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	task, ok := m.tasks[id]
+	task, ok := m.lookupLocked(id)
 	if !ok {
 		return fmt.Errorf("task not found: %d", id)
 	}
@@ -612,6 +663,8 @@ func (m *Manager) Fail(id uint64, errorMsg string) error {
 	if db != nil {
 		db.UpdateTask(task)
 	}
+
+	m.notifyLocked(id)
 
 	logging.Error("task", "Task %d failed: %s", id, errorMsg)
 	return nil
@@ -808,6 +861,10 @@ func (m *Manager) Delete(id uint64) error {
 		}
 	}
 
+	// 任务被删除 = 对等待者而言"消失"：必须唤醒它们，否则等待者会一直挂到超时
+	// （调用方醒来后会看到任务查不到，按 vanished 处理）。
+	m.notifyLocked(id)
+
 	logging.Info("task", "Task %d deleted", id)
 	return nil
 }
@@ -840,6 +897,9 @@ func (m *Manager) Cancel(id uint64) error {
 		db.UpdateTask(task)
 	}
 
+	// 取消 = 置为 failed（终态），等待者同样要被唤醒。
+	m.notifyLocked(id)
+
 	logging.Info("task", "Task %d cancelled", id)
 	return nil
 }
@@ -869,6 +929,10 @@ func (m *Manager) CleanupOldTasks(maxAge time.Duration) int {
 	cutoff := time.Now().Add(-maxAge)
 	cleaned := 0
 
+	// 被回收的任务要从表里消失：记下 id，最后统一唤醒它们的等待者（见函数末尾）。
+	// 不通知的后果是等待者挂到超时才醒——一次僵尸任务回收会让等待者白等满整个超时。
+	var reclaimed []uint64
+
 	// 终态任务（completed/failed/timeout）：按完成时间清理
 	newCompleted := make([]*types.TaskInfo, 0)
 	for _, task := range m.completed {
@@ -876,6 +940,7 @@ func (m *Manager) CleanupOldTasks(maxAge time.Duration) int {
 			newCompleted = append(newCompleted, task)
 		} else {
 			delete(m.tasks, task.ID)
+			reclaimed = append(reclaimed, task.ID)
 			cleaned++
 		}
 	}
@@ -890,6 +955,7 @@ func (m *Manager) CleanupOldTasks(maxAge time.Duration) int {
 			keptPending = append(keptPending, task)
 		} else {
 			delete(m.tasks, task.ID)
+			reclaimed = append(reclaimed, task.ID)
 			cleaned++
 		}
 	}
@@ -902,8 +968,13 @@ func (m *Manager) CleanupOldTasks(maxAge time.Duration) int {
 		}
 		if task.Status == StatusSent && task.CreatedAt.Before(cutoff) {
 			delete(m.tasks, task.ID)
+			reclaimed = append(reclaimed, task.ID)
 			cleaned++
 		}
+	}
+
+	for _, id := range reclaimed {
+		m.notifyLocked(id)
 	}
 
 	if cleaned > 0 {

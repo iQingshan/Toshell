@@ -135,6 +135,13 @@ type WebConfig struct {
 	EntryChallenge bool `mapstructure:"entry_challenge" json:"entry_challenge"`
 }
 
+// DefaultLongTaskThresholdSec 长任务挂起的默认预估超时阈值（秒）。
+//
+// 定义在 config 包而不是 ai 包：viper 默认值（本包）与运行时的策略兜底（ai 包）
+// 必须是**同一个数**，而 ai 依赖 config、反向不成立。ai.DefaultLongTaskThresholdSec
+// 直接引用本常量，杜绝"注释写 150 / viper 写 120 / 运行时兜底 180"这类历史漂移。
+const DefaultLongTaskThresholdSec = 150
+
 // AIConfig AI 副驾驶（LLM 聊天 + 工具调用）配置。
 // BaseURL 为 OpenAI 兼容的 chat/completions 端点（如 https://api.deepseek.com/v1）；
 // 留空时 AI 副驾驶不可用（前端显示未配置提示）。
@@ -164,6 +171,13 @@ type AIConfig struct {
 	// AgentConcurrency 异步自主 Agent 的并发上限（同时进行的 run 数），默认 2。
 	// 每个 run 独立后台 goroutine，超过上限的任务排队等待。
 	AgentConcurrency int `mapstructure:"agent_concurrency" json:"agent_concurrency"`
+	// LongTaskThresholdSec 长任务挂起的预估超时阈值（秒，默认 150，见 DefaultLongTaskThresholdSec）。
+	//
+	// 语义：预估超时 ≥ 该值的工具，在 Agent 内部改走「提交 → 挂起 → 任务完成事件恢复」，
+	// 从而**释放并发槽位**（否则一个 credentials 就把槽位占满 180s）。低于阈值的短工具
+	// 保持同步等待——挂起它们只会更慢（多一次落库 + 重新进入循环）。
+	// <=0 一律回落默认值：配置失误不允许让长任务重新占满槽位。
+	LongTaskThresholdSec int `mapstructure:"long_task_threshold_sec" json:"long_task_threshold_sec"`
 	// DownloadAllowlist 工具下载域名白名单（空=允许任意公网域名，但仍拒绝内网/回环地址）。
 	// 用于限制 remote_download 只能从可信域名拉取，防止被诱导下载到恶意源头。
 	DownloadAllowlist []string `mapstructure:"download_allowlist" json:"download_allowlist"`
@@ -627,6 +641,8 @@ func Load(configPath string) (*Config, error) {
 	// （auto→off / normal→graded）；若在此写死 "graded"，旧键会被默认值盖掉而失效。
 	viper.SetDefault("ai.consent_policy", "")
 	viper.SetDefault("ai.agent_concurrency", 2)
+	// 长任务挂起阈值：与 ai.DefaultLongTaskThresholdSec 同一个常量（单一来源）。
+	viper.SetDefault("ai.long_task_threshold_sec", DefaultLongTaskThresholdSec)
 
 	// ── 对外 MCP 服务端（默认整体关闭；开启后也只绑回环 + 需 token + 只放行只读工具）──
 	viper.SetDefault("mcp.enabled", false)

@@ -103,16 +103,32 @@ func (s *Server) startResultGC() {
 	}()
 }
 
-// SetAgentStore 注入 Agent 存储：启用"外置结果索引"落库（句柄 / sha256 / 字节数 / TTL）。
+// SetAgentStore 注入 Agent 存储：启用"外置结果索引"落库（句柄 / sha256 / 字节数 / TTL），
+// 并启用**长任务挂起/恢复的持久化**（run 等待态、tool_call 的 internal_task_id、step 游标）。
 //
-// 索引只是**可选的追溯能力**：正文早已由 ResultStore 落盘，这里存的是"哪次 run、哪把工具、
-// 多大、什么摘要"，供事后定位与 TTL 回收。传 nil（无 DB / 初始化失败）时整条索引静默跳过，
-// 外置与回读不受影响——这正是"低风险接线"的边界：索引失败绝不影响任务执行。
+// 为什么存储字段要无条件保存：即使 Copilot 尚未配置（无 LLM），重启恢复扫描仍需读库
+// 把"等待任务"的 run 收敛出明确终态——那部分不依赖 LLM。
+//
+// 两个能力都是**低风险接线**：索引写失败只告警；长任务持久化写失败也只告警（退化为
+// "进程内可恢复、跨重启不可恢复"），绝不影响任务执行。
 func (s *Server) SetAgentStore(st *agentstore.Store) {
+	s.agentStore = st
 	if s.copilot == nil {
 		return
 	}
 	s.copilot.SetResultIndexer(agentResultIndexer{st: st, ttl: resultTTL(s.cfg)})
+}
+
+// StartAgentTaskRecovery 启动"重启恢复"扫描：把库里处于「等待任务」态的 run
+// 按 internal_task_id 对齐 tasks 表（已完成→接回结果；仍在跑→重新订阅；已丢失→明确终态）。
+//
+// 为什么在 SetAgentStore 之后单独一步：它需要在监听器/会话管理器都已注册之后运行
+// （重新订阅后任务结果要靠监听器回执），且顺序在 cmd/server 里显式可见、可审计。
+func (s *Server) StartAgentTaskRecovery() {
+	if s == nil || s.agentStore == nil {
+		return
+	}
+	s.RecoverWaitingAgentRuns()
 }
 
 // resultTTL 生效的结果保留时长（索引里的 ttl_expires_at 与文件 GC 用同一个值）。

@@ -112,6 +112,11 @@ type Copilot struct {
 	// 而是生成一个 consent 令牌，等前端用户「允许/拒绝」后再恢复 ReAct 循环。
 	pendingMu sync.Mutex
 	pending   map[string]*pendingSession
+
+	// longTasks 长任务通道（v1.4.0 S2）：把"会长时间运行"的工具拆成
+	// 「提交 → 挂起 → 任务完成事件恢复」，避免同步等待占满 Agent 并发槽位。
+	// nil = 未接线：所有工具都走同步路径。
+	longTasks LongTaskExecutor
 }
 
 // ConsentRequest 一次待确认的权限请求（前端弹窗用）。
@@ -1368,6 +1373,24 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			}
 		}
 
+		// 长任务挂起（v1.4.0 S2）：预估耗时 ≥ 阈值的工具**不再在本循环里同步干等**。
+		// 同步等待会把 Agent 并发槽位（AgentConcurrency 默认 2）占满整个工具耗时
+		// （一个 credentials 就是 180s），期间其它指令只能排队。
+		// 位置刻意放在"命令级去重"之后：命中缓存的重复命令应当直接回放结果，
+		// 而不是再走一次提交/挂起（否则去重对长任务工具形同虚设）。
+		// 判定为纯函数（ShouldSuspendLongTask），预估超时来自创建任务的同一份映射。
+		if c.longTasks != nil {
+			timeoutSec, isTaskTool := c.longTasks.LongTaskPlan(tc.Function.Name, args)
+			if suspend, reason := ShouldSuspendLongTask(c.longTaskPolicy(), tc.Function.Name, isTaskTool, timeoutSec); suspend {
+				if _, ok := c.suspendForTask(ctx, run, tc, args, traceID, turn); ok {
+					logging.Info("ai", "agent run=%s trace=%s 长任务挂起（%s），释放并发槽位等待任务完成",
+						run.ID, traceID, reason)
+					return nil, errAgentAwaitTask
+				}
+				// 提交失败：退回同步路径，让同步 InvokeTool 给出与改造前一致的错误结果。
+			}
+		}
+
 		// 执行工具
 		run.emit(AgentEventToolStart, ToolStart{Name: tc.Function.Name, Args: args, TraceID: traceID}, "")
 		run.appendTimeline("tool_start", tc.Function.Name+" "+truncate(tc.Function.Arguments, 160))
@@ -1835,6 +1858,9 @@ const (
 	stopReasonLoopDetected = "loop_detected"
 	// stopReasonAwaitConsent 因等待用户审批而暂停（不是失败，等 allow/deny 后恢复）。
 	stopReasonAwaitConsent = "awaiting_consent"
+	// stopReasonAwaitTask 因等待内部任务（长任务）结果而暂停（不是失败，
+	// 任务完成通知到达后自动恢复；run 的 status 同时为 awaiting_task）。
+	stopReasonAwaitTask = "awaiting_task"
 )
 
 // 三处预算的缺省值：必须与 config.Load 的 viper.SetDefault 和示例配置一致
@@ -2143,6 +2169,11 @@ func warnUnknownConsentPolicy(cfg config.AIConfig) {
 // consentPolicy 返回当前生效的审批策略（graded/all/off）。
 func (c *Copilot) consentPolicy() string {
 	return effectiveConsentPolicy(c.cfg.ConsentPolicy, c.cfg.ConsentMode)
+}
+
+// longTaskPolicy 返回当前生效的长任务挂起策略（阈值来自 ai.long_task_threshold_sec）。
+func (c *Copilot) longTaskPolicy() LongTaskPolicy {
+	return longTaskPolicyFromConfig(c.cfg)
 }
 
 // newTraceID 生成一次执行的 trace id：tr-<unixnano>-<4hex>。

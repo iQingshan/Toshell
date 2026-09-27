@@ -392,6 +392,7 @@ func (m *Manager) ClearConnection(id string) {
 	}
 }
 
+// GetStatus 返回会话存活状态（"active" / "asleep"）。
 func (m *Manager) GetStatus(id string) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -406,6 +407,40 @@ func (m *Manager) GetStatus(id string) (string, error) {
 	}
 
 	return "active", nil
+}
+
+// NextLivenessFlip 返回该会话「判活结论最早可能发生翻转」的时刻。
+//
+// 用途（v1.4.0 S2）：等待任务结果的一方需要「会话掉线就立刻中止等待」这个既有熔断语义，
+// 但又不能靠固定间隔轮询（那正是本轮要消除的 sleep 轮询）。判活结论由
+// isAliveAt 的时间函数唯一决定，因此只要算出它下一次可能翻转的时刻，在那里醒一次复核即可：
+// 在此之前 GetStatus 的结果**不可能**改变，中间任何时刻醒来都是白醒。
+//
+// 翻转时刻与 isAliveAt 严格同源：alive(t) = t < LastSeen+timeout
+//
+//	∨ (t < BusyUntil ∧ t < LastSeen+timeout*BusyGrace)
+//
+// 取并集上界即 max(LastSeen+timeout, min(BusyUntil, LastSeen+timeout*BusyGrace))。
+//
+// ok=false 表示会话不存在（调用方可直接按离线中止等待）。
+func (m *Manager) NextLivenessFlip(id string, now time.Time) (time.Time, bool) {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if !ok || session == nil {
+		return time.Time{}, false
+	}
+	timeout := session.effectiveTimeout()
+	flip := session.LastSeen.Add(timeout)
+	if grace := session.LastSeen.Add(timeout * BusyGrace); session.BusyUntil.After(flip) && grace.After(flip) {
+		busy := session.BusyUntil
+		if busy.Before(grace) {
+			flip = busy
+		} else {
+			flip = grace
+		}
+	}
+	return flip, true
 }
 
 func (m *Manager) Search(query string) []*Session {

@@ -24,6 +24,15 @@
 
 **目标**：把「单轮同步阻塞 + 状态全在内存 + 长结果整段灌上下文」换成可恢复、有预算、可回放的长任务执行。
 
+- **异步任务状态机：提交 → 句柄 → 事件驱动恢复（本版核心增量之二）**
+  - **彻底去掉 sleep 轮询**：`task.Manager` 新增终结通知原语（`Subscribe`/`WaitSettled`/`WaiterCount`，注册与状态判定共用一把锁，避免"判定非终态→此刻终结→永远收不到通知"的丢通知窗口；通道一次性关闭、等待者摘除不留泄漏），通知挂在**真正的状态变更点**（Complete/Fail/Cancel/Delete/CleanupOldTasks）。`pushAndAwait`/`task_wait`/`execAndAwait` 与剧本的 `waitForTask` 全部改为等待通知：一次 300s 下载不再空转 600 次、每个等待者少掉最多 500ms 固定延迟。**对外契约逐字段不变**（超时仍表示"仍在跑"、错误码与响应字段名全等，有测试断言 key 集合）。
+  - **Agent 长任务不再占满并发槽位**：预估超时 ≥ `ai.long_task_threshold_sec`（默认 **150s**）的任务类工具改为「提交任务 → run 进入 `awaiting_task` 并落库 `waiting_on` → 退出循环（**释放 agent_concurrency 槽位**）→ 任务完成事件唤醒 → 结果接回上下文与轨迹 → 重入循环」。判定是纯函数 `ShouldSuspendLongTask`（含 `NeverSuspend` 运维开关；阈值 ≤0 回落默认，不允许用它关掉）。恢复复用既有的**审批挂起**模式（同一套"消息在 run 里 + 恢复即重入循环 + trace 不变"），两套状态一条恢复路径。
+  - **重启恢复**：启动时扫描 `agent_runs.status=awaiting_task`，按 `waiting_on.internal_task_id` 与 `tasks` 表对账 —— 已完成→重建 run（复用 run_id/trace_id）+ 最小上下文 + 接回结果并继续；仍在跑→重新订阅等它完成；任务已丢失/`waiting_on` 不可解析→**明确终态**（`failed` + `task_lost`/`waiting_on_unparsable`）+ 中文说明，绝不静默卡在等待态。`task.Manager` 顺带修掉一个既有缺陷：Complete/Fail 原先要求任务在内存里，**重启前下发的任务结果永远丢失**，现在会从库回填。
+  - **可观测性**：新状态 `awaiting_task`，新 SSE 事件 `task_wait`（含 task_id/correlation_id/timeout_sec/trace_id）；`GET /agent/runs/{id}` 回传 `waiting_on`/`task_id`/`task_timeout_sec`；挂起的 run 不再被"终态后 30 分钟清理"回收；`GET /settings` 回传生效阈值。
+  - **顺手修掉的接线漏点**：`ReconfigureCopilot` 的重建分支只重注入结果外置存储、**漏了长任务通道** → "AI 原本未启用、之后在设置页启用"这条路径上造出来的 Copilot 没有长任务能力，所有工具静默退回同步等待（无任何报错，只有重启才恢复）。现已同时注入，并用 `LongTaskEnabled()` + `TestReconfigureCopilotReinjectsLongTask` 钉住。
+  - **验证**：`go test ./...` 全绿（13 个包，本增量新增 37 个用例，含新的 `task` 包）；`scripts/mcp_smoke.ps1` **18/18**；`scripts/e2e_smoke.ps1` **19 项 0 失败**（其中"真实植入端上线 + whoami 任务 completed"证明改造后的事件驱动等待在真实植入端上工作正常）；另补一条**收益断言**用例 `TestSuspendedLongTaskReleasesAgentSlot`（并发上限压到 1：挂起后槽位必须立刻可再获取，且第二个 run 能同样挂起）—— 防止将来把挂起实现成"在循环里等事件"而用例照样全绿。
+  - **已知边界（如实记录）**：`database.truncateTaskContent` 仍把 `tasks.output` 截到 500 字节 → 重启恢复拿到的结果最多 500 字节（已在给模型的说明里显式标注）；挂起期间的 `max_wallclock_sec`/`max_turns` 预算会重置（沿用审批恢复的既有行为，理论上可被多次挂起绕过墙钟上限，后续应把用量接到 `agent_runs` 已有字段）；阈值目前只在 YAML/viper 可配（GET 已回传生效值，未加入设置页 PUT 白名单）；旧前端不认识 `awaiting_task` 与新事件 `task_wait`（走 default 忽略，不影响既有功能）；新用例未跑 `-race`（本机 CGO_ENABLED=0，Windows 上 race 需要 cgo）。
+
 - **长结果外置 + 句柄内联 + 分页回读（本版核心增量之一，完整设计见 [docs/AGENT-RESULT-OFFLOAD.md](docs/AGENT-RESULT-OFFLOAD.md)）**
   - **唯一转换点**：新增 `mcp.InlineForModel`/`mcp.ModelView`（放在 `mcp` 包：外置信封、句柄、分页语义本就在那里，且 `mcp` 不依赖 `ai`/`api`/`config`，三个消费方都能复用同一把尺子）。两个 ReAct 循环 + 两条审批恢复路径**全部**改走它，**删掉 8 处 `truncate(out, 4000)` 字符串硬截断**。
   - **判定**：≤ `mcp.inline_limit`（默认 8192 字节）→ 原文；超限且外置成功 → 模型只看到**统一信封 JSON（摘要 + 句柄 + 总字节 + 显式截断说明）**；外置失败/未配置存储 → 信封里放**开头预览**（作为 JSON 字符串字段转义，因此**恒为合法 JSON**）+ 说明"这不是全部、没有句柄可回读"。硬性质：**凡被截断，模型拿到的一定是合法 JSON 且必带显式标注**。

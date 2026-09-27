@@ -157,6 +157,14 @@ ai:
     max_wallclock_sec: 900
     # 异步自主 Agent 并发上限（同时进行的任务数，默认 2，范围 1-8）。每个任务起一个 goroutine，超出则排队。
     agent_concurrency: 2
+    # 长任务挂起阈值（秒，默认 150）：Agent 内部对"内部任务型"工具的预估超时 ≥ 该值时，改为
+    # 「提交任务 → run 挂起（awaiting_task）→ 释放并发槽位 → 任务完成事件驱动恢复」；
+    # 低于阈值照旧同步等（等待本身已是事件驱动，不再 sleep 轮询）。
+    #   - 为什么是 150：credentials/fileless_exec/plugin_load（180s）与 file_download（300s）是
+    #     分钟级、真正会占满 agent_concurrency 的那一类；而 file_list/process_list/screenshot
+    #     （60~90s）与 exec 默认 120s 通常秒级返回，挂起它只会更慢（要付落库 + 退出/重入循环的代价）。
+    #   - 留空或 <=0 一律按默认值处理（不支持用它关掉长任务挂起）。
+    long_task_threshold_sec: 150
     # 工具下载域名白名单（远程下载 remote_download 只能从这些域名拉取；留空=允许任意公网域名，
     # 但始终拒绝内网/回环地址，防 SSRF）。
     download_allowlist: []
