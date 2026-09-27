@@ -3,6 +3,7 @@ package drivers
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -120,6 +121,21 @@ func TestSummaryCheapPathDoesNotVerify(t *testing.T) {
 		t.Fatalf("便宜路径不应填 SHA256/Verify（那是 List 的职责）：%+v", sum.RW)
 	}
 	// List 仍然照旧做完整自检（既有语义不变）
+	if !SelfCheckSupported() {
+		// 非 Windows 平台：verifyWithRaw 会**短路**（"非 Windows 平台不做驱动自检"），
+		// 签名校验这条路径本身不存在，所以"调用计数 > 0"这个断言在这里无法成立。
+		// 但不能因此什么都不测：仍要断言 List() **仍然走自检入口**并给出占位结论
+		// （将来有人把 List 改成"跳过整段自检"就会被这里拦住）。
+		// 这次是 CI（Linux）先抓到的 —— 本机是 Windows，计数断言照过。
+		lst := List()
+		if len(lst) == 0 || lst[0].Verify == nil {
+			t.Fatalf("List() 必须仍然带自检结论，实际 %+v", lst)
+		}
+		if !strings.Contains(strings.Join(lst[0].Verify.Warnings, "；"), "非 Windows") {
+			t.Fatalf("非 Windows 平台应有「不做驱动自检」的占位警告，实际 %+v", *lst[0].Verify)
+		}
+		return
+	}
 	if calls == 0 {
 		_ = List()
 	}

@@ -18,6 +18,7 @@ import (
 	"toshell/internal/common/features"
 	"toshell/internal/common/types"
 	"toshell/internal/server/config"
+	"toshell/internal/server/drivers"
 	"toshell/internal/server/session"
 	"toshell/internal/server/task"
 )
@@ -460,10 +461,39 @@ func TestAVOpsByovdLoadSelfcheckAndBase64(t *testing.T) {
 		"driver_b64":   base64.StdEncoding.EncodeToString([]byte("real-bytes")),
 		"service_name": "demo", "name": "demo",
 	}, 0, ""))
+	if !drivers.SelfCheckSupported() {
+		// 非 Windows 平台（CI 的 Linux runner）：加载前自检**根本无法执行**（没有 WinVerifyTrust），
+		// 所以这里按平台设计不会返回 driver_selfcheck_failed，而是"给明确警告后仍放行"。
+		// 这条断言同样有意义：它证明"自检不可用"不会被静默当成"自检通过" —— 否则在 Linux 上
+		// 托管的控制端会看起来和 Windows 一样安全（CI 上暴露出来的正是这个假设）。
+		if code3 != 200 {
+			t.Fatalf("非 Windows 平台自检不可用时按设计应放行并给警告，实际 HTTP %d code=%v body=%v",
+				code3, body3["code"], body3)
+		}
+		if !warningsContainText(body3, "非 Windows") {
+			t.Fatalf("非 Windows 平台必须给出「不做驱动自检」的明确警告，实际 warnings=%v", body3["warnings"])
+		}
+		t.Log("非 Windows 平台：已断言「自检不可用 → 明确警告」而不是静默通过")
+		return
+	}
 	if code3 != 400 || body3["code"] != avops.CodeDriverSelfcheckFailed {
 		t.Fatalf("哈希不符应硬拒 = HTTP %d code=%v, want 400 %s（body=%v）",
 			code3, body3["code"], avops.CodeDriverSelfcheckFailed, body3)
 	}
+}
+
+// warningsContainText 判断响应里的 warnings[]（[]interface{} of string）是否含某段文字。
+func warningsContainText(body map[string]interface{}, want string) bool {
+	raw, ok := body["warnings"].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, w := range raw {
+		if s, ok := w.(string); ok && strings.Contains(s, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── 会话可用性判定（排障入口）───────────────────────────────────────────────

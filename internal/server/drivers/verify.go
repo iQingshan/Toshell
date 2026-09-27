@@ -164,6 +164,21 @@ func Verify(path string) VerifyResult {
 	return verifyWithRaw(path, raw, expected, declared)
 }
 
+// SelfCheckSupported 本平台是否真的能执行驱动加载前自检（Authenticode 签名校验）。
+//
+// 为什么要把它导出来：调用方（以及单测）必须能区分两种截然不同的结论 ——
+//   - "自检跑过了，没发现问题"；
+//   - "**自检根本没跑**（无 WinVerifyTrust 的平台），只给了占位警告"。
+//
+// 前者可以放行，后者只是"我们无法判断"。把两者混成同一个 `VerifyResult`（都只有 Warnings）
+// 会让"在 Linux 上托管的控制端"看起来和 Windows 一样安全 —— 这类"看起来验过了"的哑判定
+// 正是 CI 上暴露出来的那次回归（`profile_test.go` 与 byovd_load 的自检用例假设了
+// `verifyWithRaw`/`VerifyBytes` 一定会调用签名校验）。
+//
+// 当前实现：Windows = true（走 WinVerifyTrust）；其它平台 = false（见 verify_other.go）。
+// 注意它**不改**放行策略（非 Windows 上仍是"给警告后允许加载"），只把事实暴露出来。
+func SelfCheckSupported() bool { return platformSupported }
+
 // verifyWithRaw 用**已读入内存**的驱动字节做自检（List() 已经读过一次，避免二次全文件读取）。
 // expectedSHA / declaredSigner 由调用方从 manifest 里取出，同样避免重复解析 manifest.json。
 func verifyWithRaw(path string, raw []byte, expectedSHA, declaredSigner string) VerifyResult {
