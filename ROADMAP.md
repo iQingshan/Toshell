@@ -63,7 +63,7 @@
   4. ✅ **控制循环三处硬上限 + 防死循环**（已完成）：`ai.max_turns=20`（统一）、`ai.max_tool_calls=40`、`ai.max_wallclock_sec=900`，触发即停并记 `stop_reason`；同工具同参数签名第 2 次提示换策略、第 3 次判 `loop_detected`（只读工具豁免）。判定逻辑为纯函数（`shouldStopRun`/`loopSignature`），有单测。
   5. ✅ **审批分级**（已完成）：`ai.consent_policy: graded|all|off`（旧值 `auto→off`、`normal→graded` 兼容），按注册表 read/confirm/danger 分级，未注册工具按 danger、`delegate` 恒危险；设置页可改，接口回传的是**生效策略**，旧键在保存时按同一语义同步写回。
   6. **可观测性**：✅ trace id 全链路（run/事件/日志/工具调用/**HTTP 响应**，`DoneInfo` 带 `stop_reason`）；⬜ SSE `id`/`Last-Event-ID` 断点续传、失败 replay。
-  7. **评估门禁**：离线黄金集（输入→期望工具序列→期望结论）+ 在线指标 + 回归门禁。
+  7. 🟡 **评估门禁**（离线部分已完成）：黄金集 `internal/server/ai/testdata/golden/cases.json`（**12 例**：纯问答 / 工具往返 / 防死循环（含只读豁免）/ 轮次·工具数·token 三种预算 / 分级审批挂起（含 `delegate` 与未注册工具 fail-closed）/ 大结果外置与句柄回读 / 历史折叠保真）+ 桩 LLM 与假执行器（不联网、无需真实模型与植入端），`scripts/eval.ps1` 一键跑，随 `./internal/server/ai/...` 进 CI；另有一条**全局不变量**：任何一次发往上游的消息里 `tool` 回执都必须能配到 `assistant.tool_calls`。**待做**：在线指标（`/agent/metrics`、Dashboard 卡片）与前端状态条（计划 M5，属可选）。
 
 ### S3 免杀：分层治理（先解决"起不来"，再谈"藏得深"）
 

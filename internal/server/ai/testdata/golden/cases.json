@@ -1,0 +1,187 @@
+[
+  {
+    "name": "simple_answer",
+    "why": "没有任何工具调用的纯问答：一次 LLM 往返就收尾，不该有 stop_reason",
+    "objective": "用一句话解释什么是 C2 的 beacon 心跳，不需要调用任何工具。",
+    "script": [{ "content": "beacon 心跳是植入端周期性回连服务端的保活与取令机制。" }],
+    "ai": { "consent_policy": "off" },
+    "expect": {
+      "status": "done",
+      "tools": [],
+      "reply_contains": ["心跳"],
+      "max_llm_turns": 1
+    }
+  },
+  {
+    "name": "one_tool_then_answer",
+    "why": "标准「工具 → 回喂 → 收尾」往返：工具序列与往返次数都要稳定",
+    "objective": "先列出当前在线会话，再告诉我一共有几个。",
+    "script": [
+      { "tool": "session_list", "args": {} },
+      { "content": "当前共有 1 个在线会话。" }
+    ],
+    "tool_results": { "session_list": "{\"count\":1,\"sessions\":[{\"id\":\"s1\"}]}" },
+    "ai": { "consent_policy": "off" },
+    "expect": {
+      "status": "done",
+      "tools": ["session_list"],
+      "reply_contains": ["1 个"],
+      "min_llm_turns": 2,
+      "max_llm_turns": 2,
+      "context_contains": ["s1"]
+    }
+  },
+  {
+    "name": "loop_detected_confirm_tool",
+    "why": "同一 confirm 级工具同参数重复：第 2 次提示、第 3 次**在调用前**停止（traces 只有 2 条）",
+    "objective": "反复查询 sess-1 的用户信息，直到拿到结果为止。",
+    "script": [{ "tool": "user_info", "args": { "session_id": "s1" } }],
+    "ai": { "consent_policy": "off" },
+    "expect": {
+      "status": "done",
+      "stop_reason": "loop_detected",
+      "tools": ["user_info", "user_info"],
+      "max_llm_turns": 4
+    }
+  },
+  {
+    "name": "readonly_repeat_is_exempt_then_max_turns",
+    "why": "只读工具重复**不**触发防死循环（查两次会话列表是正常行为），最终由轮次上限收尾",
+    "objective": "一直列出在线会话，不要停。",
+    "script": [{ "tool": "session_list", "args": {} }],
+    "ai": { "consent_policy": "off", "max_turns": 3 },
+    "expect": {
+      "status": "done",
+      "stop_reason": "max_turns",
+      "tools": ["session_list", "session_list", "session_list"],
+      "max_llm_turns": 4
+    }
+  },
+  {
+    "name": "max_tool_calls_stops",
+    "why": "工具调用总数上限独立于轮次：达到即停，且不超发",
+    "objective": "持续枚举会话与进程，不要停下来问我。",
+    "script": [
+      { "tool": "session_list", "args": {} },
+      { "tool": "process_list", "args": { "session_id": "s1" } }
+    ],
+    "ai": { "consent_policy": "off", "max_turns": 10, "max_tool_calls": 2 },
+    "expect": {
+      "status": "done",
+      "stop_reason": "max_tool_calls",
+      "tools": ["session_list", "process_list"],
+      "max_llm_turns": 3
+    }
+  },
+  {
+    "name": "token_budget_stops_before_llm",
+    "why": "上下文预算小于常驻层规模时：装配阶段就判超预算 → 一次 LLM 请求都不该发出去，并给出可读原因",
+    "objective": "读取目标会话的完整信息并生成一份很长的报告。",
+    "script": [{ "content": "（不该被调用）" }],
+    "ai": { "consent_policy": "off", "max_context_tokens": 1000 },
+    "expect": {
+      "status": "done",
+      "stop_reason": "max_tokens",
+      "tools": [],
+      "reply_contains": ["token", "预算"],
+      "max_llm_turns": 0
+    }
+  },
+  {
+    "name": "consent_pause_confirm_level",
+    "why": "graded 策略下 confirm 级工具执行前挂起：状态与 stop_reason 都是 awaiting_consent，且未下发",
+    "objective": "读取 sess-1 的系统信息。",
+    "script": [{ "tool": "system_info", "args": { "session_id": "s1" } }],
+    "ai": { "consent_policy": "graded" },
+    "expect": {
+      "status": "awaiting_consent",
+      "stop_reason": "awaiting_consent",
+      "tools": [],
+      "max_llm_turns": 1
+    }
+  },
+  {
+    "name": "delegate_cannot_bypass_consent",
+    "why": "回归 v1.3.5 的越权点：delegate 会跑含下发/凭据的剧本，必须按 danger 走审批（不能被只读豁免或未登记放过）",
+    "objective": "用剧本对 sess-1 做一次完整的信息收集。",
+    "script": [{ "tool": "delegate", "args": { "playbook_id": "recon-windows", "session_id": "s1" } }],
+    "ai": { "consent_policy": "graded" },
+    "expect": {
+      "status": "awaiting_consent",
+      "stop_reason": "awaiting_consent",
+      "tools": [],
+      "max_llm_turns": 1
+    }
+  },
+  {
+    "name": "unknown_tool_fails_closed",
+    "why": "未注册工具必须按 danger 处理（fail-closed）：模型幻觉出不存在的工具时也得先问人，而不是直接执行",
+    "objective": "调用 whatever_tool 帮我看看目标主机。",
+    "script": [{ "tool": "whatever_tool", "args": { "x": "1" } }],
+    "ai": { "consent_policy": "graded" },
+    "expect": {
+      "status": "awaiting_consent",
+      "stop_reason": "awaiting_consent",
+      "tools": [],
+      "max_llm_turns": 1
+    }
+  },
+  {
+    "name": "big_result_externalized_with_handle",
+    "why": "大结果必须外置成句柄、上下文里不留原文，且轨迹上带 handle+truncated（截图 base64 那个历史 bug 的回归）",
+    "objective": "列出服务端可用的工具清单并总结。",
+    "script": [
+      { "tool": "tool_list", "args": {} },
+      { "content": "清单很长，我已拿到摘要与句柄，需要细节时可以按页回读。" }
+    ],
+    "big_result": { "tool": "tool_list", "repeat": 20000 },
+    "ai": { "consent_policy": "off", "inline_limit": 1024 },
+    "expect": {
+      "status": "done",
+      "tools": ["tool_list"],
+      "any_tool_has_handle": true,
+      "reply_contains": ["句柄"],
+      "context_contains": ["result_read"],
+      "context_not_contains": ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
+    }
+  },
+  {
+    "name": "result_read_pages_back_by_handle",
+    "why": "回读闭环：模型用句柄调 result_read 能把内容取回来（脚本里的 $LAST_HANDLE 由桩 LLM 从上下文现取）",
+    "objective": "列出服务端工具清单，并把外置结果的开头读回来给我看。",
+    "script": [
+      { "tool": "tool_list", "args": {} },
+      { "tool": "result_read", "args": { "handle": "$LAST_HANDLE", "offset": "0", "limit": "200" } },
+      { "content": "已按句柄回读前 200 字节。" }
+    ],
+    "big_result": { "tool": "tool_list", "repeat": 20000 },
+    "ai": { "consent_policy": "off", "inline_limit": 1024 },
+    "expect": {
+      "status": "done",
+      "tools": ["tool_list", "result_read"],
+      "min_llm_turns": 3,
+      "reply_contains": ["回读"]
+    }
+  },
+  {
+    "name": "history_folding_keeps_real_tool_name",
+    "why": "上下文分层：超过工作层保留条数后，更早的消息折叠成摘要，摘要里必须出现**真实工具名**与「非原文」标注（旧实现写死 task_wait）；每轮参数不同是为了避开防死循环，真正想验的是折叠",
+    "objective": "依次读取下列目录并汇总：C:\\A、C:\\B、C:\\C、C:\\D、C:\\E、C:\\F。",
+    "script": [
+      { "tool": "file_list", "args": { "session_id": "s1", "path": "C:\\A" } },
+      { "tool": "file_list", "args": { "session_id": "s1", "path": "C:\\B" } },
+      { "tool": "file_list", "args": { "session_id": "s1", "path": "C:\\C" } },
+      { "tool": "file_list", "args": { "session_id": "s1", "path": "C:\\D" } },
+      { "tool": "file_list", "args": { "session_id": "s1", "path": "C:\\E" } },
+      { "tool": "file_list", "args": { "session_id": "s1", "path": "C:\\F" } },
+      { "content": "六个目录都读完了，已汇总。" }
+    ],
+    "ai": { "consent_policy": "off", "max_turns": 12, "context_working_keep": 4 },
+    "expect": {
+      "status": "done",
+      "tools": ["file_list", "file_list", "file_list", "file_list", "file_list", "file_list"],
+      "reply_contains": ["汇总"],
+      "context_contains": ["历史摘要-非原文", "工具 file_list"]
+    }
+  }
+]
