@@ -78,7 +78,8 @@ sleep mask 具体做了什么（便于自查与排错）：
 
 | 手段 | 实现位置 | 验证到什么程度 |
 |---|---|---|
-| 编译期字符串混淆（`xd("hex")` 运行时解码） | `internal/server/builder/implant_obfuscate.go` + 各植入端模板（解码层 `implant/obfuscate.go`） | ✅ **实测**（字符串体检） |
+| 编译期字符串混淆（`xd("hex")` 运行时解码） | `internal/server/builder/implant_obfuscate.go` + 各植入端模板（解码层 `implant/obfuscate.go`） | ✅ **实测**（字符串体检 + 真实载荷上线）：v1.4.0 起覆盖**含转义的双引号字面量**（Windows 路径/设备名）与**反引号原始字符串**（注册表键/多行脚本，struct tag 仍原样保留），见下方"字符串明文漏点"；`implant_obfuscate_test.go` 覆盖三类字面量 + tag/const/注释/短串不误伤 + 幂等 |
+| **DLL 路径的静态降特征对齐**（v1.4.0 S3 补） | `internal/server/builder/builder.go` 的 `compileLibrary()`：补 `injectBuildConstants` + `obfuscateImplantSources` | ✅ **实测**（产物计数）：DLL 修复前明文高信号 API 名 **11** 处、`http://` **2**、ETW **4**、持久化注册表键 **3**；补上混淆后降到与 exe 同水平（只剩 Go 标准库自带的各 1 处） |
 | pclntab 中性化（函数名/文件名改中性名） | `internal/server/builder/implant/` 各模板（`main.go` 等） | ✅ **实测**（字符串体检） |
 | BOF 按需编译（**默认关**） | `internal/server/builder/implant/bof_windows.go`（`//go:build windows && !light && bof`）与默认实现 `bof_stub_windows.go`；门控 `internal/server/builder/builder.go` 的 `buildTagList` | ✅ **实测**（字符串体检）：默认载荷 `beaconAPI=0`，勾选后 22（证明门控生效）；`gate_scan_test.go: TestBOFIsOptIn` |
 | Go 构建指纹擦除（原地置零，长度不变） | `internal/server/builder/harden.go`（`ScrubGoFingerprint`：`\xff Go buildinf:` 魔数 / buildinfo 窗口内 `go1.x.y` / `Go build ID:` 前缀） | ✅ **实测**（字符串体检）：默认载荷 `Go buildinf=0`、`Go build ID:=0`；`harden_test.go` 覆盖擦除/幂等/边界 |
@@ -87,6 +88,26 @@ sleep mask 具体做了什么（便于自查与排错）：
 | 高信号标识符（`loadShellcode` 等）默认不进载荷 | 同 pclntab 中性化 | ✅ **实测** |
 
 静态体检的完整口径：默认载荷 `beaconAPI=0`、`loadShellcode=0`、`Go buildinf=0`、`Go build ID=0`、`kgameprotect/byovd/HVCI=0`、**`go1.` 版本串=0**。
+
+#### 实测发现的字符串明文漏点（v1.4.0 S3，已修）
+
+用 `windows/386` 产物逐条 `strings` 体检（高信号特征计数，脚本口径见 §4）：
+
+| 产物 / 时点 | 明文高信号 API 名 | `http://` | ETW | 持久化注册表键 | 设备路径 |
+|---|---|---|---|---|---|
+| **DLL 修复前**（`format=dll`，白加黑链交付的正是它） | **11** | **2** | **4** | **3** | 2 |
+| DLL 修复后 | 1（仅 Go 标准库的 `WriteProcessMemory` 符号表） | 0 | 0 | 1（仅标准库 `Time Zones`） | 1（仅标准库 `\\.\UNC`） |
+| exe 修复前 | 1（标准库） | 0 | 2 | 3 | 2（1 处标准库） |
+| exe 修复后 | 1（标准库） | 0 | 0 | 1（标准库） | 1（标准库） |
+
+两个根因：
+
+1. **DLL 路径漏了两道工序**：`compileLibrary()` 只做了 `copyImplantSource` + `processTemplates`，**没做** `injectBuildConstants`（每构建随机配置块魔数/密钥）与 `obfuscateImplantSources`（字符串混淆）——而 exe 路径一直都有。等于"最该藏的那条链"把 C2 地址、注册表键、ETW/注入 API 名**明文**交出去。
+2. **混淆器本身有两处盲区**：只处理"简单双引号字面量"，于是 ① 含转义的 `"\\\\.\\kgameprotect"`、`"HKCU\\Software\\..."` 这类（Windows 路径/设备名在 Go 源码里的**标准写法**）被跳过；② 全部反引号原始字符串被跳过（旧理由只有一条："struct tag 不能改"）。修法：转义字面量用 `strconv.Unquote` 求运行期真实值再 XOR+hex（`xd()` 是纯字节解码，`\r\n`/NUL/非 UTF-8 都能原样还原）；原始字符串改为"**非 struct tag、非 const 行、≥4 字节**就混淆"，struct tag 仍原样保留。
+
+代价（如实记录）：混淆把明文换成两倍长的 hex，**产物变大** —— exe 3456757 → 3467509（**+0.3%**），DLL 3414528 → 3511296（**+2.8%**，因为 DLL 此前完全没混淆）。这是 §4 体积分档要权衡的：默认档仍远低于 3.2MB 目标。
+
+行为回归验证：`scripts/e2e_smoke.ps1` 用混淆后的模板真实构建并**执行** Windows 载荷（19 项 0 失败，会话上线 + `whoami` 回执正常），证明混淆没有破坏路径/格式串/脚本模板的运行期语义。
 
 #### 实测发现的指纹漏点（v1.4.0 S3，已修）
 

