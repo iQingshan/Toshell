@@ -21,7 +21,7 @@ description: 通过 REST API 远程驱动 ToShell C2 团队服务器 —— 认�
 
 ## 2. 端点总览
 
-`setupRoutes` 注册 **106 条 `/api/v1` 路由**（107 个方法+路径组合；另有 `/robots.txt`、`/__gate`、SPA 兜底）。除 `health`/`login`/`implant/*` 外均需认证。
+`setupRoutes` 注册 **109 条 `/api/v1` 路由**（110 个方法+路径组合；v1.4.0 S6 新增 3 条 AV-Ops 路由，见 §13。另有 `/robots.txt`、`/__gate`、SPA 兜底）。除 `health`/`login`/`implant/*` 外均需认证。
 
 - **认证/系统**：`POST /login`（`{username,password}`）· `GET /health` · `GET /system/stats`（goroutine/内存/会话数/uptime）· `GET /logs`（`?limit=1..1000` 默认 100、`?level=debug|info|warn|error`）· `GET /channels/health`（tcp/http/websocket/mqtt 在线数 + 运行监听器数）· `WS /ws/events`（见 §7）。
 - **会话**：`GET /sessions`（`{sessions[],count}`，status=`active`/`asleep`/`dead`）· `GET /sessions/{id}`（hostname/username/os/arch/pid/process_name/ip_addresses/domain/listener/listener_id/last_seen/comment…）· `PATCH /sessions/{id}`（`{comment}`）· `DELETE /sessions/{id}`（先下发 exit 再删记录）· `GET /sessions/{id}/capabilities`（`{features[],tabs{},source,source_note?}` —— **按载荷自报的能力位图推导**，即"界面上有什么 = 载荷里真编译进去了什么"；`source=reported` 表示新载荷上报了位图，`source=os_fallback` 表示这是**旧载荷**、只能按 OS 兜底推导且**未必等于真实能力**（此时带 `source_note` 说明），脚本/前端应据此决定要不要提示用户）· `POST /sessions/{id}/interact`（下发命令，返回 task_id；`{command,args[],execute_type,timeout,task_type}`）· `POST /sessions/{id}/plugin`（`{plugin_id,args}`）· `POST /sessions/{id}/workflow`（`{template_id}`，内部转剧本 run）。
@@ -30,6 +30,7 @@ description: 通过 REST API 远程驱动 ToShell C2 团队服务器 —— 认�
 - **进程/Shell/注入/提权**：`GET /sessions/{id}/processes` · `DELETE /sessions/{id}/processes/{pid}` · `POST /sessions/{id}/bof`（`{data(base64),args}`）· `WS /sessions/{id}/shell`（文本帧即输入；输出含 `\x00CWD\x00<目录>`）· `GET /injection/methods`（remote_thread/apc/early_bird/thread_hijack/process_hollowing/dll）· `POST /sessions/{id}/inject`（`{method,pid,shellcode?,dll_path?}`，`method=spawn` 自动构建载荷）· `POST /sessions/{id}/injection`（加 target_pid/target_process_name/target_path/parent_pid）· `POST /sessions/{id}/auto-inject`（`{pid,method?}`）· `POST /sessions/{id}/spawn`（`{file_name}`）· `POST /sessions/{id}/privesc-uac`（仅 Windows，空 body，一次性 exe 经 fodhelper 高完整性回连）· `GET /sessions/{id}/persistence` + `/install`（`{method}`）+ `/remove` · `POST /sessions/{id}/fileless-exec`（见 §6）。
 - **凭据/截图/中继**：`POST /sessions/{id}/credentials`（`{action}`：all(默认)/browser/wifi/rdp/lsa）· `POST /sessions/{id}/screenshot`（结果在 `GET /tasks/{id}` 的 `output`，base64；`{monitor,max_width,format(auto|png|jpeg),quality(20-95)}`）· `POST /sessions/{id}/screen-stream`（`{action:start|stop,fps(1-10),quality,max_kbps,monitor,max_width,format}`）· `POST /sessions/{id}/relay`（`{action:start|stop,addr}`）· `GET /relay-nodes`。
 - **EDR/驱动**：`POST /sessions/{id}/edr/blind`（ntdll 脱钩+ETW patch+Autologger 清理）· `/edr/kill`（`{processes[]}`，空=植入端默认列表）· `/edr/byovd-load`（`{driver_b64,service_name,device_name,kill_ioctl?,name?,description?}`，先自检见 §8）· `/edr/byovd-unload`（`{service_name}`）· `/edr/byovd-kill`（`{pid|process_name,driver?,device?,ioctl?}`）· `/edr/ppl-kill`（`{processes[]}`）· `GET /drivers`、`GET /drivers/{name}/verify`、`GET /drivers/{name}/raw`（响应头 `X-Driver-*`）。
+- **杀软对抗分级（AV-Ops，v1.4.0 S6 新增；**L0/L1 走这个入口，别再用上面那 6 条链裸调**）**：`GET /av-ops`（等级目录）· `GET /sessions/{id}/av-ops`（逐动作可用性判定，**排障先看这里**）· `POST /sessions/{id}/av-ops`（按动作定级 + 七步前置检查 + 审计）。详见 **§13**；上面那 6 条既有链路由**原样保留**（向后兼容，但绕过分级与审计，不推荐脚本使用）。
 - **载荷**：`GET /builders`（能力清单，含 `evasion`，见 §5）· `POST /builders`（**构建**，同步长耗时，见 §4）· `POST /builders/download`（按 `{id}`/`{name}` 下载，**绝不重新编译**）· `GET /implants`、`GET /implants/download/{name}` · `GET /implants/stored`（DB+目录合并，孤儿记录自动清理）· `GET /implants/stored/{id}`（`file:` 前缀=无 DB 记录的目录文件）· `GET /implants/stored/{id}/oneliner`（`{variants[],host,base_url,warning}`）· `DELETE /implants/{id}`。
 - **监听器**：`GET /listeners`（`connections`=实时在线会话数）· `POST /listeners`（201；`{name,type(tcp|http|websocket|mqtt),bind_addr,bind_port,public_addr,options{}}`）· `GET|PUT|DELETE /listeners/{id}`（PUT 对 `default-*` 同步写回配置，缺省字段保留）· `POST /listeners/{id}/start`（真实 bind，失败同步报错）· `POST /listeners/{id}/stop`。
 - **设置**：`GET /settings` · `PUT /settings`（见 §9）· `POST /settings/webhook/test`（`{url,content,format?,secret?}` → `{ok,platform,status_code,response,error}`）。
@@ -350,6 +351,117 @@ curl -s -X POST http://127.0.0.1:18082/mcp -H "Authorization: Bearer $MCP_TOKEN"
 
 **审计**：JSONL 一行一次调用（`ts/call_id/tool/level/args_digest/args_keys/status/error_code/duration_ms/remote_addr/client/token_id/result_bytes/truncated`）；**参数只记"带长度前缀"的摘要，且敏感键（名字含 pass/pwd/secret/token/key/cred/cookie/auth/hash/sign…）的值一律替换为 `<redacted>`**——连哈希都不给，避免弱口令被离线爆破。
 
+**工具面不含分级对抗动作（v1.4.0 S6）**：杀软对抗能力分级入口（§13）的 L1+ 动作（`edr_blind`/`edr_kill`/`byovd_*`/`ppl_kill`）**没有**任何对应的 MCP 工具，内置 Agent/副驾驶也无法触达；只有 L0 侦察走既有只读/确认级工具（`check_av`/`system_info`/`process_list`）。这一条由注册表扫描 + 源码扫描两条守卫测试钉住（`internal/server/api/handlers_avops_mcp_scan_test.go`）。
+
 **本地自检**：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/mcp_smoke.ps1` —— 起临时服务端（独立端口 + 独立 token + 只读白名单 + 低 RPM），跑 18 项权限/协议/设置页接线检查，**不需要任何植入端**，有 ❌ 即非 0 退出。
 
-> 版本契约：本文面向 **v1.4.0（开发中；上一发布版 v1.3.5）**。端点以运行中服务的 `GET /api/v1/mcp/tools`、`GET /api/v1/builders` 与源码为准；如与本文不符，以运行服务为准并回写本文。
+## 13. 杀软对抗能力分级（AV-Ops，v1.4.0 S6 新增）
+
+> **什么时候用这一节**：任何"杀软/EDR 对抗"动作（枚举安全软件、失明、击杀、BYOVD、PPL 清除）**都先用这里的入口**，不要再裸调 §2 里那 6 条既有链（`/edr/*`、`DELETE /processes/{pid}`）。既有链路由**原样保留**（向后兼容，既有脚本不会坏），但它们**没有分级、没有前置检查、没有审计**；分级入口比它们更严（例：`ppl_kill` 要求本机存在 `rw` 档驱动，没有就直接拒绝）。
+
+**分级（唯一真源 `internal/common/avops`，接口直接回显）**：
+
+| 等级 | 名称 | 默认 | 只读 | 破坏性 | 需 `confirm` | 自动重投递 | 本批动作 |
+|---|---|---|---|---|---|---|---|
+| `L0` | 侦察 | **开** | ✅ | ✗ | ✗ | ✅ | `av_detect` |
+| `L1` | 用户态温和 | **开** | ✗ | ✅ | ✅ | ✗ | `edr_blind` |
+| `L2` | 强 | 关 | ✗ | ✅ | ✅ | ✗ | `edr_kill`、`process_kill` |
+| `L3` | BYOVD | 关 | ✗ | ✅ | ✅ | ✗ | `byovd_load`、`byovd_unload`、`byovd_kill`、`ppl_kill` |
+| `L4` | 检测面抑制 | 关 | ✗ | ✅ | ✅ | ✗ | **无**（植入端还没有独立任务类型，`allow_l4=true` 也不会让任何动作可下发） |
+
+配置在 `server.yaml` 的 `avops` 段（**设置页不暴露，需改文件**）：`allow_l2`/`allow_l3`/`allow_l4` 默认 **false**（fail-closed）、`require_confirm` 默认 true、`default_timeout_sec` 120、`max_timeout_sec` 600。
+
+### 13.1 `GET /api/v1/av-ops` —— 等级目录
+
+`{ok,policy{allow_l2,allow_l3,allow_l4,require_confirm,default_timeout_sec,max_timeout_sec},tiers[{tier,name,description,default_enabled,read_only,destructive,needs_confirm,no_auto_retry,implemented,note?,allowed,denied_reason?,action_count,actions[]}],action_count,notes[],probe_hint}`。
+
+`allowed=false` 时 `denied_reason` 是中文原因。**先看这里**判断"这台服务端现在允许做到哪一级"，再决定要不要给按钮。
+
+### 13.2 `GET /api/v1/sessions/{id}/av-ops` —— 逐动作可用性（排障入口）
+
+`{ok,session_id,status,os,arch,features[],capability_source,capability_note?,policy,driver{kill_available,rw_available,total,purposes[],search_dirs[],note},actions[{name,tier,tier_name,task_type,capability,destructive,needs_confirm,auto_retry,summary,impact,required_params[],params[],allowed,reasons[{code,message}]}],summary{allowed,blocked,total},message}`。
+
+**会话不存在 → `404 {"error":"session not found: <id>"}`**（与其它会话级接口同一口径，见 §11）；会话存在但不在线 → `allowed=false` + `reasons[].code=session_inactive`（HTTP 仍 200）。
+
+`reasons[].code` 取值：`session_inactive`（不在线）· `tier_disabled`（等级被配置关闭）· `confirmation_required`（下发时要带 `confirm=true`）· `capability_missing`（载荷没编进这个能力）· `driver_unavailable`（L3 没有可用驱动，`ppl_kill` 会明确写"无 rw 档驱动"）。
+
+`capability_source`：`reported`（载荷自报能力位，权威）/ `os_fallback`（旧载荷没上报，按 OS 兜底，**未必等于真实能力**，此时带 `capability_note`）。注意 `byovd_load`/`byovd_unload` 的驱动**随请求携带**，预览阶段不做驱动检查（顶层 `driver` 块给出本机档位现状）。
+
+### 13.3 `POST /api/v1/sessions/{id}/av-ops` —— 执行
+
+```jsonc
+{
+  "action": "edr_blind",     // 见上表；未登记的动作一律拒绝（unknown_action）
+  "tier": "L1",              // 可选：只用于一致性核对，与实际等级不符 → 400 tier_mismatch
+  "confirm": true,           // L1 起必填（缺失 → 409 confirmation_required）
+  "params": { },             // 各动作参数见 §13.4
+  "timeout_sec": 120         // 0/缺省 = default_timeout_sec；> max_timeout_sec → 400（不截断）
+}
+```
+
+**七步前置检查**（失败即停，响应 `checks[]` 回传已完成步骤 + 失败那一步的 `code`）：① 会话存在且 active ② 动作在分级表里 + `tier` 一致 ③ 等级被配置允许 ④ `confirm` ⑤ 载荷能力位（复用 `features.Resolve`）⑥ L3 驱动（`byovd_load` 会**重跑** `VerifyBytes` 加载前自检）⑦ 显式超时。
+
+成功后**复用既有下发链路**（`task.Manager` + `TaskPusher`），响应：
+
+```jsonc
+{
+  "ok": true, "task_id": 42, "task_type": "edr_blind",
+  "action": "edr_blind", "tier": "L1", "tier_name": "L1 用户态温和",
+  "destructive": true, "confirmed": true, "auto_retry": false,
+  "impact": {
+    "destructive": true, "auto_retry": false, "reversible": false,
+    "summary": "会修改目标会话进程自身的内存：…（**如实**的影响评估，含会不会自动恢复）",
+    "targets": "目标会话进程自身（ntdll .text / ETW 写入函数）+ 目标机的 ETW Autologger 注册表项",
+    "timeout_sec": 120,
+    "irreversible_note": "该动作造成的改动不会自动回滚…"
+  },
+  "checks":   [{"step":1,"name":"session_active","ok":true,"detail":"…"}, …],
+  "warnings": ["破坏性任务**不会自动重试**：…"],
+  "message":  "已下发 edr_blind（L1）：结果走既有任务结果通道（GET /api/v1/tasks/42）"
+}
+```
+
+结果照旧从 `GET /api/v1/tasks/{task_id}` 取（`output`/`error`/`exit_code`/`status`）。
+
+**错误码（机器可读，响应里的 `code` 字段）**：
+
+| `code` | HTTP | 含义 |
+|---|---|---|
+| `bad_request` | 400 | 请求体不是合法 JSON / 缺字段 |
+| `unknown_action` | 400 | 动作不在分级表里（fail-closed） |
+| `unknown_tier` | 400 | 等级串未知（按最高风险 L4 处理并拒绝） |
+| `tier_mismatch` | 400 | `tier` 与动作实际等级不符（防"用低等级绕过确认"） |
+| `params_invalid` | 400 | 动作必填/取值不合法（如 `pid` 非整数、`driver_b64` 非 base64） |
+| `timeout_invalid` | 400 | `timeout_sec` 为负或超上限 |
+| `driver_selfcheck_failed` | 400 | 自备驱动未通过加载前自检（哈希不符等） |
+| `tier_disabled` | 403 | 该等级被 `avops.allow_l2/3/4` 关闭 |
+| `confirmation_required` | 409 | 需确认的动作缺 `confirm=true` |
+| `capability_missing` | 409 | 载荷能力位不含该动作所需能力 |
+| `session_inactive` | 409 | 会话不在线 |
+| `driver_unavailable` | 409 | L3 无可用驱动（`ppl_kill` 会说"无 rw 档驱动"） |
+| `session_not_found` | 404 | 会话不存在（响应体沿用 `{"error":"session not found: <id>"}`） |
+| `listener_unavailable` | 503 | listener 未就绪（沿用 `{"error":"listener not available"}`） |
+
+### 13.4 各动作参数
+
+| action | tier | `params` | 说明 |
+|---|---|---|---|
+| `av_detect` | L0 | 无 | 只读：枚举进程 + 服务端指纹比对。**零命中时任务 `output` 为空串**（既有行为），`status=completed` 即表示已回传 |
+| `edr_blind` | L1 | 无 | ntdll 脱钩 + ETW patch + ETW Autologger 清理（注册表改动**不自动恢复**） |
+| `edr_kill` | L2 | `processes[]`（可省，省=植入端内置 36 项名单） | `taskkill /F /IM` |
+| `process_kill` | L2 | `pid`（必填） | 结束指定 PID（PID 会复用，先 `process_list` 确认） |
+| `byovd_load` | L3 | `driver_b64`、`service_name`（必填）；`device_name`、`name`（可选） | `name` 用于在 `manifest.json` 里找期望 sha256 做自检；**有 `errors` 一律 400 拒绝** |
+| `byovd_unload` | L3 | `service_name`（必填） | 停止内核服务 + 删除 `.sys`（文件删除不可恢复） |
+| `byovd_kill` | L3 | `pid` 或 `process_name`（至少一个）；`device`+`ioctl` 或 `driver`（可省，省=本会话登记/目录档案） | 对 PPL 保护进程无效 |
+| `ppl_kill` | L3 | `processes[]`（必填，避免误用"内置清单"） | **必须存在 `purpose=rw\|both` 档驱动**，否则 409 `driver_unavailable` |
+
+### 13.5 两条硬规则（脚本必须知道）
+
+- **破坏性任务（L1 起）不会自动重试**：超时/断连/丢结果后服务端**不会**自动重新投递（重发=再执行）。服务端侧两条自动路径都被堵住：会话重连补发（`ListReplayable`）与 HTTP 轮询重投递（`RequeueSent`）都会跳过破坏性任务并写 WARN 日志。**需要重试请先确认目标机现状，再重新下发**（会分配**新的** `task_id`）。另外 `timeout_sec` 到点仍无结果时，服务端会把任务置为 `timeout` 终态并发审计 `avops_timeout`（v1.4.0 起服务端才会把任务判超时）。**未能保证的部分**：植入端每次新建连接都会清空按 task id 的结果缓存，所以"同一个 task_id 再送一次"在协议层仍会再执行 —— 只有"服务端不自动重发"这一层保证。
+- **Agent/MCP 工具面只暴露 L0**：MCP 注册表里**没有**本节的任何 L1+ 动作（工具面 38 个不变），L0 侦察走既有只读/确认级工具（`check_av`/`system_info`/`process_list`）。因此 **AI 副驾驶 / 自主 Agent / 外部 MCP 客户端无法**通过工具调用触发失明/击杀/BYOVD —— 需要 L1+ 时必须由人用本节的 REST 接口显式下发（带 `confirm=true`）。
+
+**审计**：每个决策写一条结构化事件（`avops_dispatched` / `avops_rejected` / `avops_timeout`，字段 `session/action/tier/task_id/step/code/confirm/detail`）。**日志里不出现凭据类内容**：`byovd_load` 的驱动字节只记长度，从不记内容。
+
+
+
+> 版本契约：本文面向 **v1.4.0（开发中；上一发布版 v1.3.5）**。端点以运行中服务的 `GET /api/v1/mcp/tools`、`GET /api/v1/builders`、`GET /api/v1/av-ops` 与源码为准；如与本文不符，以运行服务为准并回写本文。

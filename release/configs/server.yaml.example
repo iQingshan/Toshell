@@ -278,3 +278,40 @@ mcp:
     audit_path: ./logs/mcp-audit.jsonl
     # 出错即拒（默认 true）。
     fail_closed: true
+# ─── 杀软对抗能力分级（AV-Ops，v1.4.0 S6）────────────────────────────────────
+# 把既有的 6 条链（av_detect / edr_blind / edr_kill / byovd_* / ppl_kill / process_kill）
+# 收进一个分级、可审计、fail-closed 的入口：
+#   GET  /api/v1/av-ops                等级目录（这个服务端现在允许做到哪一级）
+#   GET  /api/v1/sessions/{id}/av-ops  对该会话的逐动作可用性判定（排障先看这里）
+#   POST /api/v1/sessions/{id}/av-ops  执行（服务端按动作定级 + 七步前置检查 + 审计）
+#
+# 等级：L0 侦察（只读，默认开）→ L1 用户态温和（默认开，需确认）→ L2 强（默认关）
+#       → L3 BYOVD（默认关，驱动仍由操作员自备、项目不内置）→ L4 检测面抑制（默认关）
+#
+# ⚠️ 安全前置：**默认让 L2+ 全部不可用**。这三项打开后，接口就能结束目标机上的安全软件
+# 进程、加载操作员自备的内核驱动、乃至做 PPL 清除 —— 都是在目标机上留下不可自动回滚
+# 后果的动作。因此出厂一律 false，只有明确要在授权范围内做对抗时才打开；即便如此，
+# 每次下发仍需在请求体里带 confirm=true（L1 起）。
+#   - 打开允许开关 ≠ 目标机真的能做：L3 还会逐个检查本机驱动目录里是否有对应档位的驱动
+#     （purpose=kill/rw/both），没有就明确拒绝（"无 rw 档驱动，不可用"），不会"试一下"。
+#   - 破坏性任务（L1 起）**不参与服务端任何自动重投递**：超时/断连/丢结果都不会自动重发
+#     （重发 = 再执行）。需要重试请先确认目标机现状，再重新下发（会分配新的 task_id）。
+#   - Agent/MCP 工具面**不暴露**本入口的任何 L1+ 动作；L0 侦察走既有只读工具
+#     （check_av / system_info）。接口字段与错误码见 docs/skills/toshell-api/SKILL.md。
+avops:
+    # 允许 L2（强：结束安全软件/进程）动作。默认 false。
+    allow_l2: false
+    # 允许 L3（BYOVD：加载/卸载/使用操作员自备驱动、PPL 清除）动作。默认 false。
+    allow_l3: false
+    # 允许 L4（检测面抑制）动作。默认 false。
+    # 说明：当前没有任何落地的 L4 动作（植入端还没有独立的 AMSI/ETW 抑制任务类型），
+    # 打开它也不会让任何动作变成可下发 —— 详见 GET /api/v1/av-ops 里 L4 的 note。
+    allow_l4: false
+    # 是否强制"需要确认的动作必须带 confirm=true"（默认 true）。
+    # 改成 false 只是放宽（L1+ 可以不确认就下发），不建议；接口会把生效值回显出来。
+    require_confirm: true
+    # timeout_sec 未指定（0）时用的显式超时（秒，默认 120）。
+    default_timeout_sec: 120
+    # 显式超时上限（默认 600）。**超上限直接拒绝**而不是截断：截断会让调用方以为
+    # 自己给的 3600 秒生效了，是典型的哑失败。
+    max_timeout_sec: 600

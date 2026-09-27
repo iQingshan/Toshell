@@ -140,7 +140,40 @@
 - （待填）
 
 ### 🛡 S6 杀软对抗能力分级
-- （待填）
+
+**第一批：AV-L0 侦察 + AV-L1 温和 —— 把 6 条散落的链收进一个分级、可审计、fail-closed 的入口。**
+
+改造前，"杀软对抗"不是一个功能而是 6 条互不相干的链（`av_detect` / `edr_blind` / `edr_kill` / `byovd_*` / `ppl_kill` / `process_kill`）：每条链各自有路由、各自的风险，**没有分级、没有前置检查、没有回滚、没有审计、没有风险回显** —— 操作员（和前端、脚本、AI）只能靠"发一次试试"来判断某个动作能不能下发，而"试一下"在这里恰恰是最贵的验证方式（试的是不可回滚的破坏动作）。
+
+- **分级模型（唯一真源 `internal/common/avops`，纯逻辑、表驱动、可单测）**：
+
+  | 等级 | 名称 | 默认 | 只读 | 破坏性 | 需确认 | 自动重试 | 本批落地动作 |
+  |---|---|---|---|---|---|---|---|
+  | L0 | 侦察 | **开** | ✅ | ✗ | ✗ | ✅ | `av_detect` |
+  | L1 | 用户态温和 | **开** | ✗ | ✅ | ✅ | ✗ | `edr_blind` |
+  | L2 | 强 | 关 | ✗ | ✅ | ✅ | ✗ | `edr_kill`、`process_kill` |
+  | L3 | BYOVD | 关 | ✗ | ✅ | ✅ | ✗ | `byovd_load`、`byovd_unload`、`byovd_kill`、`ppl_kill` |
+  | L4 | 检测面抑制 | 关 | ✗ | ✅ | ✅ | ✗ | **无**（见下） |
+
+  - **动作 → 等级 → 植入端任务类型 → 必需能力位**逐条与植入端 `executeTask` 的 `switch` 核对过（不是照抄文档）：`av_detect`(L0)/`edr_blind`(L1)/`edr_kill`(L2)/`process_kill`(L2)/`byovd_load`(L3)/`byovd_unload`(L3)/`byovd_kill`(L3)/`ppl_kill`(L3)，每个动作都带**如实的影响评估文案**（会改什么、会不会自动恢复、可能触发什么）。
+  - **`Destructive` 的口径比"杀进程/卸载/加载驱动"更宽**（刻意如此）：L1 的 `edr_blind` 会把系统级 ETW Autologger 注册表项 `Start` 置 0 且**不会自动恢复**，把它标成"非破坏性"会让调用方在超时后放心重试、让界面不给二次确认 —— 所以口径定为"是否留下不可自动回滚的改动"。宁可保守多警示，也不粉饰（影响文案里仍逐条写清具体做了什么）。
+  - **fail-closed 三条**：未知动作 → 拒绝（`unknown_action`）；未知等级串 → 归到最高风险并拒绝（`unknown_tier`）；动作表里出现未知等级（表本身坏了）→ 拒绝。请求里的 `tier` **只用于一致性核对**，与动作实际等级不符即拒（`tier_mismatch`）—— 不允许用 `tier=L0` 绕过 L2+ 的配置开关与二次确认。
+- **聚合入口（新增 3 个接口，既有 6 条链的路由与语义一行未改）**：
+  - `GET /api/v1/av-ops`：等级目录（每级元数据 + 动作清单 + 当前配置下是否允许 + 不允许时的中文原因 + 策略回显）。
+  - `GET /api/v1/sessions/{id}/av-ops`：**对该会话**的逐动作 `allowed` + `reasons[]`（`session_inactive` / `tier_disabled` / `confirmation_required` / `capability_missing` / `driver_unavailable` 各自带机器可读 code 与说明），另给 `capability_source`（自报 vs OS 兜底）与驱动档位块。**排障先看这里**，不要靠发一次试试。
+  - `POST /api/v1/sessions/{id}/av-ops`：body `{action, tier, confirm, params, timeout_sec}`，**七步前置检查**（① 会话 active ② 动作在表里 + tier 一致 ③ 等级被配置允许 ④ 需确认的动作必须 `confirm=true`（缺失 → 409 `confirmation_required`）⑤ 载荷能力位（复用 `features.Resolve`）⑥ L3 必须有操作员自备的可用驱动 ⑦ 显式超时）→ **复用既有下发链路**（`task.Manager` 的 `Create*` + `TaskPusher.PushTask`，不另造投递）→ 审计。响应含 `impact{}`（destructive/auto_retry/reversible/targets/summary + 不可回滚说明）、`checks[]`（逐步 OK/失败 + code）、`warnings[]`。
+  - **L3 比既有路由更严**（既有路由原样保留）：`ppl_kill` 要求本机存在 `purpose=rw|both` 档驱动，没有就明确报"**无 rw 档驱动，PPL 清除不可用**"，而不是让操作员退回句柄窃取"试一下"；`byovd_load` 在分级入口里**重跑加载前自检**（`drivers.VerifyBytes`，哈希不符硬拒），不留"绕过自检的后门"。
+  - 驱动档位判定走新增的 `drivers.Summary()`（只读 manifest 的**便宜路径**）：`List()` 会对每个 `.sys` 跑 Authenticode 校验且**超时结论不入缓存**，放进"每次刷页面都调"的可用性预览会撞爆 HTTP 写超时（默认 30s）。签名/哈希自检仍在下发时与 `GET /drivers/{name}/verify` 做。
+- **显式超时是真的**：植入端（builder 模板）用固定执行窗口（轻 90s / 重活 180s）、**不读** `task.Timeout`，所以把 `timeout_sec` 塞进任务字段只会造成"看起来生效其实没有"的哑失败。改为**服务端看门狗**：到点仍无结果 → `task.Manager.Expire` 置为 `timeout` 终态（v1.4.0 之前服务端从不把任务置为 timeout），并写审计 `avops_timeout`。`timeout_sec=0` 用默认（120），**超上限（600）直接拒绝而不是截断**（截断会让调用方以为自己给的 3600 秒生效了）。
+- **破坏性任务禁止自动重试（要求 #3）** —— 先读了任务系统的全部重投递路径再改：
+  - **堵住了两条**：① `task.Manager.ListReplayable`（TCP/WS/MQTT 会话重连热迁移补发）；② `task.Manager.RequeueSent`（HTTP 轮询通道把超期 `sent` 任务重新入队）。两者统一按**任务类型**判定 `avops.TaskNoRetry(taskType)`，并写 `WARN` 日志说明"有 N 条破坏性在途任务未补发 / 拒绝自动重投递"。判定用任务类型而不是内存标记，是因为 `task_type` 会落 sqlite 并在重启后读回，而内存标记重启即丢 —— 而重启恢复恰恰是最需要它的那条路径。
+  - **堵住的是"服务端自动重投递"**，且被拒任务**保持 `sent` 不改成终态**（我们并不知道植入端有没有执行过，擅自改终态会让操作员以为没执行从而重发 —— 那正是这条保护要避免的事）。
+  - **没能堵住的（如实）**：③ 植入端每次新建连接都会 `clearResultCache()`（服务端重启后 task id 会从 1 重排，不清缓存会命中旧结果），所以**"同一个 task ID 再送一次就一定会再执行"这件事在协议层没有被消除** —— 我们只是让服务端不再自动这么干；任何**新的**重投递路径、或人为把同一个 `TaskInfo` 再 `PushTask` 一次，依然会二次执行（现有代码里没有这样的路径，但没有协议级保险）。④ 既有的 6 条链路由仍可直接下发破坏性任务（向后兼容，刻意不动）—— 不过它们同样带破坏性 task_type，所以**同样被禁止自动重投递**。⑤ 操作员重新发起同一个动作会分配新的 task ID 并真的再执行一次：这是**设计意图**（新的授权），不是"自动重试"。
+  - 单测覆盖：`internal/server/task/noretry_test.go`（两条路径各断言"拒绝重投递 / 保持不变 / 计数"，并对照普通任务照旧可重投递）。
+- **Agent/MCP 侧只暴露 L0**：**没有**给工具面新增任何工具（注册表仍是 38 个，`scripts/mcp_smoke.ps1` 18/18 不变）。用两条腿钉住：注册表扫描（不存在任何"名字等于分级入口 L1+ 动作"的新工具；唯一同名的是**先于本项存在**的 `process_kill` MCP 工具，已显式冻结并说明它走既有链）+ 源码扫描（工具面实现文件 `handlers_mcp.go`/`tool_tasks.go`/`handlers_copilot.go`/`agent_task_bridge.go` 与 `internal/server/mcp`、`internal/server/ai` 全目录里不出现 `avops`/`av-ops`/三个 handler 名的任何引用）。L0 侦察照旧走既有工具（`check_av`/`system_info`/`process_list`）。
+- **配置（fail-closed 落点）**：新增 `avops` 段（`allow_l2`/`allow_l3`/`allow_l4` 默认 **false**、`require_confirm` 默认 true、`default_timeout_sec` 120、`max_timeout_sec` 600），两份 `server.yaml.example` 同步且**逐字节一致**。`require_confirm` 特意用 `*bool`：bool 的零值 false 会让"配置没读到/手搓的零值 Config"变成"不要求确认"（fail-open），而我们要的是"没配就更严"。同理 `avops.Policy` 用**反向**字段 `SkipConfirm`，让零值落在最严的一侧。
+- **本批未做（如实）**：① **前端二次确认 UI**（接口已按前端可直接用设计：`impact{}`/`checks[]`/`warnings[]`/机器可读 `code`，本次未改 web/）；② **L2/L3/L4 的真实执行验证**（默认关闭，且需要目标机/操作员自备驱动；真机 E2E 只验证了"被拒"与 L0 的真实下发回传，**没有**真的在测试主机上执行过任何破坏性动作）；③ **L4 没有任何落地动作**：植入端目前没有独立的 AMSI/ETW 抑制任务类型，硬塞一个动作名只会造出"点了没反应"的假入口（正是 S4 要修的毛病），因此 L4 只有等级元数据（`implemented:false`、`action_count:0`），`allow_l4=true` 也不会让任何动作变成可下发。
+- **验收**：`go build ./...` / `go vet`（改动包）/ 改动文件 `gofmt -l` 干净；`go test ./...` 18 个包全绿（新增 `avops` 表驱动用例、handler 用例、任务重投递用例、驱动档位用例、MCP 扫描守卫）；`scripts/mcp_smoke.ps1` **18/18**；真机 E2E（新编译服务端 + 真实 windows/386 载荷）：`GET /av-ops` 默认 L0/L1 开、L2/L4 关；`GET /sessions/{id}/av-ops` 逐动作 allowed/reasons 正确（`ppl_kill` 在无驱动机器上给出"无 rw 档驱动"）；L0 `av_detect` 真实下发并回传；缺 confirm → 409、tier 不符 → 400、未知动作 → 400、L2 → 403、L3 无驱动 → 409、超上限 → 400；被拒动作**没有产生任何任务**；服务端日志里 `avops_dispatched`/`avops_rejected` 审计齐备。
 
 ### 🩹 其它
 

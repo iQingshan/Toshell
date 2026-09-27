@@ -115,6 +115,13 @@
 ### S6 杀软对抗能力分级 + 工程收尾
 
 - **杀软对抗分级**：现状不是一个功能而是 6 条链（`av_detect`/`edr_blind`/`edr_kill`/`byovd_*`/`ppl_kill`/`process_kill`），缺**分级/前置检查/回滚/审计/风险回显**。方案：**AV-L0 侦察**（默认开、只读）→ **AV-L1 用户态温和**（默认开需确认）→ AV-L2 强（默认关）→ AV-L3 BYOVD（默认关，**驱动仍由操作员自备、项目不内置**）→ AV-L4 检测面抑制（默认关）；补聚合入口 + 统一信封 + 显式超时 + **破坏性任务禁止自动重试**（植入端结果缓存按 task ID 去重，重发=再执行）+ 影响评估回显 + 结构化审计 + 界面二次确认；Agent/MCP 侧只暴露 L0。
+  - ✅ **第一批（AV-L0 侦察 / AV-L1 温和）已完成**（详见 CHANGELOG 的 S6 小节）：
+    - 分级真源 `internal/common/avops`（等级 + 动作表 + 策略，纯逻辑表驱动，未知动作/未知等级 fail-closed）；8 个既有动作全部登记（`av_detect` L0；`edr_blind` L1；`edr_kill`/`process_kill` L2；`byovd_load`/`byovd_unload`/`byovd_kill`/`ppl_kill` L3），逐条核对过植入端 `executeTask` 的任务类型与能力位。
+    - 聚合入口 `GET /api/v1/av-ops`（等级目录 + 配置是否允许 + 原因）、`GET /api/v1/sessions/{id}/av-ops`（逐动作 `allowed` + `reasons[]`，**排障先看这里**）、`POST /api/v1/sessions/{id}/av-ops`（服务端按动作定级 + 七步前置检查 + 复用既有 `task.Manager`/`TaskPusher` 下发 + 结构化审计 + `impact{}` 影响评估）。**既有 6 条链的路由与语义一行未改**。
+    - 配置 `avops.allow_l2/allow_l3/allow_l4` 默认 **false**（fail-closed 落点）、`require_confirm` 默认 true（`*bool`：零值也按"更严"处理）、显式超时 120/600（超上限拒绝，服务端看门狗把超时置为 `timeout` 终态）。
+    - **破坏性任务禁止自动重试**：堵住 `ListReplayable`（重连补发）与 `RequeueSent`（HTTP 轮询重投递）两条服务端自动路径，并按任务类型判定（落 sqlite、重启后仍有效）。**未堵住**：植入端每次新连接会 `clearResultCache()`，"同一 task ID 再送一次必再执行"在协议层仍然成立 —— 只有"服务端不自动重发"这一层保证（详见 CHANGELOG 的如实说明）。
+    - Agent/MCP 侧只暴露 L0：工具面**未新增任何工具**（注册表仍 38 个），并用注册表扫描 + 源码扫描两条守卫测试钉住"L1+ 动作不可能经工具面触达"。
+  - ⏳ **待做**：前端二次确认 UI（接口字段/错误码已按前端可直接用设计）；L2/L3/L4 的真机执行验证（默认关闭，需目标机与操作员自备驱动）；L4 的**落地动作**（植入端目前没有独立的 AMSI/ETW 抑制任务类型，`allow_l4=true` 也不会让任何动作变成可下发 —— 不造"点了没反应"的假入口）。
 - **驱动体系（P0-1）**：`purpose` 分档真正驱动选路（`ppl_kill` 自动挑 `rw` 档，没有就明确提示）；进程重启后**残留驱动服务清场**；catalog 签名驱动支持。
 - **内存执行加固（P0-2）**：hook `ExitProcess`/`RtlExitUserProcess`（把载荷退出改成只退线程，**宿主不掉线**）+ stdout/stderr 重定向捕获。
 - **屏幕流/截图（P0-3）**：Linux(X11) / macOS(ScreenCaptureKit) 跨平台 + Windows DXGI 增量捕获（需真机验证，因此排在最后）。

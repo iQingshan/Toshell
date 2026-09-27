@@ -11,6 +11,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
+
+	"toshell/internal/common/avops"
 )
 
 type Config struct {
@@ -25,6 +27,44 @@ type Config struct {
 	AI       AIConfig       `mapstructure:"ai" json:"ai"`
 	Web      WebConfig      `mapstructure:"web" json:"web"`
 	MCP      MCPConfig      `mapstructure:"mcp" json:"mcp"`
+	// AVOps 杀软对抗能力分级（v1.4.0 S6）：控制聚合入口 /api/v1/av-ops 允许做到哪一级。
+	AVOps AVOpsConfig `mapstructure:"avops" json:"avops"`
+}
+
+// AVOpsConfig 杀软对抗能力分级（AV-Ops）配置。
+//
+// ⚠️ 安全前置：**默认必须让 L2+ 全部不可用**（fail-closed）。L2（结束安全软件进程）
+// / L3（加载操作员自备内核驱动、PPL 清除）/ L4（检测面抑制）都会在目标机上留下
+// 不可自动回滚的后果，因此出厂默认一律 false，只有操作员显式改成 true 才放行。
+// L0（只读侦察）与 L1（用户态温和）默认开，但 L1 仍需请求体里带 confirm=true。
+//
+// 语义真源在 internal/common/avops（等级/动作表/放行规则），本结构只负责"配置 → 策略"
+// 的映射；两个包共用同一批默认值常量，避免"注释写 120 / viper 写 60 / 运行时兜底 90"
+// 这类历史漂移。注意这里的 require_confirm 是**正向**键（默认 true），映射到
+// avops.Policy 时会取反成 SkipConfirm —— 后者用反向字段是为了让"零值（配置没读到）"
+// 落在最严的一侧。
+type AVOpsConfig struct {
+	// AllowL2 允许 L2（强：结束安全软件/进程）动作。默认 **false**。
+	AllowL2 bool `mapstructure:"allow_l2" json:"allow_l2"`
+	// AllowL3 允许 L3（BYOVD：加载/卸载/使用操作员自备驱动、PPL 清除）动作。默认 **false**。
+	// 驱动仍由操作员自备、项目不内置；打开这一项只是允许下发，不等于驱动可用
+	// （L3 动作还会逐个检查本机驱动目录里是否有对应档位的驱动）。
+	AllowL3 bool `mapstructure:"allow_l3" json:"allow_l3"`
+	// AllowL4 允许 L4（检测面抑制）动作。默认 **false**。
+	// 当前没有落地的 L4 动作，打开它也不会让任何动作变成可下发（见 avops.TierL4 的说明）。
+	AllowL4 bool `mapstructure:"allow_l4" json:"allow_l4"`
+	// RequireConfirm 是否强制"需要确认的动作必须带 confirm=true"（默认 true）。
+	// 关掉它只是放宽（L1+ 可以不确认就下发），不建议；接口会把生效值回显出来。
+	//
+	// **指针**（而不是 bool）：bool 的零值 false 会让"配置没读到/手搓的零值 Config"
+	// 变成"不要求确认"，也就是把 L1+ 的二次确认静默关掉（fail-open）；而我们要求的
+	// 是"没配就更严"。nil 一律按默认 true 处理，只有配置文件里显式写 false 才放宽。
+	RequireConfirm *bool `mapstructure:"require_confirm" json:"require_confirm"`
+	// DefaultTimeoutSec 请求未指定 timeout_sec（0）时的显式超时（默认 120）。
+	DefaultTimeoutSec int `mapstructure:"default_timeout_sec" json:"default_timeout_sec"`
+	// MaxTimeoutSec 显式超时上限（默认 600）。**超上限直接拒绝**而不是截断：
+	// 截断会让调用方以为自己给的 3600 秒生效了，是典型的哑失败。
+	MaxTimeoutSec int `mapstructure:"max_timeout_sec" json:"max_timeout_sec"`
 }
 
 // MCPConfig 对外 MCP（Model Context Protocol）服务端配置。
@@ -714,6 +754,19 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("mcp.result_ttl", "24h")
 	viper.SetDefault("mcp.audit_path", "./logs/mcp-audit.jsonl")
 	viper.SetDefault("mcp.fail_closed", true)
+
+	// ── 杀软对抗能力分级（v1.4.0 S6）────────────────────────────────────────
+	// **默认让 L2+ 全部不可用**（fail-closed）：这是"装上就自带杀软对抗能力"与
+	// "装上只是一个 C2、破坏性能力必须操作员显式打开"之间的分界线，不允许反过来。
+	viper.SetDefault("avops.allow_l2", false)
+	viper.SetDefault("avops.allow_l3", false)
+	viper.SetDefault("avops.allow_l4", false)
+	// 需要确认的动作必须 confirm=true（L1 起）。写进配置结构的是 *bool：nil 视为 true。
+	requireConfirm := true
+	viper.SetDefault("avops.require_confirm", requireConfirm)
+	// 默认/上限与 avops 包的常量**同源**（不写字面量）。
+	viper.SetDefault("avops.default_timeout_sec", avops.DefaultTimeoutSec)
+	viper.SetDefault("avops.max_timeout_sec", avops.MaxTimeoutSec)
 
 	viper.SetEnvPrefix("TOSHELL")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))

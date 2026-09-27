@@ -233,6 +233,10 @@ type Server struct {
 	// moduleAuditHook 模块审计事件的旁路接收器（nil = 只写日志）。
 	// 做成 hook 是为了让"审计真的写了、字段对不对"能被单测断言，而不是去匹配日志文本。
 	moduleAuditHook func(moduleAuditEvent)
+
+	// avopsAuditHook AV-Ops 审计事件的旁路接收器（nil = 只写日志，v1.4.0 S6）。
+	// 与 moduleAuditHook 同一理由：分级入口的每个决策（放行/拒绝/超时）都必须可判定。
+	avopsAuditHook func(avopsAuditEvent)
 }
 
 // SetOnConfigApplied 注册配置热应用回调（设置 API 保存后触发）。
@@ -585,6 +589,14 @@ func (s *Server) setupRoutes() {
 	// 驱动加载前自检（sha256 一致性 / Authenticode 签名者 / 易受攻击驱动黑名单提示）
 	api.HandleFunc("/drivers/{name}/verify", s.verifyDriverHandler).Methods("GET")
 	api.HandleFunc("/drivers/{name}/raw", s.downloadDriverHandler).Methods("GET")
+	// ── 杀软对抗能力分级入口（AV-Ops，v1.4.0 S6）────────────────────────────
+	// 只增不改：既有 6 条链的路由（/edr/*、DELETE /processes/{pid}）原样保留。
+	//   GET  /av-ops                等级目录（当前服务端允许做到哪一级）
+	//   GET  /sessions/{id}/av-ops  对该会话的逐动作可用性判定（排障先看这里）
+	//   POST /sessions/{id}/av-ops  执行（服务端按动作定级 + 七步前置检查 + 审计）
+	api.HandleFunc("/av-ops", s.listAVOpsHandler).Methods("GET")
+	api.HandleFunc("/sessions/{id}/av-ops", s.sessionAVOpsHandler).Methods("GET")
+	api.HandleFunc("/sessions/{id}/av-ops", s.execAVOpsHandler).Methods("POST")
 	api.HandleFunc("/settings", s.getSettingsHandler).Methods("GET")
 	api.HandleFunc("/settings", s.updateSettingsHandler).Methods("PUT")
 	api.HandleFunc("/settings/webhook/test", s.testWebhookHandler).Methods("POST")
