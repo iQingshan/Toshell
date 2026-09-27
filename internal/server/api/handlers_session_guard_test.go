@@ -1,10 +1,12 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"toshell/internal/common/types"
 	"toshell/internal/server/session"
@@ -32,12 +34,19 @@ func TestRequireSessionNotFoundIs404(t *testing.T) {
 		t.Fatalf("错误体应说明会话不存在，实际 %s", rec.Body.String())
 	}
 
-	// 已存在的会话 → 放行（不写响应）
-	if err := mgr.Add(&types.SessionInfo{ID: "sess-1", Hostname: "PC1"}); err != nil {
+	// 已存在的会话 → 放行（不写响应）。
+	//
+	// ⚠️ `session.New()` 是**进程级单例**（session.go 的 once），所以用例必须用唯一的会话 id
+	// 并在结束时移除：否则 `-count=N` 重跑会撞 "session already exists"，以及把状态泄漏给
+	// 同包其它用例。
+	id := fmt.Sprintf("guard-%d", time.Now().UnixNano())
+	if err := mgr.Add(&types.SessionInfo{ID: id, Hostname: "PC1"}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
+	t.Cleanup(func() { _ = mgr.Remove(id) })
+
 	rec2 := httptest.NewRecorder()
-	if !s.requireSession(rec2, "sess-1") {
+	if !s.requireSession(rec2, id) {
 		t.Fatal("会话存在时应放行")
 	}
 	if rec2.Code != http.StatusOK || rec2.Body.Len() != 0 {

@@ -104,13 +104,24 @@ func TestRealOfflineBroadcastAfterGrace(t *testing.T) {
 	drainEvents(hub)
 
 	s.BroadcastSessionOffline("sess-9")
+	// 等"事件真的到达 hub"，而不是只等 pending 计数归零：flushSessionOffline 先清 pending
+	// 再投递事件，两者之间有一个很小的竞争窗口 —— 只盯计数会偶发拿到空事件列表
+	// （2026-09-27 的 CI 上就红过一次：日志里已经打印"广播 session_offline"，断言却看到 []）。
+	// 断言的目标本来就是"事件"，所以直接等事件。
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && s.PendingOfflineCount() > 0 {
-		time.Sleep(20 * time.Millisecond)
+	var events []WSEvent
+	for time.Now().Before(deadline) {
+		events = drainEvents(hub)
+		if len(events) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	events := drainEvents(hub)
 	if len(events) != 1 || events[0].Type != "session_offline" {
 		t.Fatalf("观察窗过期后应广播 offline，实际: %v", eventTypes(events))
+	}
+	if s.PendingOfflineCount() != 0 {
+		t.Fatalf("广播后不该再有待广播会话，实际 %d", s.PendingOfflineCount())
 	}
 
 	// 复活：观察窗外恢复 → 广播 online
