@@ -104,6 +104,20 @@ listener:
     mqtt_broker_url: ""
     mqtt_topic_prefix: toshell
     mqtt_embedded_broker: false
+    # ── WebSocket 主动探测面（v1.4.0 S5 第 0 步）────────────────────────────
+    # ws_path：WS 监听器**唯一**允许升级的请求路径，其它路径一律返回普通 404
+    #   （与"这个路径没有处理器"逐字节不可区分），主动探测者拿不到
+    #   "这里有个 WebSocket 端点"的信号。比较大小写敏感，且要求路径已规范化
+    #   （//、/./、尾部斜杠、..、百分号编码一律拒绝）。
+    #   默认 "/" —— **必须与现役植入端一致**（植入端 server_url 不带路径时用 "/"
+    #   握手）。改这里就必须同步改植入端 server_url 里的路径，否则载荷连不上。
+    ws_path: "/"
+    # ws_host_allowlist：允许升级的 Host 白名单，空 = 不检查（默认，向后兼容）。
+    #   非空时 Host 不在名单里 → 直接 404、不升级。元素可写 host 或 host:port
+    #   （不含端口只比主机名，含端口则要求逐字一致）。典型用法是配合
+    #   front_domain：植入端把 Host 头设成前置域名，名单里只放该域名。
+    #   注意：Host 头是明文可控的，它挡的是无目标批量扫描，不是定向攻击。
+    ws_host_allowlist: []
 
 logging:
     compress: true

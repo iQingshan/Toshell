@@ -107,6 +107,13 @@
 ### S5 新增低特征通道
 
 - **第 0 步（不新增协议）**：WS 现在**不吃域前置、不支持中继、任意路径都升级**（可被主动探测）→ 先补 `front_domain`/拟态/uTLS，零新库零新 tag。
+  - ✅ **已完成（v1.4.0，仅路径/Host 收敛与中继对齐）**：
+    - **严格路径**：新增 `listener.ws_path`（默认 `/`，**与现役植入端口径同源** = `transport.DefaultUpgradePath`），只对这一条路径升级；`//`、`/./`、尾部斜杠、`..`、百分号编码、大小写变形、非完整握手一律回**普通 404**（与未知路径逐字节不可区分，不回 `400`/`426`，也不回 `Sec-Websocket-Version`）；顺带去掉 `ServeMux` 的 301 清洗。因默认路径未变，**无需新旧路径兼容窗口**（改 `ws_path` 必须同步改植入端 `server_url`）。
+    - **Host 收敛 + 域前置**：新增 `listener.ws_host_allowlist`（空 = 不检查；非空时非名单 Host → 404）；植入端 WS 支持 `front_domain`（SNI + Host，与 HTTP 通道同一口径；gorilla 的 `Host` 键特判使 SNI/Host 不冲突）。
+    - **中继对齐**：确认 WS/HTTP/MQTT 均不支持中继 → `POST /sessions/{id}/relay` 对非 TCP 通道回 **409** 明确报错、WS 监听器对中继帧记结构化告警（不再静默）、`ListRelayNodes` 与 HTTP 逐字一致。**没有**做半个中继。
+    - **可观测**：被拒升级的结构化日志（reason/path/raw_path/host/remote_ip；不记请求头与 query，字段消毒 + 截断；按"是否像握手尝试"过滤噪声）。
+    - **证据**：`go test ./...` 全绿（新增两组探测面单测）、`scripts/mcp_smoke.ps1` 18/18、真机 E2E（websocket 载荷上线 + `whoami`、curl 探测不可区分、错 Host 被拒）；详见 `CHANGELOG.md` 的 S5 小节与 `docs/EVASION.md` §2.6。
+  - ⏳ **本步仍未做**：uTLS/JA3 指纹（WS 仍是 Go 标准库 TLS）、WS 拟态（非 C2 路径不反代伪装站，只回 404）、HTTP/2、真实 CDN 域前置联调；`ws_path` 目前是**全局配置**（所有 WS 监听器共用），未做 per-listener 覆盖。
 - **首个新通道**：候选为 DNS/DoH/DoT 控制通道（穿透性最好、可零新库）、QUIC/HTTP3（服务端 `go.mod` 已依赖 quic-go，且 `internal/common/tunnel/quic/` 有可复用骨架）、HTTP/2（共用端口证书；现有 HTTP 通道很可能实为 h1.1）。**先端到端跑通一个**。
 - **组合与降级**：控制面走低特征低速通道 + 数据面走高吞吐通道；多通道热切换与自动降级状态机。
 - **成本约束**：加一个新协议目前需要 **12 类落点 / 20+ 处编辑**，且有 8 处"漏改就静默降级或编译失败"；新协议必须**按 tag 编译**，默认只带 1~2 个，避免撑大体积。

@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"toshell/internal/common/avops"
+	"toshell/internal/common/transport"
 )
 
 type Config struct {
@@ -309,6 +310,30 @@ type ListenerConfig struct {
 	// 非空时，HTTP 监听器对所有非 C2 请求反向代理到该网站，探测者看到的是
 	// 与目标站完全一致的响应（页面/资源/404）。空 = 使用静态拟态模板。
 	MimicrySite string `mapstructure:"mimicry_site" json:"mimicry_site"`
+	// WSPath WebSocket 监听器**唯一**允许升级的请求路径（v1.4.0 S5 第 0 步）。
+	//
+	// 为什么要有它：改之前 WS 服务端对**任意路径**的 GET 都尝试升级，主动探测者
+	// 随手发一份握手就能确认"这台主机上有个 WS 端点"。现在只认这一条路径，
+	// 其余路径一律返回普通 404（与"没有这个路径"逐字节不可区分）。
+	//
+	// 默认值 `transport.DefaultUpgradePath`（= "/"）**必须与现役植入端一致**：
+	// 植入端在 server_url 不带路径时就是用 "/" 握手的（见
+	// builder/implant/transport_ws.go 的 wsPollRun），构建器生成的 server_url 也不带
+	// 路径。改这个值就**必须同步改植入端 server_url 里的路径**，否则载荷连不上 ——
+	// 这里是"默认路径保持不变"的兼容性硬要求，不是可以随手调优的旋钮。
+	// 空值 = 用默认值（与历史上"没配这一项"的行为完全一致）。
+	// 比较是大小写敏感的字面比较（HTTP 路径本就大小写敏感），且要求路径已规范化
+	// （`//`、`/./`、尾部斜杠、`..`、百分号编码一律拒绝）。
+	WSPath string `mapstructure:"ws_path" json:"ws_path"`
+	// WSHostAllowlist 允许升级的 Host 白名单（空 = 不检查，保持向后兼容）。
+	//
+	// 语义：非空时 Host 不在名单里 → 直接 404、不升级。元素可写 host 或 host:port
+	// （不含端口时只比主机名，含端口时要求含端口逐字一致）。
+	// 典型用法是配合 front_domain：植入端把 HTTP Host 头设成前置域名，名单里只放
+	// 该域名，于是"不知道前置域名"的探测者即使摸到路径也拿不到升级。
+	// **不能**把它当中继/鉴权用：Host 头是明文可控的，知道域名的人照样能伪造；
+	// 它挡的是"无目标的批量扫描"，不是定向攻击。
+	WSHostAllowlist []string `mapstructure:"ws_host_allowlist" json:"ws_host_allowlist"`
 }
 
 type ImplantConfig struct {
@@ -668,6 +693,10 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("listener.encryption_key", "")
 	viper.SetDefault("listener.write_queue_size", 500)
 	viper.SetDefault("listener.mimicry_profile", "cdn")
+	// WS 主动探测面（v1.4.0 S5 第 0 步）：默认路径**必须**与现役植入端一致（"/"），
+	// 所以这里直接引用 transport 的常量而不是再抄一遍字面量（抄一遍就会漂移）。
+	viper.SetDefault("listener.ws_path", transport.DefaultUpgradePath)
+	viper.SetDefault("listener.ws_host_allowlist", []string{})
 
 	viper.SetDefault("implant.interval", 60)
 	// 抖动默认 20%（不是 10%）：与「生成载荷」能力接口对外声明的默认值、

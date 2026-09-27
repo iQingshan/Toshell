@@ -261,6 +261,64 @@ sleep mask 具体做了什么（便于自查与排错）：
 - **让静态改动影响"起不来"**：不可能。未签名 PE 被策略拒绝执行是签名/信誉层的事。
 - **Linux/macOS 上的内存加密与 W^X**：当前是 stub（见 2.2 的平台边界），**未实现**。
 
+### 2.6 WebSocket 主动探测面（v1.4.0 S5 第 0 步）
+
+> 这一节回答的不是"载荷像不像正常程序"，而是**服务端会不会被主动探测者一眼认出来**。
+> 两者常被混着说（"有没有特征"），但探测面是**服务端**属性：载荷再干净，服务端
+> 只要回一个 `101 Switching Protocols` 或者在错路径上回 `400`，扫描器就知道"这里有个
+> WebSocket 端点"。本步只做**收敛**，不新增协议、不新增依赖、不动 TLS 指纹。
+
+| 项 | 改之前（HEAD 实测/源码核对） | 改之后 |
+|---|---|---|
+| 升级路径 | `Server.ServeHTTP` **不检查路径**，任意路径的 GET 都尝试升级（`internal/common/transport/websocket.go` 原注释：`不检查路径，接受所有 WebSocket 连接`）→ `GET /whatever` + 握手头 = `101` | 只认 `listener.ws_path`（默认 `/`）这一条路径，且**路径必须已规范化**（`//`、`/./`、尾部斜杠、`..`、百分号编码、大小写变形全部拒绝） |
+| 非握手请求 | 正确路径上不带 WS 头 → gorilla 回 `400 Bad Request` + `Sec-Websocket-Version: 13`（**端点指纹**） | 一律回**普通 404**：状态码 / 响应体（`404 page not found`）/ `Content-Type` / `X-Content-Type-Options` 与"这个路径没有处理器"逐字节一致，且**绝不**回 `Sec-Websocket-Version` |
+| 路径变形 | `http.ServeMux` 会先把 `//`、`/./` 清洗成规范路径并对变形请求回 **301**（通用行为，但对探测者仍是"这里有个会转发的服务"） | 不再经过 `ServeMux`（直接挂 handler），由传输层按**原始请求行**严格比较，变形一律 404 —— 变形尝试也因此能被观察到 |
+| Host / 域前置 | WS 通道**完全不吃 `front_domain`**：Host 头与 SNI 恒为服务器地址（HTTP 通道早就支持 SNI+Host 拟态） | 新增可选 `listener.ws_host_allowlist`：非空时 Host 不在名单 → 直接 404；植入端 WS 通道支持 `front_domain`（**与 HTTP 同一口径**：连接目标仍是真实 C2，TLS SNI = 前置域，HTTP Host = 前置域） |
+| 中继 | WS 通道收到中继帧**静默丢弃**（服务端只在 TCP 实现中继），而 `POST /sessions/{id}/relay` 对 WS 会话仍回 200 + "任务已下发" | 显式失败：非 TCP 通道的 relay 控制请求回 **409** + 中文原因；WS 监听器收到 `TypeRelay`/`TypeRelayStatus` 帧记**结构化告警**（含 session / 帧长度），不再静默 |
+| 被拒升级的可观测性 | 无（只有 gorilla 失败时的一条 `WebSocket upgrade failed`，且不含 Host/路径） | 结构化日志：`reason` / `path` / `raw_path` / `host` / `remote_ip`（**不记请求头、不记 query**，字段做日志注入消毒 + 截断） |
+
+**路径判定的取舍（为什么用 `r.URL.Path` 而不是 `r.URL.EscapedPath()`）**：`net/http`
+解析请求行时已做一次解码，`/w%73`、`/%2fws` 的解码结果分别落在 `r.URL.Path`（`/ws`、`//ws`），
+"非规范编码"的原始形态留在 `r.URL.RawPath`。按 `EscapedPath()` 比较等于要求客户端按我们的
+编码习惯发请求，反而给 `%77`/`%2f` 这类变体留下"看起来不等、解码后相等"的模糊空间；
+因此取"按解码后的 `Path` 做字面比较"（与 `net/http` 内部路由、`ServeMux` 的语义一致），
+并**额外**把任何非规范编码一刀切拒掉（现役植入端与浏览器发起的握手都不会带百分号编码）。
+
+**域前置在 WS 上的实现口径（与 HTTP 对齐，不新造一套）**：HTTP 通道的口径是
+"`server_url` 是真实连接目标；`front_domain` 同时用作 TLS SNI 与 HTTP `Host` 头"
+（`transport_tls_std.go` / `transport_tls_utls.go` 的 `DialTLSContext` + `req.Host`
+赋值）。WS 通道按同一口径实现：`Dialer.TLSClientConfig.ServerName = front_domain`
+（仅 `wss`）+ `requestHeader["Host"] = front_domain`。gorilla 的 `Dialer` 对
+`requestHeader` 里的 `Host` 键有特判（赋给 `req.Host` 而不是塞进普通 Header），
+**所以"SNI 与 Host 同时设置"在 gorilla 上不冲突** —— 之前担心的"Dialer 不允许同时
+设 SNI 与 Host"经查源码不成立，无需取舍。
+
+**明确没做（本步边界，别读成"已有"）**：
+
+- **uTLS / JA3 指纹拟态**：WS 的 TLS 仍是 Go 标准库指纹（只有 HTTP 通道在 full 档用 uTLS）。
+  给 WS 换 uTLS 属独立增量，本步不做。
+- **WS 拟态（`mimicry_site` 反代）**：HTTP 监听器会把非 C2 请求反代到伪装站；WS 通道
+  **没有**这一层 —— 非配置路径就是普通 404（"像一台空服务器"），而不是"像目标站"。
+  要更自然的伪装需要把 WS 走到反代后面，属后续工作。
+- **HTTP/2、证书与 SNI 白名单校验、真实 CDN 域前置**：均未涉及。`ws_host_allowlist`
+  挡的是**无目标批量扫描**，不是定向攻击 —— Host 头明文可控，知道前置域名的人照样能伪造。
+- **中继**：WS/HTTP/MQTT 通道仍然**不支持**中继（只把"静默失败"改成"明确报错"）；
+  完整支持需要把 `relay.go` 的帧路径与植入端下行解包都做成通道无关，属独立增量。
+
+**验证到什么程度**：
+
+- ✅ **单测**（`internal/common/transport/websocket_probe_test.go`）：正确路径升级成功；
+  `//`、`/./`、`/ws/`、`..`、`%2f`、`%77`、大小写变形、非 GET 全部 404；被拒响应与
+  参照 `http.NotFoundHandler` 的响应在状态码/响应体/`Content-Type`/`X-Content-Type-Options`
+  上逐一相等；Host 名单空/非空/带端口三种口径；gorilla `Dialer` 的 Host 覆盖机制。
+- ✅ **真机端到端**：`protocol=websocket` 的真实载荷（windows/386）经改后的服务端上线并
+  完成 `whoami` 回执；`curl --path-as-is` 打错路径 / 正确路径但不带握手头 / 路径变形，
+  三者响应与未知路径不可区分；配 Host 名单后错误 Host 的握手被拒（记录见
+  `CHANGELOG.md` 的 S5 小节）。
+- ⚠️ **未验证**：真实 CDN/边缘节点上的域前置回连（需要真实域名与源站配置）、
+  `wss://` 真实证书链、uTLS 指纹、HTTP/2、以及"探测者拿不到升级"在真实扫描器
+  （如 nuclei 的 websocket 模板）下的表现。
+
 ---
 
 ## 3. 怎么验证（固定流程，避免被单次结果骗）

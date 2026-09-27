@@ -616,7 +616,8 @@ python scripts/reset_release_db.py --db release/data/toshell.db
 #### 1. 回连通道与载荷生成
 - **双回连通道**:TCP(自定义加密帧协议,载荷约 3.4MB,全功能)与 HTTP(S) 轮询通道。
   生成载荷页「回连通道」按监听器类型自动匹配:选 TCP 监听器 → 通道 TCP、地址 `host:port`(勿加 `http://` 前缀,误加会自动剥离);选 HTTP/HTTPS 监听器 → 通道 HTTP/HTTPS、地址 `http(s)://host:port`。
-- **域前置(Domain Fronting)**:HTTPS 轮询通道支持自定义 TLS SNI 与 HTTP Host 拟态域名(构建页「域前置拟态域名」或 `listener.front_domain`)。服务器部署在 CDN/反向代理后,目标机出站流量表现为访问合法域名,可过域名白名单出口。
+- **域前置(Domain Fronting)**:HTTPS 轮询通道支持自定义 TLS SNI 与 HTTP Host 拟态域名(构建页「域前置拟态域名」或 `listener.front_domain`)。服务器部署在 CDN/反向代理后,目标机出站流量表现为访问合法域名,可过域名白名单出口。**v1.4.0 S5 起 WebSocket 通道同样吃 `front_domain`**(口径一致:连接目标仍是真实 C2 地址,TLS SNI 与 HTTP Host 头用前置域)。
+- **WebSocket 通道的主动探测面(v1.4.0 S5;详见 `docs/EVASION.md` §2.6)**:WS 监听器只对配置的 `listener.ws_path`(默认 `/`)升级,其它路径/路径变形/不完整握手一律返回普通 404(与"路径不存在"不可区分);可用 `listener.ws_host_allowlist` 收窄 Host。改 `ws_path` 必须同时改载荷 `server_url` 里的路径,否则载荷连不上。
 - **transport 条件编译**:TCP 载荷不链接 net/http/crypto/tls,体积由约 6MB 降至 3.4MB(约减半),标准库指纹更少,利于免杀。
 - **监听器页简化**:合并"类型/协议"为单一「类型」选择(TCP / HTTP),不再出现易混淆的 WebSocket 等协议值。
 

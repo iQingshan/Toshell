@@ -147,7 +147,19 @@
   - CI 门禁补上 `./internal/server/listener/...`（新测试包不能只在本机跑）。
 
 ### 🛰 S5 新增低特征通道
-- （待填）
+
+**第 0 步（不新增协议、零新依赖、零新 tag）：WebSocket 通道的主动探测面收敛。**
+
+改造前，WS 服务端对**任意路径**都升级（`Server.ServeHTTP` 原本直接 `Upgrade`，注释就是"不检查路径"）：主动探测者发一份握手就能在 `GET /whatever` 上拿到 `101`；即使只发普通 GET，gorilla 的握手失败也会回 `400` + `Sec-Websocket-Version: 13` —— 两个响应都等于对外宣布"这台主机上有 WebSocket 端点"。同时 WS 通道完全不吃 `front_domain`（Host/SNI 恒为服务器地址），中继则是"植入端以为在跑、服务端静默丢弃"。
+
+- **严格路径（核心：不许"任意路径都升级"）**：新增 `listener.ws_path`，WS 只对**这一条**路径升级；其它路径 / 变形路径 / 不完整握手一律回**普通 404**（与"这个路径没有处理器"在状态码、响应体、`Content-Type`、`X-Content-Type-Options` 上逐字节一致，且绝不回 `Sec-Websocket-Version`）。路径判定按**解码后的 `r.URL.Path`** 字面比较（与 `net/http` 路由语义一致），并额外要求"路径已规范化 + 无百分号编码"，于是 `//ws`、`/./ws`、`/ws/`、`/ws/../ws`、`/ws%2f`、`/%77s`、`/WS`、`/wss` 全部拿不到升级。顺带去掉 `http.ServeMux`（它会先把变形路径清洗成规范路径并回 301，那是"这里有个会转发的服务"的额外信号）。
+- **兼容性策略（默认配置下现役载荷行为不变）**：`ws_path` 默认值就是现役植入端使用的 `/`（植入端 `server_url` 不带路径时即用 `/`，构建器生成的 `server_url` 也不带路径），**服务端常量与植入端口径同源**（`transport.DefaultUpgradePath`，viper 默认值直接引用它）。因此**没有改植入端发送的路径，也就不需要"新旧两种路径兼容窗口"**；改 `ws_path` 的操作员必须同步改植入端 `server_url` 里的路径（已写进配置模板与文档）。实测：用改动前 HEAD 源码构建的 `websocket` 载荷 + 新构建的载荷，都能连上改后的服务端并完成 `whoami` 回执。
+- **Host 收敛 + 域前置**：新增可选 `listener.ws_host_allowlist`（**空 = 不检查**，保持向后兼容；非空时 Host 不在名单 → 直接 404、不升级；元素可写 host 或 host:port，不含端口只比主机名、含端口则要求逐字一致）。植入端 WS 通道支持既有的 `front_domain` 语义，**与 HTTP 通道同一口径**：连接目标仍是真实 C2 地址、TLS SNI = 前置域（仅 `wss`）、HTTP Host 头 = 前置域。曾担心的"gorilla Dialer 不允许同时设 SNI 与 Host"经查源码**不成立**（`client.go` 对 `requestHeader` 里的 `Host` 键特判，赋给 `req.Host`），无需取舍。
+- **中继对齐（明确维持"不支持"，但不再静默失败）**：确认 WS/HTTP/MQTT 通道都不支持中继（上行解包、下行包装、子会话注册、隧道 raw 帧 SM4 密钥四个落点全部长在 `TCPListener` 上，子帧格式也与这三条通道不一致）。改动：① `POST /sessions/{id}/relay` 对非 TCP 通道回 **409** + 中文原因（此前回 200 + "任务已下发"，植入端真的会开始监听，但子植入体永远上不了线）；② WS 监听器收到 `TypeRelay`/`TypeRelayStatus` 帧时记结构化告警（含 session 与帧长度），不再静默丢弃；③ `Listener.ListRelayNodes` 返回**非 nil 空切片**，与 HTTP 监听器逐字一致。**没有**为了"顺手支持"而做半个中继。
+- **可观测性（被拒的升级尝试要有日志）**：拒绝走结构化日志 `reason` / `path` / `raw_path` / `host` / `remote_ip`；**不记请求头集合、不记 query**（避免把 Cookie/Authorization/token 写进日志），字段做日志注入消毒（只保留可见 ASCII）与截断。日志按"是否像 WS 握手尝试"过滤：公网背景噪声里大量随机路径的普通 GET 不落日志，避免真正的扫描被淹没。
+- **明确不做（本步边界）**：uTLS/JA3 指纹（WS 仍是 Go 标准库 TLS）、WS 拟态反代（非配置路径就是普通 404，不是"像目标站"）、HTTP/2、真实 CDN 域前置联调；**不改 TLS 指纹、不加任何新 tag、不动 `go.mod`**。
+- **验收证据**：`go build ./...` / `go vet ./internal/server/... ./internal/common/...` 通过、改动文件 `gofmt -l` 干净；`go test ./...` 全绿（新增 `internal/common/transport/websocket_probe_test.go`：正确路径升级 / 各类变形被拒 / 被拒响应与 `http.NotFoundHandler` 响应逐字段一致 / Host 名单三种口径 / gorilla Host 覆盖；新增 `internal/server/listener/ws_probe_test.go`：策略接线、日志消毒、中继能力判定）；`scripts/mcp_smoke.ps1` 18/18；真机端到端（重编服务端 + `protocol=websocket` 的 windows/386 载荷）：**上线 + `whoami` 回执成功**，`curl --path-as-is` 的错路径 / 正确路径无握手头 / 路径变形三种请求与未知路径不可区分，配 Host 名单后错误 Host 的握手被拒。**未验证**：真实 CDN 域前置、`wss` 真实证书链、uTLS、HTTP/2（详见 `docs/EVASION.md` §2.6）。
+- **落地位置**：`internal/common/transport/websocket.go`（策略与拒绝判定）、`internal/server/listener/listener.go`（接线 + 拒绝日志 + 中继帧告警）、`internal/server/listener/relay.go`（`SupportsRelayChannel`）、`internal/server/api/handlers_relay.go`（409）、`internal/server/config/config.go`（两个新配置项）、`internal/server/builder/implant/transport_ws.go` ↔ `release/implant/transport_ws.go`（front_domain，两份镜像逐字节一致）。
 
 ### 🛡 S6 杀软对抗能力分级
 

@@ -366,9 +366,15 @@ func (s *Server) startListenerByID(id string) error {
 		MimicryProfile:   live.Listener.MimicryProfile,
 		FrontDomain:      live.Listener.FrontDomain,
 		MimicrySite:      live.Listener.MimicrySite,
-		TLSEnabled:       rec.Options.TLSEnabled,
-		CertFile:         rec.Options.CertFile,
-		KeyFile:          rec.Options.KeyFile,
+		// WS 主动探测面（v1.4.0 S5 第 0 步）：与默认监听器同源，全部继承当前
+		// 生效配置（而不是 DB 记录里的 per-listener options）——ws_path 是"这条
+		// 通道的唯一入口路径"，与 encryption_key/front_domain 一样属于全局口径，
+		// 分散到每个监听器上一定会出现"载荷按 A 路径构建、B 监听器不认"的死结。
+		WSPath:          live.Listener.WSPath,
+		WSHostAllowlist: live.Listener.WSHostAllowlist,
+		TLSEnabled:      rec.Options.TLSEnabled,
+		CertFile:        rec.Options.CertFile,
+		KeyFile:         rec.Options.KeyFile,
 	}
 
 	// 装配与 main.go 一致的组件回调
