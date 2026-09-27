@@ -24,6 +24,9 @@ func (s *Server) InvokeTool(name string, args map[string]string) (interface{}, e
 func (s *Server) ReconfigureCopilot(cfg config.AIConfig) {
 	if s.copilot == nil {
 		s.copilot = ai.New(cfg, s)
+		// 重建出来的 Copilot 必须重新注入结果外置存储：否则热更新一次之后
+		// "超限结果外置 + result_read 回读"就静默退化成无句柄的内联截断（很难发现）。
+		s.applyResultStore(s.copilot)
 		return
 	}
 	s.copilot.Reconfigure(cfg)

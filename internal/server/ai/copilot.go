@@ -93,6 +93,21 @@ type Copilot struct {
 	executor ToolExecutor
 	client   *http.Client
 
+	// results / inlineLimit：工具结果外置存储与内联上限（v1.4.0 S2），由 api.Server 注入。
+	//
+	// 为什么要外置而不是把上限调大：超长结果（截图 base64、systeminfo、tasklist /v 等）
+	// 直接塞进上下文既有 token 成本、又会被上游的字符串硬截断切成坏 JSON（历史 bug：
+	// 截图 base64 被 truncate 到中间，模型既解不开也不知道那只是开头）。正确做法是
+	// "落盘成句柄 + 上下文里只留摘要 + 显式告知可以用 result_read 分页取回"。
+	//
+	// results 为 nil 时（未配置 mcp.result_dir 或目录不可用）退化为"显式标注的内联截断"，
+	// 绝不静默截断；它只依赖本地目录与 TTL，**与 mcp.enabled（对外 MCP 监听器）无关**。
+	results     mcp.ResultWriter
+	inlineLimit int
+	// resultIdx 结果外置索引（可选接线：agentstore 的 tool_results 表）。
+	// 只记录"句柄 + sha256 + 字节数 + 哪把工具"，写失败只告警，绝不影响 ReAct 循环。
+	resultIdx ResultIndexer
+
 	// pending 挂起的审批会话：normal 模式下，影响会话的操作不自动执行，
 	// 而是生成一个 consent 令牌，等前端用户「允许/拒绝」后再恢复 ReAct 循环。
 	pendingMu sync.Mutex
@@ -169,6 +184,19 @@ func (c *Copilot) Reconfigure(cfg config.AIConfig) {
 	c.client.Timeout = time.Duration(timeout) * time.Second
 	warnUnknownConsentPolicy(cfg)
 }
+
+// SetResultStore 注入结果外置存储与内联上限（v1.4.0 S2）。
+//
+// 由 api.Server 在构造 Copilot 之后调用（New 的签名保持不变，避免牵动既有调用方）。
+// store 允许为 nil：此时超限结果仍会被**显式标注**为截断，只是没有句柄可回读。
+// inlineLimit <= 0 表示用 mcp.DefaultInlineLimit（与对外 MCP 路径同一个上限口径）。
+func (c *Copilot) SetResultStore(store mcp.ResultWriter, inlineLimit int) {
+	c.results = store
+	c.inlineLimit = inlineLimit
+}
+
+// SetResultIndexer 注入结果外置索引（可选；传 nil 表示不落库）。
+func (c *Copilot) SetResultIndexer(idx ResultIndexer) { c.resultIdx = idx }
 
 // Chat 单轮对话入口（兼容无审批的简单调用）：返回助手最终文本 + 工具调用轨迹。
 func (c *Copilot) Chat(ctx context.Context, history []Message) (string, []ToolTrace, error) {
@@ -328,10 +356,7 @@ func (c *Copilot) runLoop(ctx context.Context, messages []Message, traceID strin
 				budgetExhausted = true
 				break
 			}
-			args := map[string]string{}
-			if tc.Function.Arguments != "" {
-				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
-			}
+			args := toolArgs(tc.Function.Arguments)
 			// 防死循环（相同工具 + 相同参数）：只读工具豁免，理由见 loopGuardAction。
 			level := toolLevel(tc.Function.Name)
 			sig := loopSignature(tc.Function.Name, args)
@@ -380,9 +405,12 @@ func (c *Copilot) runLoop(ctx context.Context, messages []Message, traceID strin
 			} else {
 				out = fmt.Sprintf("%v", result)
 			}
-			trace.Result = out
+			// 唯一的"结果 → 模型可见文本"转换点：超限即外置为句柄 + 显式截断说明。
+			view := c.toolResultView(resultRef{Tool: tc.Function.Name, CallID: tc.ID, TraceID: traceID}, out)
+			trace.Result = view.Text
+			trace = trace.withResultMeta(view)
 			traces = append(traces, trace)
-			messages = append(messages, Message{Role: "tool", ToolCallID: tc.ID, Content: truncate(out, 4000)})
+			messages = append(messages, Message{Role: "tool", ToolCallID: tc.ID, Content: view.Text})
 			// 第 2 次相同签名：**工具结果之后**追加一条系统提示，要求换策略或直接给结论。
 			// 多数情况下模型只是没意识到自己在重复，提示一次比直接掐断更有效。
 			if action == loopWarn {
@@ -434,7 +462,11 @@ func (c *Copilot) ResolveConsent(ctx context.Context, token string, allow bool) 
 		out = "用户已拒绝该操作，未执行。请向用户说明，不要再次请求同一操作。"
 	}
 
-	msgs := append(p.messages, Message{Role: "tool", ToolCallID: p.tool.ID, Content: truncate(out, 4000)})
+	// 审批通过后执行的结果同样走唯一转换点：超限一样外置成句柄，绝不在"恢复路径"上
+	// 留下一处漏网的字符串硬截断（历史 bug 正是漏网的调用点造成的）。
+	view := c.toolResultView(resultRef{Tool: p.tool.Function.Name, CallID: p.tool.ID, TraceID: p.traceID}, out)
+
+	msgs := append(p.messages, Message{Role: "tool", ToolCallID: p.tool.ID, Content: view.Text})
 	// 恢复循环时沿用挂起前的 trace_id：审批、执行与日志必须是同一条 trace。
 	res, err := c.runLoop(ctx, msgs, p.traceID)
 	if err != nil {
@@ -443,7 +475,7 @@ func (c *Copilot) ResolveConsent(ctx context.Context, token string, allow bool) 
 	// 合并本轮挂起前的轨迹 + 当前恢复执行产生的轨迹 + 本次工具结果
 	merged := append([]ToolTrace(nil), p.traces...)
 	merged = append(merged, res.Traces...)
-	merged = append(merged, ToolTrace{Name: p.tool.Function.Name, Args: p.args, Result: truncate(out, 120)})
+	merged = append(merged, ToolTrace{Name: p.tool.Function.Name, Args: p.args, Result: view.Text}.withResultMeta(view))
 	res.Traces = merged
 	return res, nil
 }
@@ -485,13 +517,19 @@ func (c *Copilot) ResolveAgentConsent(ctx context.Context, run *AgentRun, allow 
 		out = "用户已拒绝该操作，未执行。请向用户说明，不要再次请求同一操作。"
 	}
 
-	trace := ToolTrace{Name: p.tool.Function.Name, Args: p.args, Result: truncate(out, 4000)}
+	// 审批恢复路径也走唯一转换点（与循环内完全同一套外置/截断语义）。
+	view := c.toolResultView(resultRef{
+		Tool: p.tool.Function.Name, CallID: p.tool.ID, RunID: run.ID, TraceID: p.traceID,
+	}, out)
+
+	trace := ToolTrace{Name: p.tool.Function.Name, Args: p.args, Result: view.Text}.withResultMeta(view)
 	run.Traces = append(run.Traces, trace)
-	run.emit(AgentEventToolResult, ToolResult{Name: p.tool.Function.Name, Result: truncate(out, 4000), TraceID: p.traceID}, "")
-	logging.Info("agent-audit", "run=%s trace=%s consent_resolved tool=%s call_id=%s allow=%v", run.ID, p.traceID, p.tool.Function.Name, p.tool.ID, allow)
+	run.emit(AgentEventToolResult, toolResultEvent(p.tool.Function.Name, p.traceID, view, ""), "")
+	logging.Info("agent-audit", "run=%s trace=%s consent_resolved tool=%s call_id=%s allow=%v handle=%s truncated=%v",
+		run.ID, p.traceID, p.tool.Function.Name, p.tool.ID, allow, view.Handle, view.Truncated)
 
 	// 追加 tool 结果消息，恢复循环。用 p.messages 作为基础，避免重复。
-	run.Messages = append(p.messages, Message{Role: "tool", ToolCallID: p.tool.ID, Content: truncate(out, 4000)})
+	run.Messages = append(p.messages, Message{Role: "tool", ToolCallID: p.tool.ID, Content: view.Text})
 
 	// 后台继续自主循环由调用方（resumeAgentAsync）发起
 	return nil, nil
@@ -798,7 +836,9 @@ func compressRunMessages(messages []Message) []Message {
 		switch m.Role {
 		case "tool":
 			if m.Content != "" {
-				m.Content = "tool:" + summarizeToolResult("task_wait", truncate(m.Content, 4000))
+				// 显式标注"这是压缩后的摘要"：历史结果被折叠时不能让它看起来像原始完整输出
+				// （v1.4.0 S2 的截断语义：只要不是原文，就必须说明）。
+				m.Content = "tool:（历史结果已压缩为摘要）" + summarizeToolResult("task_wait", truncate(m.Content, 4000))
 			}
 		case "assistant":
 			if len(m.Content) > 300 {
@@ -815,6 +855,18 @@ func compressRunMessages(messages []Message) []Message {
 func summarizeToolResult(name, result string) string {
 	if result == "" {
 		return ""
+	}
+	// 统一信封（超限结果已外置）：必须先于各工具的字段猜测处理，否则会被当成普通
+	// JSON 去猜 output/status，得到"任务状态: ok"这种毫无信息量的摘要（v1.4.0 S2）。
+	var env struct {
+		Meta struct {
+			Handle     string `json:"handle"`
+			TotalBytes int    `json:"total_bytes"`
+		} `json:"meta"`
+	}
+	if json.Unmarshal([]byte(result), &env) == nil && env.Meta.Handle != "" {
+		return fmt.Sprintf("结果已外置（共 %d 字节），句柄 %s —— 需要正文请用 result_read 按 offset/limit 分页回读",
+			env.Meta.TotalBytes, env.Meta.Handle)
 	}
 	switch name {
 	case "task_submit", "file_list", "file_download", "process_list", "process_kill",
@@ -1239,10 +1291,7 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 		// 单个工具（尤其 task_submit/run_command 等下发任务类）执行并 task_wait 完成后，
 		// 把结果以 tool 消息回喂，回到 LLM 决定下一步，保证结果与任务一一对应、不乱序。
 		tc := ag.ToolCalls[0]
-		args := map[string]string{}
-		if tc.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
-		}
+		args := toolArgs(tc.Function.Arguments)
 		// 防死循环（相同工具 + 相同参数）：签名 = 工具名 + 规范化参数 JSON 的 sha256 前 16 hex。
 		// 第 2 次出现 → 工具结果后追加系统提示；第 3 次 → 停止循环（stop_reason=loop_detected）。
 		// 只读工具豁免（查两次同一会话列表是正常行为），理由见 loopGuardAction 注释。
@@ -1296,14 +1345,17 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 				stall := run.execStall
 				run.mu.Unlock()
 				logging.Info("agent-audit", "run=%s trace=%s dedup tool=%s key=%s (stall=%d)", run.ID, traceID, tc.Function.Name, ek, stall)
-				replay := prev.Full
-				if replay == "" {
-					replay = "（该命令已在本次任务中执行过，未产生新信息）"
+				// 回放的是**上次转换后的模型可见文本**（含外置句柄与截断标注），
+				// 因此"去重复用"不会把一份被截断的结果当成完整结果回喂给模型。
+				replay := prev.View
+				if replay.Text == "" {
+					replay = mcp.ModelView{Text: "（该命令已在本次任务中执行过，未产生新信息）"}
 				}
 				run.appendTimeline("tool_result", "⏭ 重复命令已去重（本次任务已执行过，结果复用）")
-				run.Traces = append(run.Traces, ToolTrace{Name: tc.Function.Name, Args: args, Result: truncate(replay, 2000)})
-				run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(replay, 4000), TraceID: traceID}, "")
-				run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: truncate(replay, 4000)})
+				run.Traces = append(run.Traces,
+					ToolTrace{Name: tc.Function.Name, Args: args, Result: replay.Text}.withResultMeta(replay))
+				run.emit(AgentEventToolResult, toolResultEvent(tc.Function.Name, traceID, replay, ""), "")
+				run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: replay.Text})
 				if action == loopWarn {
 					run.Messages = append(run.Messages, Message{Role: "system", Content: loopNudge(tc.Function.Name, args)})
 				}
@@ -1333,10 +1385,19 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			}
 		}
 
-		// 命令执行成功后写入去重缓存（仅成功结果可回放，失败不缓存允许重试）
+		// 唯一的"结果 → 模型可见文本"转换点（与同步循环、审批恢复路径同一实现）：
+		// 超限结果落盘为句柄，模型只看到摘要 + 显式截断说明 + 回读指引。
+		view := c.toolResultView(resultRef{
+			Tool: tc.Function.Name, CallID: tc.ID, RunID: run.ID, TraceID: traceID,
+		}, out)
+		trace.Result = view.Text
+		trace = trace.withResultMeta(view)
+
+		// 命令执行成功后写入去重缓存（仅成功结果可回放，失败不缓存允许重试）。
+		// 缓存的是转换后的 ModelView：回放时句柄与截断标注一并复用。
 		if err == nil && trace.Error == "" && !strings.Contains(out, `"failed"`) && !strings.Contains(out, `"exit_code":-1`) {
 			if ek := reconExecKey(run, tc.Function.Name, args); ek != "" {
-				run.rememberExec(ek, cachedExec{OK: true, Full: truncate(out, 4000), Brief: truncate(summarizeToolResult(tc.Function.Name, out), 300)})
+				run.rememberExec(ek, cachedExec{OK: true, Full: view.Text, View: view, Brief: truncate(summarizeToolResult(tc.Function.Name, out), 300)})
 			}
 		}
 
@@ -1347,12 +1408,12 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			run.appendTimeline("tool_result", "❌ "+tc.Function.Name+": "+truncate(trace.Error, 200))
 		} else {
 			consecutiveFail = 0
-			run.appendTimeline("tool_result", "✅ "+tc.Function.Name+" → "+truncate(out, 220))
+			run.appendTimeline("tool_result", "✅ "+tc.Function.Name+" → "+truncate(summarizeToolResult(tc.Function.Name, out), 220))
 		}
 		if consecutiveFail >= 3 {
 			logging.Warn("ai", "agent run=%s trace=%s: %d consecutive failures, converging to summary", run.ID, traceID, consecutiveFail)
 			run.Traces = append(run.Traces, trace)
-			run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(out, 4000), Error: trace.Error, TraceID: traceID}, "")
+			run.emit(AgentEventToolResult, toolResultEvent(tc.Function.Name, traceID, view, trace.Error), "")
 			// 收敛时尽量产出真实报告而不是动作清单
 			if len(run.Traces) > 0 {
 				if _, rerr := c.finalizeWithReport(ctx, run, "工具连续失败多次，工具阶段到此为止。"); rerr == nil {
@@ -1368,10 +1429,9 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			return nil, fmt.Errorf("%d consecutive tool failures", consecutiveFail)
 		}
 
-		trace.Result = out
 		run.Traces = append(run.Traces, trace)
-		run.emit(AgentEventToolResult, ToolResult{Name: tc.Function.Name, Result: truncate(out, 4000), Error: trace.Error, TraceID: traceID}, "")
-		run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: truncate(out, 4000)})
+		run.emit(AgentEventToolResult, toolResultEvent(tc.Function.Name, traceID, view, trace.Error), "")
+		run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: view.Text})
 		// 第 2 次相同签名：**工具结果之后**追加一条系统提示，要求换策略或直接给结论。
 		// 多数情况下模型只是没意识到自己在重复，提示一次比直接掐断更有效。
 		if action == loopWarn {
@@ -1552,6 +1612,131 @@ type ToolTrace struct {
 	Args   map[string]string `json:"args,omitempty"`
 	Result string            `json:"result,omitempty"`
 	Error  string            `json:"error,omitempty"`
+	// 以下四个字段为 v1.4.0 S2 新增（对老前端是"新增可选字段"，既有字段名与语义一律不变）：
+	// 大结果已外置时，Result 里是摘要 + 句柄；前端可据此提示"结果已外置，共 N 字节"，
+	// 而不是渲染一段被截断的正文。
+	Handle         string `json:"handle,omitempty"`
+	Truncated      bool   `json:"truncated,omitempty"`
+	TruncationNote string `json:"truncation_note,omitempty"`
+	TotalBytes     int    `json:"total_bytes,omitempty"`
+}
+
+// resultRef 一次工具调用的定位信息（信封 call_id + 结果索引都用它）。
+// 用一个结构体而不是四个裸字符串参数：run/trace/call 三种 id 很像，传错位了很难发现。
+type resultRef struct {
+	Tool    string
+	CallID  string // LLM 给出的 tool_call id（同一次执行内唯一）
+	RunID   string // 自主 Agent 的 run id；同步副驾驶路径为空
+	TraceID string // tr-<unixnano>-<hex>，同一次执行的所有事件共用
+}
+
+// correlationID 结果索引的配对键：trace + call 足以唯一定位一次工具调用
+// （call_id 为空的上游用工具名 + 序号兜底，保证不出现空键）。
+func (r resultRef) correlationID() string {
+	key := r.CallID
+	if key == "" {
+		key = r.Tool
+	}
+	if r.TraceID == "" {
+		return key
+	}
+	return r.TraceID + ":" + key
+}
+
+// IndexedResult 一条外置结果的索引记录。
+//
+// 为什么不直接 import agentstore：ai 是"执行"层，agentstore 是"持久化"层，
+// 让 ai 依赖 sqlite 会把存储细节漏进循环；这里只定义中立结构，由接线方（api 包）
+// 映射到 agentstore.tool_results，缺 DB 时整条索引静默跳过。
+type IndexedResult struct {
+	CorrelationID string
+	RunID         string
+	Tool          string
+	Status        string // ok / error
+	MediaType     string
+	BytesTotal    int64
+	SHA256        string
+	Handle        string // 结果外置句柄（agentstore.Result.ExternalPath）
+	Summary       string // 内联摘要（截断说明 / 摘要 JSON）
+	Truncated     bool
+	PageSize      int
+}
+
+// ResultIndexer 结果外置索引的最小接口（实现见 api.agentResultIndexer）。
+type ResultIndexer interface {
+	IndexToolResult(rec IndexedResult) error
+}
+
+// toolResultView 是内置 Agent **唯一**的"工具结果 → 模型可见文本"转换点。
+// 同步循环（runLoop）、异步自主循环（RunAgent）、两条审批恢复路径全部经由它，
+// 不允许再在调用点写 truncate(out, N) —— 历史 bug 正是散落的字符串硬截断把
+// 截图 base64 切成坏 JSON（详见 mcp/inline_model.go 顶部说明）。
+//
+// 这里只做三件事（判定逻辑都在 mcp.InlineForModel，保持"外置语义"只属于 mcp 包）：
+//  1. 取本 Copilot 生效的外置存储与内联上限；
+//  2. 超限且**真的外置成功**时，把 句柄/sha256/字节数 写进结果索引（可选接线）；
+//     写失败只告警——审计缺失不该让一次任务失败；
+//  3. 回传 ModelView，让 ToolTrace 与 SSE tool_result 事件能带上 handle/truncated。
+func (c *Copilot) toolResultView(ref resultRef, raw string) mcp.ModelView {
+	view := mcp.InlineForModel(ref.Tool, ref.CallID, raw, c.results, c.inlineLimit)
+	if view.Handle != "" && c.resultIdx != nil {
+		rec := IndexedResult{
+			CorrelationID: ref.correlationID(),
+			RunID:         ref.RunID,
+			Tool:          ref.Tool,
+			Status:        "ok",
+			MediaType:     "application/json",
+			BytesTotal:    int64(view.TotalBytes),
+			SHA256:        view.SHA256,
+			Handle:        view.Handle,
+			Summary:       view.TruncationNote,
+			Truncated:     true,
+			PageSize:      c.effectiveInlineLimit(),
+		}
+		if err := c.resultIdx.IndexToolResult(rec); err != nil {
+			logging.Warn("ai", "结果外置索引写入失败（不影响本次执行）tool=%s handle=%s: %v",
+				ref.Tool, view.Handle, err)
+		}
+	}
+	return view
+}
+
+// effectiveInlineLimit 本次生效的内联上限（与 mcp.InlineForModel 的回落口径一致），
+// 仅用于索引里记录"这一页按多大切"。
+func (c *Copilot) effectiveInlineLimit() int {
+	if c.inlineLimit > 0 {
+		return c.inlineLimit
+	}
+	return mcp.DefaultInlineLimit
+}
+
+// withResultMeta 把"结果已外置/已截断"的元信息挂到轨迹上（v1.4.0 S2 新增可选字段），
+// **并同时把 Result 对齐到"模型可见文本"**。集中在这里赋值是有意的：轨迹的 Result 与
+// 上下文里的文本必须永远是同一份（都是摘要 + 句柄，或都是原文），否则前端能看到的和模型
+// 看到的会不一致——而"调用点各自 set Result"正是旧实现出问题的方式。
+func (t ToolTrace) withResultMeta(v mcp.ModelView) ToolTrace {
+	t.Result = v.Text
+	t.Handle = v.Handle
+	t.Truncated = v.Truncated
+	t.TruncationNote = v.TruncationNote
+	t.TotalBytes = v.TotalBytes
+	return t
+}
+
+// toolResultEvent 组装 SSE tool_result 事件（含结果外置元信息）。
+// 单独抽出来是为了让四处发射点口径一致：Result 一律用"模型可见文本"，
+// 绝不把被截断的原始正文塞给前端（老前端只认 name/result/error，新字段可忽略）。
+func toolResultEvent(name, traceID string, view mcp.ModelView, errMsg string) ToolResult {
+	return ToolResult{
+		Name:           name,
+		Result:         view.Text,
+		Error:          errMsg,
+		TraceID:        traceID,
+		Handle:         view.Handle,
+		Truncated:      view.Truncated,
+		TruncationNote: view.TruncationNote,
+		TotalBytes:     view.TotalBytes,
+	}
 }
 
 // agentToolNames 是**暴露给内置 Agent 的工具子集**（有意为之，不是全量）：
@@ -1561,6 +1746,11 @@ type ToolTrace struct {
 //
 // ⚠️ 这里只保留**名字清单**；每个工具的 description 与参数 schema 一律从工具注册表
 // （`internal/server/mcp`，全项目唯一元数据来源）取，避免再维护第二份 schema。
+//
+// v1.4.0 S2 起加入只读元工具 `result_read`：超限结果被外置后，模型上下文里只剩
+// 摘要 + 句柄，**必须有回读工具才能真正取到内容**，否则"外置"等于把结果丢了。
+// 它是 LevelRead（免审批），且 loopGuardAction 对只读工具豁免——反复按不同 offset
+// 分页回读同一句柄是正常行为，不该被"同工具同参数防死循环"误伤（参数不同即不同签名）。
 var agentToolNames = []string{
 	"intel_query", "session_context", "session_list", "exec",
 	"file_list", "file_download", "process_list", "process_kill",
@@ -1572,6 +1762,7 @@ var agentToolNames = []string{
 	"plugin_upload", "fileless_exec",
 	"user_info", "system_info", "service_list", "check_av",
 	"net_info", "net_connections", "env_vars", "scheduled_tasks",
+	"result_read",
 }
 
 // toolSchemas 将工具注册表映射为 OpenAI function calling schema。

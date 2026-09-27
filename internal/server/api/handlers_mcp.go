@@ -150,6 +150,10 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 			"session_id": info.ID, "hostname": info.Hostname, "os": info.OS,
 			"arch": info.Arch, "username": info.Username, "listener": info.Listener,
 			"status": info.Status, "recent_tasks": recent,
+			// 显式说明"这里是摘要不是全文"：recent_tasks[].output 是每条任务输出的前 200
+			// 字符，属于上下文概览字段；不写清楚的话，模型会把摘要当成任务的完整输出。
+			"recent_tasks_note": "recent_tasks[].output 只是每条任务输出的**前 200 字符摘要**（不是完整输出）：" +
+				"需要完整内容请用 task_result/task_wait 取该 task_id 的结果，或对已外置的结果用 result_read 按句柄回读。",
 		}, nil
 	case "task_submit":
 		sid := params["session_id"]
@@ -178,7 +182,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		return map[string]interface{}{
 			"task_id": t.ID, "task_type": t.TaskType, "command": t.Command,
 			"session_id": t.SessionID, "status": t.Status,
-			"output": truncateStr(t.Output, 4000), "error": t.Error,
+			"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
 			"exit_code":  t.ExitCode,
 			"created_at": t.CreatedAt, "completed_at": t.CompletedAt,
 		}, nil
@@ -204,7 +208,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 				return map[string]interface{}{
 					"task_id": t.ID, "task_type": t.TaskType, "command": t.Command,
 					"session_id": t.SessionID, "status": t.Status,
-					"output": truncateStr(t.Output, 4000), "error": t.Error,
+					"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
 					"exit_code": t.ExitCode, "completed_at": t.CompletedAt,
 				}, nil
 			}
@@ -224,7 +228,7 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		return map[string]interface{}{
 			"task_id": t.ID, "task_type": t.TaskType, "command": t.Command,
 			"session_id": t.SessionID, "status": t.Status,
-			"output": truncateStr(t.Output, 4000), "error": t.Error,
+			"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
 			"exit_code": t.ExitCode, "timeout": true,
 			"message": "等待超时，任务仍在执行",
 		}, nil
@@ -381,6 +385,10 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		return map[string]interface{}{
 			"session_id": sid, "os": sess.Info.OS, "suggestions": suggestions,
 		}, nil
+	case "result_read":
+		// 结果回读元工具（v1.4.0 S2，LevelRead 免审批）：超长工具结果被外置后，
+		// 模型按句柄分页取回内容。没有它，"外置"就等于把结果丢了。
+		return s.readResult(params)
 	case "plugin_list":
 		mgr := plugin.GetManager()
 		if mgr == nil {
@@ -1002,14 +1010,14 @@ func (s *Server) pushAndAwait(sid string, taskInfo *types.TaskInfo, timeoutSec i
 			return map[string]interface{}{
 				"session_id": sid, "task_id": t.ID, "task_type": t.TaskType,
 				"command": t.Command, "status": "completed",
-				"output": truncateStr(t.Output, 8000), "error": t.Error,
+				"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
 				"exit_code": t.ExitCode, "completed_at": t.CompletedAt,
 			}, nil
 		case "failed", "timeout":
 			return map[string]interface{}{
 				"session_id": sid, "task_id": t.ID, "task_type": t.TaskType,
 				"command": t.Command, "status": t.Status,
-				"output": truncateStr(t.Output, 8000), "error": t.Error,
+				"output": taskOutput(t), "output_bytes": len(t.Output), "error": t.Error,
 				"exit_code": t.ExitCode,
 			}, nil
 		}
@@ -1028,10 +1036,29 @@ func (s *Server) pushAndAwait(sid string, taskInfo *types.TaskInfo, timeoutSec i
 	}
 	return map[string]interface{}{
 		"session_id": sid, "task_id": t.ID, "command": t.Command,
-		"status": t.Status, "output": truncateStr(t.Output, 8000),
+		"status": t.Status, "output": taskOutput(t), "output_bytes": len(t.Output),
 		"error": t.Error, "exit_code": t.ExitCode, "timeout": true,
 		"message": "任务超时仍在执行",
 	}, nil
+}
+
+// taskOutput 返回任务输出原文。
+//
+// ⚠️ 这里**故意不再做字符串截断**（历史实现是 truncateStr(t.Output, 8000/4000)）。
+// 工具层一旦把 JSON 正文切成两半，下游再也无法恢复：
+//   - 截图结果是 `{"image":"<base64>","format":"png"}`，切在中间 = base64 非法、JSON 非法，
+//     模型/前端拿到的是"坏数据"而不是"部分数据"；
+//   - 而且它把"该不该外置、截断到多少"这个决策从**上下文层**（按内联上限 + 句柄回读）
+//     下移到了工具层（一个写死的 8000），两处口径必然打架。
+//
+// 正确分工：工具层返回**真实完整结果**，由 mcp.InlineForModel（内置 Agent）或
+// mcp.Envelope.FinalizeInline（对外 MCP）决定"内联还是外置成句柄"，并且一旦截断
+// 必定带显式标注。output_bytes 供调用方判断到底拿了多少。
+func taskOutput(t *types.TaskInfo) string {
+	if t == nil {
+		return ""
+	}
+	return t.Output
 }
 
 // execAndAwait TaskOrchestrator 核心：在指定会话下发一次性命令并原子等待结果。

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"toshell/internal/server/logging"
+	"toshell/internal/server/mcp"
 )
 
 // ─── 异步自主 Agent───────────────────────────────────────────────────
@@ -83,6 +84,13 @@ type ToolResult struct {
 	Error  string `json:"error,omitempty"`
 	// TraceID v1.4.0 S2 新增：本次执行的 trace id（SSE 载荷里可见）。
 	TraceID string `json:"trace_id,omitempty"`
+	// Handle/Truncated/TruncationNote/TotalBytes 为 v1.4.0 S2 新增可选字段：
+	// 超过内联上限的结果已外置，Result 里只有摘要；前端可据此显示"结果已外置，
+	// 共 N 字节，可用句柄回读"，而不是展示一段被截断的正文。老前端忽略即可。
+	Handle         string `json:"handle,omitempty"`
+	Truncated      bool   `json:"truncated,omitempty"`
+	TruncationNote string `json:"truncation_note,omitempty"`
+	TotalBytes     int    `json:"total_bytes,omitempty"`
 }
 
 // AgentStatus run 生命周期状态。
@@ -162,6 +170,9 @@ type cachedExec struct {
 	OK    bool   // 上次是否成功（exit 0 / status completed）
 	Brief string // 上次结果摘要（截断），供去重回放
 	Full  string // 上次完整输出（截断），供去重回放
+	// View 上次的"模型可见文本"（v1.4.0 S2）：去重复用时连同句柄/截断标注一起回放，
+	// 否则被外置的大结果在回放时会退化成一段被截断的正文（模型会把它当全部）。
+	View mcp.ModelView
 }
 
 // seenExecKey 返回某次 exec 类调用的规范键；非 exec 类返回 ""。

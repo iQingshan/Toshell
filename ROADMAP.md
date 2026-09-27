@@ -58,7 +58,7 @@
 - **已在真实服务端 + mock LLM 上跑通的循环行为**（不依赖任何真实模型/植入端）：`max_turns` 触发即停且提示里带真实轮次；同一 confirm 级工具同参数第 3 次**在调用前**停止并记 `loop_detected`（只读工具重复不误杀）；`graded` 下 confirm 级工具执行前挂起（`status/stop_reason=awaiting_consent`，未下发命令），deny 后恢复并留"已跳过"轨迹。
 - 待做（按依赖顺序）：
   1. **异步任务状态机**：工具调用改成「提交 → 立即返回句柄 → 由事件/轮询驱动恢复」，禁止在调用线程 sleep 轮询（现状 `pushAndAwait` 就是 sleep 500ms 轮询到超时）；恢复时按 `agent_tool_calls` 的 `internal_task_id` 对齐 `tasks` 表。
-  2. **长结果外置 + 句柄内联 + 分页回读**：把 `truncate(out, 4000)` 换成统一信封 + `tool_results` 句柄；**任何截断显式告知模型**（顺带修掉"截图 base64 被截断成非法 JSON"）。
+  2. ✅ **长结果外置 + 句柄内联 + 分页回读**（已完成，设计见 `docs/AGENT-RESULT-OFFLOAD.md`）：唯一转换点 `mcp.InlineForModel`（≤8 KiB 原文；超限只给"摘要 + 句柄 + 显式截断说明"的合法 JSON 信封；外置失败则给预览 + 说明）；`result_read` 从"只在注册表里"补成真实现并加入 Agent 工具面（slice/tail + 游标，页大小自适应收缩）；删掉 8 处字符串硬截断，顺带修掉"截图 base64 被切成非法 JSON"（根因在服务端，植入端未改）与"integer 工具参数被静默丢弃"（回读翻不动页的真因）。
   3. **上下文分层与 token 预算**：常驻 / 任务 / 工作 / 历史四层，压缩优先于扩窗，稳定前缀做缓存。
   4. ✅ **控制循环三处硬上限 + 防死循环**（已完成）：`ai.max_turns=20`（统一）、`ai.max_tool_calls=40`、`ai.max_wallclock_sec=900`，触发即停并记 `stop_reason`；同工具同参数签名第 2 次提示换策略、第 3 次判 `loop_detected`（只读工具豁免）。判定逻辑为纯函数（`shouldStopRun`/`loopSignature`），有单测。
   5. ✅ **审批分级**（已完成）：`ai.consent_policy: graded|all|off`（旧值 `auto→off`、`normal→graded` 兼容），按注册表 read/confirm/danger 分级，未注册工具按 danger、`delegate` 恒危险；设置页可改，接口回传的是**生效策略**，旧键在保存时按同一语义同步写回。

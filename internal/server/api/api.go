@@ -19,6 +19,7 @@ import (
 	"toshell/internal/server/config"
 	"toshell/internal/server/drivers"
 	"toshell/internal/server/logging"
+	"toshell/internal/server/mcp"
 	"toshell/internal/server/session"
 	"toshell/internal/server/task"
 )
@@ -159,6 +160,13 @@ type Server struct {
 	// 本会话已加载的 BYOVD 驱动档案（服务端不再内置驱动，见 handlers_edr.go）
 	driverMu       sync.Mutex
 	sessionDrivers map[string]drivers.Driver
+
+	// agentResults 内置 Agent 的工具结果外置存储（v1.4.0 S2）。
+	//
+	// 它只依赖本地目录 + TTL，**与 mcp.enabled（对外 MCP 监听器）无关**：默认配置下
+	// mcp.enabled=false，但内置 Agent 同样会产生截图/systeminfo 这类超长结果，必须在
+	// 上下文里换成"摘要 + 句柄"而不是被字符串硬截断。nil = 目录不可用（退化为显式截断）。
+	agentResults *mcp.ResultStore
 }
 
 // SetOnConfigApplied 注册配置热应用回调（设置 API 保存后触发）。
@@ -185,6 +193,11 @@ func New(cfg *config.Config, sessMgr *session.Manager, taskMgr *task.Manager) *S
 	}
 	// AI 副驾驶：executor 为 Server 自身（复用 MCP 工具实现）
 	server.copilot = ai.New(cfg.AI, server)
+	// 工具结果外置（v1.4.0 S2）：超长结果落盘为句柄 + 显式截断说明，配合 result_read 回读。
+	// 放在 ai.New 之后注入（New 的签名保持不变），并在热更新重建 Copilot 时重复注入。
+	server.agentResults = newAgentResultStore(cfg)
+	server.applyResultStore(server.copilot)
+	server.startResultGC()
 	// 异步自主 Agent 运行时：并发上限由 config.AI.AgentConcurrency 决定（默认 2）
 	server.agentMgr = ai.NewAgentManager(cfg.AI.AgentConcurrency)
 	// 剧本化执行引擎：executor 同样复用 Server 的 invokeTool（MCP 工具面）

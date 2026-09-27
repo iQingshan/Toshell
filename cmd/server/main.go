@@ -285,6 +285,13 @@ func NewServer(cfgPath string) (*Server, error) {
 
 	apiServer := api.New(cfg, sessMgr, taskMgr)
 
+	// Agent 存储接线（v1.4.0 S2）：把"结果外置索引"落到 agentstore.tool_results，
+	// 记录句柄 / sha256 / 字节数 / TTL，供事后追溯与过期回收。未接上（无 DB）时
+	// 只是不写索引，结果外置与 result_read 回读照常工作。
+	if agentStore != nil {
+		apiServer.SetAgentStore(agentStore)
+	}
+
 	// 注入嵌入式前端文件系统（单二进制部署时嵌入 web/dist）。
 	// embed.FS 与 http.FileServer 存在路径规范化冲突：FileServer 传入以 "/" 开头的路径，
 	// 而 http.FS(embed.FS) 内部会做 fs.ValidPath 校验（要求不以 "/" 开头），

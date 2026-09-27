@@ -24,6 +24,14 @@
 
 **目标**：把「单轮同步阻塞 + 状态全在内存 + 长结果整段灌上下文」换成可恢复、有预算、可回放的长任务执行。
 
+- **长结果外置 + 句柄内联 + 分页回读（本版核心增量之一，完整设计见 [docs/AGENT-RESULT-OFFLOAD.md](docs/AGENT-RESULT-OFFLOAD.md)）**
+  - **唯一转换点**：新增 `mcp.InlineForModel`/`mcp.ModelView`（放在 `mcp` 包：外置信封、句柄、分页语义本就在那里，且 `mcp` 不依赖 `ai`/`api`/`config`，三个消费方都能复用同一把尺子）。两个 ReAct 循环 + 两条审批恢复路径**全部**改走它，**删掉 8 处 `truncate(out, 4000)` 字符串硬截断**。
+  - **判定**：≤ `mcp.inline_limit`（默认 8192 字节）→ 原文；超限且外置成功 → 模型只看到**统一信封 JSON（摘要 + 句柄 + 总字节 + 显式截断说明）**；外置失败/未配置存储 → 信封里放**开头预览**（作为 JSON 字符串字段转义，因此**恒为合法 JSON**）+ 说明"这不是全部、没有句柄可回读"。硬性质：**凡被截断，模型拿到的一定是合法 JSON 且必带显式标注**。
+  - **回读闭环**：`result_read` 此前**只登记在注册表里 —— `invokeTool` 没有实现、`agentToolNames` 也没有它**，等于"外置=丢结果"。现已实现（含 `slice`/`tail` 两种模式、页大小自适应收缩到内联上限以内以免"句柄套句柄"自锁、`has_more`/`next_offset` 游标）并加入 Agent 工具面（LevelRead 免审批）。存储与 `mcp.enabled` **解耦**（默认关闭 MCP 也能用），并补了 api 侧 30 分钟 GC；`agentstore.tool_results` 索引已接线（句柄/sha256/字节数/TTL，写失败只告警）。
+  - **修掉"截图 base64 被截断成非法 JSON"**：根因在**服务端**（`pushAndAwait` 的 `truncateStr(t.Output, 8000)`、`task_result`/`task_wait` 的 4000、copilot 的 4000 三处把内层 JSON 切在中间），植入端返回的一直是完整 JSON——**故未改植入端模板**（`release/implant` 与 `internal/server/builder/implant` 61 个文件已 SHA-256 逐一核对一致）。任务输出改为 `taskOutput()` + `output_bytes` 显式标注。
+  - **顺手修掉的既有 bug**：工具参数以 `map[string]string` 反序列化会**静默丢弃 integer 参数**（`offset`/`limit`/`pid`/`task_id`/`timeout_sec`/`wait_ms`/`local_port`），这正是"回读翻不动页"的原因（`json.Unmarshal` 的类型错误被 `_ =` 丢弃、字段直接消失）。新增 `ai.toolArgs`（口径对齐 `mcp.buildArgs`），两处解析点统一改走它。
+  - **前端可见**：`ToolTrace` 与 SSE `tool_result` 事件新增 `handle`/`truncated`/`truncation_note`/`total_bytes` 四个**可选**字段（既有字段名一个没动，老前端忽略即可）。
+
 - **状态落盘：4 张新表 + 专用存储层**（`internal/server/database/agent_schema.go`、新包 `internal/server/agentstore`）
   - `agent_runs`（run 级状态机与预算：status/stop_reason/**waiting_on**/三处上限/token 用量/trace_id）、
     `agent_steps`（步骤级 checkpoint：`UNIQUE(run_id, step_no)` 作恢复游标、每步指标、压缩摘要）、
@@ -42,12 +50,16 @@
   - `max_turns=3` 时 3 次工具调用后停止，`stop_reason=max_turns`，最终回复给出"已达轮次上限（3 轮，实际 3 轮）"——顺带修掉收尾统计漏传 `Turns` 导致恒显示"实际 0 轮"的 bug。
   - 同一只读工具（`session_list`）重复调用 3 次**不**触发防死循环（豁免生效）；同一 confirm 级工具（`user_info`）同参数：第 1 次执行、第 2 次执行并追加 `loop_warn` 提示、**第 3 次在调用前停止**，`stop_reason=loop_detected`，timeline 里记明是哪只工具与参数。
   - `consent_policy=graded` 下 confirm 级工具在**执行前**挂起（`status/stop_reason=awaiting_consent`，`traces=0`，未下发命令），deny 后恢复并记录"已跳过"轨迹；`off` 下不再询问。
+- **长结果外置的端到端验证**（同一套本地沙箱：真实服务端 + mock LLM 假服务；45 个假工具文件把 `tool_list` 撑到 **11814 字节**）：
+  - 模型可见文本变成 **535 字节的合法 JSON 信封**（`truncated=true` + `handle` + `total_bytes=11814`），上下文里**不再出现原始正文**；
+  - 假模型从上一轮 tool 消息里现取句柄调 `result_read(mode=tail)` → 回读 2000 字节、响应 2407 字节（未超 8192，不会"句柄套句柄"），**与磁盘外置文件逐字节一致**；
+  - 改完这一层后重跑三档循环回归：`loop_detected`（第 3 次调用前停止，轨迹 2 条）/ `awaiting_consent` / `max_turns` 全部符合预期。
 - **工程质量（本机杀软关闭后首次跑全量单测暴露出来的问题，已修）**：
   - `agentstore` 的 6 个用例本身全绿，但在 Windows 上因**临时 sqlite 没关**导致 `t.TempDir` 清理失败（`unlinkat ... being used by another process`），整体判 FAIL；`newTestStore`/`TestMaxTaskID`/`TestSchemaCreatesAgentTables` 全部补 `t.Cleanup(Close)`。
   - `internal/server/api` 有 **4 个用例长期红着却没人发现**：`TestLoaderChainVariantsCoverage`/`TestLoaderChainHasNoBundledThirdParty` 挂在测试助手 `decodeEncCommand` 上——它取**最后一个** `-enc ` 去 Base64 解码，而 mshta 骨架里是 `-enc <注入器Base64>` 这种**占位符**，必然解码失败；改为扫描全部 `-enc ` 片段、只展开能成功解码的，占位符原样保留。`TestLoaderAdvice/windows_shellcode_未签名` 要求 tips 里出现"内存加载"，而文案写的是"注入当前 powershell.exe"，已把该条改成明确说"只走内存加载"（与项目既有词汇一致）。
   - **CI 测试范围补上 `api`/`auth`/`session`/`webhook`/`avdetect`**：此前 `./internal/server/api/...` 根本不在 CI 里，而本机又被杀软拦着跑不了 → 上面 4 个红灯得以"存活"很久。这类"没人跑"的包从此纳入门禁。
 - **本地单测门禁恢复**：关闭 360 后本机可执行测试 PE，`go test ./...` 已跑通（除本轮在做的 S2 增量外全绿）：`common/crypto`、`server/{agentstore,auth,avdetect,builder,config,drivers,mcp,session,webhook}` 全 ok。
-- **仍未做**（S2 剩余）：异步任务状态机（工具调用改成"提交 → 句柄 → 事件驱动恢复"）、上下文四层与 token 预算、SSE `id`/`Last-Event-ID` 断点续传、评估门禁（长结果外置 + 句柄回读见下条增量）。
+- **仍未做**（S2 剩余）：异步任务状态机（工具调用改成"提交 → 句柄 → 事件驱动恢复"）、上下文四层与 token 预算、SSE `id`/`Last-Event-ID` 断点续传、评估门禁；`ai/playbook.go` 的步骤输出仍是字符串硬截断（会动到剧本 API 字段语义，留给下一增量）。
 
 ### 🥷 S3 免杀：分层治理（落地 / 动态 / 静态）
 - （待填）
