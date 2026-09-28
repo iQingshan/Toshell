@@ -32,17 +32,29 @@ import (
 //   - Signer          签名者简单显示名（取不到时留空，见 verify_windows.go 的取舍说明）；
 //   - Blocklisted     本机是否启用了微软易受攻击驱动黑名单策略（不含名单内容）；
 //   - Warnings/Errors Errors 非空 = 必须拒绝下发；Warnings 非空 = 允许下发但需提示风险。
+//
+// v1.4.0 S6 P0-1 追加：manifest 的**签名声明**与"声明 ↔ 实测"的一致性判定
+// （DeclaredSignature/DeclaredSigner/RequireSignature/SignatureConsistent）。
+// 为什么要单列：声明是人工写的、实测依赖本机，把两者并排放出来，前端才能显示
+// "缺签名 / 声明与实测不符"，而不是只给一个模糊的"未签名"。
 type VerifyResult struct {
-	SHA256           string   `json:"sha256"`
-	ManifestSHA256   string   `json:"manifest_sha256,omitempty"`
-	HashOK           bool     `json:"hash_ok"`
-	Signed           bool     `json:"signed"`
-	SignatureChecked bool     `json:"signature_checked"`
-	Signer           string   `json:"signer,omitempty"`
-	Blocklisted      bool     `json:"blocklisted"`
-	BlocklistReason  string   `json:"blocklist_reason,omitempty"`
-	Warnings         []string `json:"warnings,omitempty"`
-	Errors           []string `json:"errors,omitempty"`
+	SHA256           string `json:"sha256"`
+	ManifestSHA256   string `json:"manifest_sha256,omitempty"`
+	HashOK           bool   `json:"hash_ok"`
+	Signed           bool   `json:"signed"`
+	SignatureChecked bool   `json:"signature_checked"`
+	Signer           string `json:"signer,omitempty"`
+	Blocklisted      bool   `json:"blocklisted"`
+	BlocklistReason  string `json:"blocklist_reason,omitempty"`
+	// DeclaredSignature / DeclaredSigner manifest 的签名声明（"signed"/"unsigned"/空）。
+	DeclaredSignature string `json:"declared_signature,omitempty"`
+	DeclaredSigner    string `json:"declared_signer,omitempty"`
+	// RequireSignature manifest 是否要求实测签名有效（require_signature:true）。
+	RequireSignature bool `json:"require_signature,omitempty"`
+	// SignatureConsistent 声明与实测是否一致：nil = 无法比较（无声明，或本次没跑签名校验）。
+	SignatureConsistent *bool    `json:"signature_consistent,omitempty"`
+	Warnings            []string `json:"warnings,omitempty"`
+	Errors              []string `json:"errors,omitempty"`
 }
 
 // SignatureStatus 平台层给出的签名校验结论（纯数据，便于跨平台复用与单测）。
@@ -88,15 +100,27 @@ func CompareHash(actual, expected string) (bool, []string, []string) {
 
 // BuildVerifyResult 纯逻辑：把"哈希比对 + 签名结论 + 黑名单状态"合并成最终判定。
 // 不读盘、不调用系统 API，因此单测可以直接喂假数据覆盖各分支。
+//
+// 兼容入口：declaredSigner 是 v1.3.4 的"签名者字符串"写法，这里包成
+// SignatureDeclaration（声明已签名 + 该签名者）。需要 require_signature / signed:false
+// 这类完整声明时用 buildVerifyResult。
 func BuildVerifyResult(actualSHA, expectedSHA, declaredSigner string, sig SignatureStatus, bl BlocklistStatus) VerifyResult {
+	return buildVerifyResult(actualSHA, expectedSHA, declarationFromSigner(declaredSigner), sig, bl)
+}
+
+// buildVerifyResult 带完整签名声明的合并入口（List / Verify / VerifyBytes 走这里）。
+func buildVerifyResult(actualSHA, expectedSHA string, decl SignatureDeclaration, sig SignatureStatus, bl BlocklistStatus) VerifyResult {
 	res := VerifyResult{
-		SHA256:           strings.ToLower(strings.TrimSpace(actualSHA)),
-		ManifestSHA256:   strings.ToLower(strings.TrimSpace(expectedSHA)),
-		Signed:           sig.Signed,
-		SignatureChecked: sig.Checked,
-		Signer:           strings.TrimSpace(sig.Signer),
-		Blocklisted:      bl.Enabled,
-		BlocklistReason:  bl.Reason,
+		SHA256:            strings.ToLower(strings.TrimSpace(actualSHA)),
+		ManifestSHA256:    strings.ToLower(strings.TrimSpace(expectedSHA)),
+		Signed:            sig.Signed,
+		SignatureChecked:  sig.Checked,
+		Signer:            strings.TrimSpace(sig.Signer),
+		Blocklisted:       bl.Enabled,
+		BlocklistReason:   bl.Reason,
+		DeclaredSignature: decl.Declared,
+		DeclaredSigner:    strings.TrimSpace(decl.Signer),
+		RequireSignature:  decl.Require,
 	}
 
 	ok, errs, warns := CompareHash(actualSHA, expectedSHA)
@@ -109,9 +133,11 @@ func BuildVerifyResult(actualSHA, expectedSHA, declaredSigner string, sig Signat
 	if sig.Checked && !sig.Signed {
 		res.Warnings = append(res.Warnings, "驱动未通过 Authenticode 签名校验：开启签名强制/CI 策略的内核会拒绝加载，杀软也常按「无签名驱动」告警")
 	}
-	if sig.Signer != "" && declaredSigner != "" && !signerMatches(declaredSigner, sig.Signer) {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("manifest 声明的签名者 %q 与本机实测 %q 不一致，请人工核对驱动来源", declaredSigner, sig.Signer))
-	}
+	// 声明 ↔ 实测 的一致性判定（口径与理由见 signature.go 的 SignatureConsistency）。
+	consistent, cw, ce := SignatureConsistency(decl, sig)
+	res.SignatureConsistent = consistent
+	res.Warnings = append(res.Warnings, cw...)
+	res.Errors = append(res.Errors, ce...)
 	res.Warnings = append(res.Warnings, bl.Warnings...)
 	return res
 }
@@ -160,8 +186,8 @@ func Verify(path string) VerifyResult {
 	if err != nil {
 		return VerifyResult{Errors: []string{fmt.Sprintf("无法读取驱动文件 %s：%v", path, err)}}
 	}
-	expected, declared := manifestExpectedFor(path)
-	return verifyWithRaw(path, raw, expected, declared)
+	expected, decl := manifestDeclarationFor(path)
+	return verifyWithRawDecl(path, raw, expected, decl)
 }
 
 // SelfCheckSupported 本平台是否真的能执行驱动加载前自检（Authenticode 签名校验）。
@@ -181,9 +207,32 @@ func SelfCheckSupported() bool { return platformSupported }
 
 // verifyWithRaw 用**已读入内存**的驱动字节做自检（List() 已经读过一次，避免二次全文件读取）。
 // expectedSHA / declaredSigner 由调用方从 manifest 里取出，同样避免重复解析 manifest.json。
+//
+// 兼容入口：declaredSigner 是 v1.3.4 的"签名者字符串"写法；需要完整签名声明
+// （signed:false / require_signature）时用 verifyWithRawDecl。
 func verifyWithRaw(path string, raw []byte, expectedSHA, declaredSigner string) VerifyResult {
+	return verifyWithRawDecl(path, raw, expectedSHA, declarationFromSigner(declaredSigner))
+}
+
+// verifyWithRawDecl 带完整签名声明的自检入口（List / Verify 走这里）。
+//
+// 非 Windows 平台仍然**短路**（"不做驱动自检"是既有设计：verify_other.go 的
+// platformSupported=false 意味着这台机器上凑不出签名结论，改成硬校验哈希会改变既有语义、
+// 也会让 Linux 托管的控制端行为与今天不同）。但会把 manifest 的签名声明原样回显，
+// 并**明确写出"这份声明在本平台没有被强制执行"** —— 不伪造一个"已核对"的结论。
+func verifyWithRawDecl(path string, raw []byte, expectedSHA string, decl SignatureDeclaration) VerifyResult {
 	if !platformSupported {
-		return VerifyResult{Warnings: []string{"非 Windows 平台不做驱动自检"}}
+		res := VerifyResult{
+			DeclaredSignature: decl.Declared,
+			DeclaredSigner:    strings.TrimSpace(decl.Signer),
+			RequireSignature:  decl.Require,
+			Warnings:          []string{"非 Windows 平台不做驱动自检"},
+		}
+		if !decl.Empty() {
+			res.Warnings = append(res.Warnings, "manifest 声明了签名信息（"+decl.ConsistencyNote()+
+				"），但本平台无法执行 Authenticode 校验：该声明**未被核对、也未被强制执行**（require_signature 同样不生效）")
+		}
+		return res
 	}
 	if raw == nil {
 		return VerifyResult{Errors: []string{fmt.Sprintf("无法读取驱动文件 %s：内容为空", path)}}
@@ -191,7 +240,7 @@ func verifyWithRaw(path string, raw []byte, expectedSHA, declaredSigner string) 
 	actual := sha256Hex(raw)
 	sig := cachedSignature(path, actual, raw)
 	bl := platformBlocklist()
-	return BuildVerifyResult(actual, expectedSHA, declaredSigner, sig, bl)
+	return buildVerifyResult(actual, expectedSHA, decl, sig, bl)
 }
 
 // VerifyBytes 校验**接口上传的驱动字节**（byovd_load 的 driver_b64 解码结果）。
@@ -204,14 +253,30 @@ func verifyWithRaw(path string, raw []byte, expectedSHA, declaredSigner string) 
 //
 // manifest 声明的期望 sha256 与上传内容的比对，是这条路径上唯一能硬拦"被替换/损坏"的检查。
 func VerifyBytes(name string, raw []byte) VerifyResult {
-	if !platformSupported {
-		return VerifyResult{Warnings: []string{"非 Windows 平台不做驱动自检"}}
-	}
 	if raw == nil {
 		return VerifyResult{Errors: []string{"驱动内容为空，无法自检"}}
 	}
+	if !platformSupported {
+		// 非 Windows：同 verifyWithRawDecl（声明原样回显 + 明确写出"未被强制执行"），
+		// 哈希/签名都不校验（既有设计：这条路径在非 Windows 上一直只给占位警告）。
+		decl := SignatureDeclaration{}
+		if _, _, d := lookupDriver(name); !d.Empty() {
+			decl = d
+		}
+		res := VerifyResult{
+			DeclaredSignature: decl.Declared,
+			DeclaredSigner:    strings.TrimSpace(decl.Signer),
+			RequireSignature:  decl.Require,
+			Warnings:          []string{"非 Windows 平台不做驱动自检"},
+		}
+		if !decl.Empty() {
+			res.Warnings = append(res.Warnings, "manifest 声明了签名信息（"+decl.ConsistencyNote()+
+				"），但本平台无法执行 Authenticode 校验：该声明**未被核对、也未被强制执行**（require_signature 同样不生效）")
+		}
+		return res
+	}
 	actual := sha256Hex(raw)
-	diskPath, expected, declared := lookupDriver(name)
+	diskPath, expected, decl := lookupDriver(name)
 
 	var sig SignatureStatus
 	switch {
@@ -233,7 +298,7 @@ func VerifyBytes(name string, raw []byte) VerifyResult {
 	}
 
 	bl := platformBlocklist()
-	return BuildVerifyResult(actual, expected, declared, sig, bl)
+	return buildVerifyResult(actual, expected, decl, sig, bl)
 }
 
 // manifestExpectedFor 读取 path 同目录 manifest.json 里该文件的期望 sha256 与声明的签名者。
@@ -241,8 +306,20 @@ func manifestExpectedFor(path string) (string, string) {
 	return manifestExpectedIn(filepath.Dir(path), filepath.Base(path))
 }
 
-// manifestExpectedIn 在 dir/manifest.json 里按文件名或驱动名查找声明。
+// manifestDeclarationFor 读取 path 同目录 manifest.json 里该文件的期望 sha256 与完整签名声明。
+func manifestDeclarationFor(path string) (string, SignatureDeclaration) {
+	return manifestDeclarationIn(filepath.Dir(path), filepath.Base(path))
+}
+
+// manifestExpectedIn 在 dir/manifest.json 里按文件名或驱动名查找声明，
+// 返回期望 sha256 与**声明的签名者**（兼容 v1.3.4 的二元返回，供既有调用方使用）。
 func manifestExpectedIn(dir, fileName string) (string, string) {
+	sha, decl := manifestDeclarationIn(dir, fileName)
+	return sha, decl.Signer
+}
+
+// manifestDeclarationIn 在 dir/manifest.json 里按文件名或驱动名查找声明（期望 sha256 + 完整签名声明）。
+func manifestDeclarationIn(dir, fileName string) (string, SignatureDeclaration) {
 	m := readManifest(dir)
 	base := strings.ToLower(strings.TrimSpace(fileName))
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
@@ -250,18 +327,18 @@ func manifestExpectedIn(dir, fileName string) (string, string) {
 		f := strings.ToLower(strings.TrimSpace(e.File))
 		n := strings.ToLower(strings.TrimSpace(e.Name))
 		if f == base || (n != "" && n == stem) || (f != "" && strings.TrimSuffix(f, filepath.Ext(f)) == stem) {
-			return strings.TrimSpace(e.SHA256), e.Signed
+			return strings.TrimSpace(e.SHA256), e.declaration()
 		}
 	}
-	return "", ""
+	return "", SignatureDeclaration{}
 }
 
-// lookupDriver 按名称（驱动名或文件名）在驱动目录里定位文件，并返回 manifest 声明的期望 sha256 与签名者。
+// lookupDriver 按名称（驱动名或文件名）在驱动目录里定位文件，并返回 manifest 声明的期望 sha256 与签名声明。
 // 只做 stat/解析 manifest，不读 .sys 内容（内容由调用方按需读一次）。
-func lookupDriver(name string) (path, expectedSHA, declaredSigner string) {
+func lookupDriver(name string) (path, expectedSHA string, decl SignatureDeclaration) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "", "", ""
+		return "", "", SignatureDeclaration{}
 	}
 	for _, dir := range SearchDirs() {
 		m := readManifest(dir)
@@ -278,7 +355,7 @@ func lookupDriver(name string) (path, expectedSHA, declaredSigner string) {
 			}
 			p := filepath.Join(dir, file)
 			if st, err := os.Stat(p); err == nil && !st.IsDir() {
-				return p, strings.TrimSpace(e.SHA256), e.Signed
+				return p, strings.TrimSpace(e.SHA256), e.declaration()
 			}
 		}
 		// 2) 直接按文件名命中（name / name.sys）
@@ -288,12 +365,12 @@ func lookupDriver(name string) (path, expectedSHA, declaredSigner string) {
 			}
 			p := filepath.Join(dir, cand)
 			if st, err := os.Stat(p); err == nil && !st.IsDir() {
-				exp, signer := manifestExpectedIn(dir, filepath.Base(p))
-				return p, exp, signer
+				sha, decl := manifestDeclarationIn(dir, filepath.Base(p))
+				return p, sha, decl
 			}
 		}
 	}
-	return "", "", ""
+	return "", "", SignatureDeclaration{}
 }
 
 // sha256Hex 计算十六进制小写 sha256。

@@ -15,17 +15,23 @@
 //	    {
 //	      "file": "yourdriver.sys",
 //	      "name": "yourdriver",
-//	      "purpose": "kill",              // kill = 提供进程终止 IOCTL；rw = 任意内核读写
+//	      "purpose": "kill",              // kill = 提供进程终止 IOCTL；rw = 任意内核读写；both = 两者兼顾
 //	      "service": "yourdriver",         // SCM 服务名
 //	      "device": "\\\\.\\yourdriver",    // 设备路径
 //	      "ioctl": "0x222048",             // 终止进程的 IOCTL（支持十六进制字符串或数字）
 //	      "kill_pid_size": 4,              // IOCTL 入参 PID 字段字节数
 //	      "description": "用途备注",
-//	      "signed": "签名者（人工核对用）",
+//	      "signed": "签名者（人工核对用）",   // 签名**声明**：也可写 true/false（v1.4.0 S6）
+//	      "signer": "显式签名者",            // 可选：等价于 signed=<该签名者>
+//	      "require_signature": false,       // 可选：true = 实测签名无效/声明不符时**硬拒**下发
 //	      "sha256": "…"                    // 可选：期望哈希，加载前自检会比对（见 verify.go）
 //	    }
 //	  ]
 //	}
+//
+// purpose 决定**下发时的选路**（见 route.go）：byovd_kill 要 kill/both 档，ppl_kill 要 rw/both 档；
+// 多驱动时按「档位专一度 → 档案名 → 文件名 → 路径」确定性地挑一个，挑不到就明确拒绝并给出中文原因。
+// signed/signer/require_signature 只表达"操作员的签名声明"，与实测结论的关系见 signature.go。
 //
 // 没有 manifest 时 List() 仍会列出目录里的 .sys（元数据留空，UI 会提示补全）；
 // sha256 一律实时计算，便于操作员加载前自行核对。
@@ -63,6 +69,10 @@ type Driver struct {
 	Size        int64  `json:"size"`
 	SHA256      string `json:"sha256"`
 	Signed      string `json:"signed"`
+	// Signature manifest 的**签名声明**（人工声明；实测结论见 Verify）。
+	// 与 Signed 的关系：Signed 是兼容字段（= 声明的签名者字符串），
+	// Signature 把"是否声明已签名 / 是否要求签名有效"也表达出来。
+	Signature SignatureDeclaration `json:"signature"`
 	// Verify 加载前自检结果（sha256 一致性 / 签名状态 / 易受攻击驱动黑名单提示）。
 	// 与上面的 Signed（manifest 里人工标注的签名者）不同，Verify.Signed 是本机实测结论；
 	// 非 Windows 平台只有一个「不做自检」的警告，其余字段为零值。
@@ -84,7 +94,14 @@ type manifestEntry struct {
 	Service     string      `json:"service"`
 	IOCTL       interface{} `json:"ioctl"`
 	KillPIDSize uint32      `json:"kill_pid_size"`
-	Signed      string      `json:"signed"`
+	// Signed 签名声明：兼容 v1.3.4 的"签名者字符串"写法，并支持 true/false
+	// （见 signature.go 的 signedDecl）。**这是人工声明，不是实测结论。**
+	Signed signedDecl `json:"signed"`
+	// Signer 显式签名者（可选；写了它就等于声明"已签名 + 该签名者"）。
+	Signer string `json:"signer"`
+	// RequireSignature 声明"实测签名必须有效"（require_signature:true）：
+	// 把"声明与实测不一致"从警告升级为硬拒。默认 false（见 SignatureConsistency 的理由）。
+	RequireSignature bool `json:"require_signature"`
 	// SHA256 可选：期望的 sha256（十六进制小写/大写均可），加载前自检据此判断文件是否被替换/损坏。
 	SHA256 string `json:"sha256"`
 }
@@ -130,7 +147,8 @@ func List() []Driver {
 		}
 		meta := d.manifest
 		// 加载前自检（复用上面已读入内存的字节与已解析的 manifest，不重复读盘）。
-		res := verifyWithRaw(d.Path, raw, meta.SHA256, meta.Signed)
+		// 签名声明一并传进去：声明与实测的一致性判定需要它（见 signature.go）。
+		res := verifyWithRawDecl(d.Path, raw, meta.SHA256, meta.declaration())
 		d.Verify = &res
 		d.manifest = manifestEntry{} // 内部字段不外泄
 		out = append(out, d)
@@ -194,7 +212,10 @@ func matchManifest(fileName string, d *Driver, meta manifestFile) manifestEntry 
 		d.Service = m.Service
 		d.IOCTL = parseIOCTL(m.IOCTL)
 		d.KillPIDSize = m.KillPIDSize
-		d.Signed = m.Signed
+		// 兼容字段 Signed = 声明里的签名者；显式 signer 字段也算（declaration() 已做收敛）。
+		decl := m.declaration()
+		d.Signed = decl.Signer
+		d.Signature = decl
 		return m
 	}
 	return manifestEntry{}
@@ -224,26 +245,62 @@ type ProfileSummary struct {
 	RW *Driver
 	// Purposes 出现的档位集合（便于前端提示"你放的驱动没写 purpose"）。
 	Purposes []string
+	// Signatures 签名**声明**的汇总（只看 manifest 声明，不做签名校验）。
+	// 为什么放在预览里：可用性预览是便宜路径（不跑 WinVerifyTrust），
+	// 但"这台机器上放的驱动有几个没声明签名"是纯 manifest 事实，可以顺便显示出来，
+	// 让操作员在点下发之前就知道自己的驱动目录配得全不全。
+	Signatures SignatureSummary
+}
+
+// SignatureSummary 驱动目录里签名声明的分布（**声明，不是实测**）。
+type SignatureSummary struct {
+	// DeclaredSigned 声明已签名（signed 为字符串/true，或只写了 signer）。
+	DeclaredSigned int `json:"declared_signed"`
+	// DeclaredUnsigned 显式声明未签名（signed:false）。
+	DeclaredUnsigned int `json:"declared_unsigned"`
+	// Undeclared 完全没写签名信息（前端应提示补全）。
+	Undeclared int `json:"undeclared"`
+	// RequireSignature 声明 require_signature:true 的数量（实测不满足会被硬拒）。
+	RequireSignature int `json:"require_signature"`
+	// Note 口径说明（避免把声明当实测结论）。
+	Note string `json:"note"`
 }
 
 // Summary 给出驱动档位摘要（便宜路径，见 ProfileSummary 的说明）。
 func Summary() ProfileSummary {
 	out := ProfileSummary{SearchDirs: SearchDirs()}
 	purposes := map[string]bool{}
+	var cands []Driver
 	for _, d := range scanSysFiles() {
 		out.Total++
 		out.Drivers = append(out.Drivers, d)
+		cands = append(cands, d)
 		if d.Purpose != "" {
 			purposes[strings.ToLower(d.Purpose)] = true
 		}
+		switch d.Signature.Declared {
+		case SignatureSigned:
+			out.Signatures.DeclaredSigned++
+		case SignatureUnsigned:
+			out.Signatures.DeclaredUnsigned++
+		default:
+			out.Signatures.Undeclared++
+		}
+		if d.Signature.Require {
+			out.Signatures.RequireSignature++
+		}
+	}
+	out.Signatures.Note = "只统计 manifest.json 的签名**声明**（便宜路径，不做 Authenticode 校验）；" +
+		"实测签名结论请用 GET /api/v1/drivers/{name}/verify（含声明与实测是否一致）"
+	// 档位选择与下发选路共用同一份确定性顺序（见 selectProfile）：
+	// 两处口径必须一致，否则"预览说有 kill 档"与"下发时挑到别的驱动"会互相打架。
+	if d, ok := selectProfile(cands, PurposeKill, true); ok {
 		dup := d
-		if out.Kill == nil && d.Device != "" && d.IOCTL != 0 &&
-			(strings.EqualFold(d.Purpose, "kill") || strings.EqualFold(d.Purpose, "both")) {
-			out.Kill = &dup
-		}
-		if out.RW == nil && (strings.EqualFold(d.Purpose, "rw") || strings.EqualFold(d.Purpose, "both")) {
-			out.RW = &dup
-		}
+		out.Kill = &dup
+	}
+	if d, ok := selectProfile(cands, PurposeRW, false); ok {
+		dup := d
+		out.RW = &dup
 	}
 	for p := range purposes {
 		out.Purposes = append(out.Purposes, p)
@@ -254,12 +311,87 @@ func Summary() ProfileSummary {
 
 // FindMeta 在摘要里按名字或文件名查找驱动元数据（不读盘、不验签）。
 func (s ProfileSummary) FindMeta(name string) (Driver, bool) {
+	name = strings.TrimSpace(name)
 	for _, d := range s.Drivers {
-		if d.Name == name || d.File == name {
+		if d.Name == name || d.File == name ||
+			(strings.EqualFold(d.Name, name) || strings.EqualFold(d.File, name)) {
 			return d, true
 		}
 	}
 	return Driver{}, false
+}
+
+// FindByService 按 SCM 服务名查档案（byovd_unload 的选路用）。
+// 匹配顺序：service 精确（忽略大小写）→ 名字 → 文件名。都没有则返回 false，
+// 调用方应继续按"手工加载的驱动"处理，而不是直接拒绝（见 route.go 的 byovd_unload）。
+func (s ProfileSummary) FindByService(service string) (Driver, bool) {
+	svc := strings.TrimSpace(service)
+	if svc == "" {
+		return Driver{}, false
+	}
+	for _, d := range s.Drivers {
+		if strings.EqualFold(strings.TrimSpace(d.Service), svc) {
+			return d, true
+		}
+	}
+	return s.FindMeta(svc)
+}
+
+// Names 返回目录里全部档案名（按名字排序），供"点名了一个不存在的驱动"时列出候选。
+// 为什么要在错误里列候选：操作员最常见的失败是名字打错或 .sys 没放进目录，
+// 直接把当前有哪些写出来，比让他再去调一次 GET /api/v1/drivers 省一步。
+func (s ProfileSummary) Names() []string {
+	out := make([]string, 0, len(s.Drivers))
+	for _, d := range s.Drivers {
+		out = append(out, d.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// selectProfile 纯逻辑：按"档位需求"从候选里挑**唯一确定**的那个驱动。
+//
+// 顺序（多驱动时必须确定，不允许靠目录遍历顺序碰运气）：
+//  1. 档位专一度：恰好是所需档位的优先于 both 档（kill 需要 kill 档；PPL 需要 rw 档，
+//     把"兼顾两用"的 both 当作后备 —— 专用驱动更可能是操作员为这个用途准备的）；
+//  2. 档案名（不区分大小写）；
+//  3. 文件名（不区分大小写）；
+//  4. 磁盘路径（不区分大小写）。
+//
+// needDeviceIOCTL=true 时还要求 device+ioctl 齐全（byovd_kill 的终止 IOCTL 是必需参数：
+// 选一个没有 IOCTL 的 kill 档驱动，下发出去必然失败）。
+//
+// Summary.Kill/RW 与 Route 都用它，保证"预览"与"下发"挑到同一个驱动。
+func selectProfile(cands []Driver, need string, needDeviceIOCTL bool) (Driver, bool) {
+	var ok []Driver
+	for _, d := range cands {
+		if !purposeSatisfies(d.Purpose, need) {
+			continue
+		}
+		if needDeviceIOCTL && (strings.TrimSpace(d.Device) == "" || d.IOCTL == 0) {
+			continue
+		}
+		ok = append(ok, d)
+	}
+	if len(ok) == 0 {
+		return Driver{}, false
+	}
+	sort.SliceStable(ok, func(i, j int) bool {
+		ri, rj := purposeRank(ok[i].Purpose, need), purposeRank(ok[j].Purpose, need)
+		if ri != rj {
+			return ri < rj
+		}
+		ni, nj := strings.ToLower(ok[i].Name), strings.ToLower(ok[j].Name)
+		if ni != nj {
+			return ni < nj
+		}
+		fi, fj := strings.ToLower(ok[i].File), strings.ToLower(ok[j].File)
+		if fi != fj {
+			return fi < fj
+		}
+		return strings.ToLower(ok[i].Path) < strings.ToLower(ok[j].Path)
+	})
+	return ok[0], true
 }
 
 // Find 按名称或文件名取驱动元数据（含加载前自检结果，不返回文件字节）。
@@ -289,19 +421,15 @@ func Get(name string) (Driver, []byte, error) {
 		name, strings.Join(SearchDirs(), " 或 "))
 }
 
-// KillProfile 返回可用于「进程终止」的驱动档案（purpose=kill 且已填 device+ioctl）。
+// KillProfile 返回可用于「进程终止」的驱动档案（purpose ∈ {kill, both} 且已填 device+ioctl）。
 // 没有可用档案时返回 false —— 此时 byovd_kill 必须由调用方显式提供设备名与 IOCTL。
 //
-// ⚠️ 本函数是**既有 6 条链**（handlers_edr.go 的 byovd_kill）在用的选路函数，
-// 按"分级入口只增不改、既有语义原样保留"的要求**刻意不动**：它只认 purpose=kill，
-// 且走完整自检（List）。新的分级入口（v1.4.0 S6）改用下面的 Summary() 便宜路径。
+// v1.4.0 S6 P0-1 起它只是 selectProfile 的薄封装：**选路口径与下发路径（route.go 的 Route）
+// 完全同一份**。此前它只认 purpose=kill，会把 purpose=both 的通用驱动排除在外 ——
+// 那是"预览/路由/下发各写一套"的典型症状（同一份目录，两条路径给出不同结论）。
+// 这里改为共用 selectProfile（kill 优先、both 后备），并走完整自检（List）。
 func KillProfile() (Driver, bool) {
-	for _, d := range List() {
-		if strings.EqualFold(d.Purpose, "kill") && d.Device != "" && d.IOCTL != 0 {
-			return d, true
-		}
-	}
-	return Driver{}, false
+	return selectProfile(List(), PurposeKill, true)
 }
 
 func readManifest(dir string) manifestFile {

@@ -331,6 +331,7 @@ var actionList = []Action{
 			{Name: "service_name", Type: "string", Required: true, Description: "SCM 服务名（决定落盘文件名与设备名）"},
 			{Name: "device_name", Type: "string", Required: false, Description: "设备名（留空按服务名推断 \\\\.\\<svc>）"},
 			{Name: "name", Type: "string", Required: false, Description: "驱动档案名：用于在 manifest.json 里找期望 sha256 与声明签名者做加载前自检（留空则只能给「未声明哈希」的警告）"},
+			{Name: "purpose", Type: "string", Required: false, Description: "驱动档位 kill/rw/both（v1.4.0 S6）：留空用 manifest 声明，两边都没有按 kill 兜底；登记后决定后续 byovd_kill / ppl_kill 能否自动选到它"},
 		},
 		AutoRetry: false,
 	},
@@ -346,9 +347,12 @@ var actionList = []Action{
 		Impact: "会停止并删除目标机上指定 service_name 的内核服务，并删除对应的 .sys 驱动文件。" +
 			"若该驱动仍被其它组件使用，停止服务可能导致目标机不稳定；" +
 			"**删除的驱动文件不可恢复**（需要重新上传）。",
-		RequiredParams: []string{"service_name"},
+		// v1.4.0 S6 P0-1：service_name **不再列为必填** —— 选路会依次尝试
+		// 请求 → 本会话登记的驱动档案 → 服务端加载台账（drivers.Ledger）。
+		// 清场恰恰发生在"会话换了一个、服务端也重启过"的场景，那时操作员手上未必记得服务名，
+		// 而服务端台账里有记录；把必填去掉，这条清场路径才真正可用（选路仍会在三者都空时明确拒绝）。
 		Params: []ParamHint{
-			{Name: "service_name", Type: "string", Required: true, Description: "要停止并删除的内核服务名"},
+			{Name: "service_name", Type: "string", Required: false, Description: "要停止并删除的内核服务名；留空时按本会话登记的档案 → 服务端加载台账（GET /api/v1/drivers/ledger）解析"},
 		},
 		AutoRetry: false,
 	},

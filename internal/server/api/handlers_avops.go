@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,6 +158,9 @@ var avopsNotes = []string{
 	"L1 起为破坏性动作：必须 confirm=true，且**不参与服务端任何自动重投递**（重发=再执行）。",
 	"L2/L3/L4 默认关闭（configs 的 avops.allow_l2 / allow_l3 / allow_l4）：默认配置下它们一律不可用。",
 	"L3 的驱动仍由操作员自备、项目不内置；没有对应档位的驱动时入口会明确拒绝，而不是让你试一下。",
+	"L3 的下发按 manifest 的 purpose（kill/rw/both）自动选路：多驱动时的顺序是「档位专一度 → 档案名 → 文件名 → 路径」，结果确定；" +
+		"点名了 driver 但档位不符会直接拒绝，不会静默换成另一个驱动。",
+	"驱动的加载/卸载会写服务端台账（GET /api/v1/drivers/ledger）：服务端重启后据此给出残留驱动的清场指引（按 service_name 走 byovd_unload）。",
 	"L4 当前没有落地动作（allow_l4=true 也不会让任何动作变成可下发）—— 见 GET 响应的 tiers 里 L4 的 note。",
 	"Agent/MCP 工具面**不暴露**本入口的任何 L1+ 动作；只有 L0 侦察走既有只读工具。",
 }
@@ -227,19 +231,29 @@ type avopsDriverPlan struct {
 	Device string
 	IOCTL  uint32
 	Name   string
+	// Service SCM 服务名（byovd_load / byovd_unload 的清场键；可直接来自台账/会话档案）。
+	Service string
+	// Purpose 档位：byovd_load 时表示"加载后按哪一档登记"（后续选路依赖它）。
+	Purpose string
+	// Source 选路来源（explicit/session/profile/catalog/...），回显给操作员便于排障。
+	Source string
+	// SHA256 / Size byovd_load 上传字节的实测哈希与大小（台账留痕，便于事后核对目标机上是哪一份）。
+	SHA256 string
+	Size   int
 	Detail string
 	// Warnings 加载前自检的警告（未签名、可能被黑名单拦截等）：不阻断下发，但必须回显。
 	Warnings []string
+	// Notes 选路过程里的提示（显式指定未核对档位、非请求来源的服务名等），必须原样回显。
+	Notes []string
 }
 
 // avopsDriverPlanOf L3 类动作的驱动前置检查（第 ⑥ 步）。
 //
-// 规则（全部 fail-closed，宁可拒绝也不让操作员"试一下"）：
-//   - byovd_load   ：驱动字节随请求携带（driver_b64）+ service_name 必填 → 有；
-//   - byovd_unload ：service_name 必填（服务名即"操作员自备驱动"的标识）→ 有；
-//   - byovd_kill   ：device+ioctl 请求显式给 → 本会话已登记（byovd_load 登记过）
-//     → driver 参数按名字查档 → 目录里存在 kill/both 档 → 都没有则拒绝；
-//   - ppl_kill     ：必须有 rw（或 both）档驱动，没有就明确说"无 rw 档驱动，不可用"。
+// 规则（全部 fail-closed，宁可拒绝也不让操作员"试一下"）现在**只有一份实现**：
+// drivers.Route（internal/server/drivers/route.go）—— 动作 → 需要的档位 → 选哪个驱动
+// （含多驱动时的确定性顺序）、挑不到就给出"缺哪一档 / 当前有哪些档 / 放什么文件"的中文拒绝。
+// 本函数只负责把 HTTP 层的 params/会话状态翻译成 RouteRequest，并把 RouteError 映射成
+// 分级入口的错误码（409 driver_unavailable / 400 params_invalid）。
 func (s *Server) avopsDriverPlanOf(id string, a avops.Action, params map[string]interface{}) (avopsDriverPlan, error) {
 	return s.avopsDriverPlanWith(avopsDriverSnapshot(), id, a, params)
 }
@@ -248,102 +262,100 @@ func (s *Server) avopsDriverPlanOf(id string, a avops.Action, params map[string]
 // GET /sessions/{id}/av-ops 要对多个动作逐个判定，若每个动作都重扫一遍驱动目录，
 // 一个请求就会做 4~5 次目录遍历 + manifest 解析（虽然便宜，但没必要）。
 func (s *Server) avopsDriverPlanWith(sum drivers.ProfileSummary, id string, a avops.Action, params map[string]interface{}) (avopsDriverPlan, error) {
-	switch a.Name {
-	case "byovd_load":
+	if a.Tier != avops.TierL3 {
+		return avopsDriverPlan{}, nil
+	}
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+
+	// 点名的档案：byovd_kill 用 params.driver，byovd_load 用 params.name（与既有路由一致）。
+	requested := avops.ParamString(params, "driver")
+	if a.Name == "byovd_load" {
+		requested = avops.ParamString(params, "name")
+	}
+
+	req := drivers.RouteRequest{
+		Action:          a.Name,
+		ExplicitDevice:  avops.ParamString(params, "device"),
+		ExplicitIOCTL:   parseIOCTLValue(params["ioctl"]),
+		RequestedName:   requested,
+		ServiceName:     avops.ParamString(params, "service_name"),
+		DeviceName:      avops.ParamString(params, "device_name"),
+		KillIOCTL:       parseIOCTLValue(params["kill_ioctl"]),
+		DeclaredPurpose: avops.ParamString(params, "purpose"),
+		// 显式 device+ioctl 是 byovd_kill 的既有语义（操作员手填驱动参数），
+		// 其余动作没有这个入口，所以只有它允许绕过档位核对。
+		AllowExplicit: a.Name == "byovd_kill",
+	}
+	if d, ok := s.recallSessionDriver(id); ok {
+		sess := d
+		req.Session = &sess
+	}
+	// 台账兜底：byovd_unload 没给 service_name 时，从"服务端记录过本会话加载过什么"里取。
+	// 这也是"服务端重启后残留驱动仍能被清场"的落点。
+	req.LedgerServices = s.driverLedgerOf().PendingServicesForSession(id)
+
+	res, err := drivers.Route(sum, req)
+	if err != nil {
+		return avopsDriverPlan{}, avopsDriverRouteError(err)
+	}
+
+	plan := avopsDriverPlan{
+		Device: res.Driver.Device, IOCTL: res.Driver.IOCTL, Name: res.Driver.Name,
+		Service: firstNonEmptyStr(res.Driver.Service, avops.ParamString(params, "service_name")),
+		Purpose: res.Purpose, Source: res.Source, Detail: res.Detail, Notes: res.Notes,
+	}
+
+	// byovd_load 的额外一步：**加载前自检**（与既有 byovd_load 路由同一口径，ROADMAP P0-1）——
+	// 有 Errors（典型：上传的 .sys 与 manifest 声明的 sha256 不一致，说明被替换/损坏）一律拒绝下发；
+	// 只有 Warnings（未签名、可能被 HVCI/黑名单静默拒绝、签名声明与实测不一致）才允许继续。
+	// 漏掉这一步等于分级入口成了"绕过自检的后门"，所以这里刻意重跑一次。
+	if a.Name == "byovd_load" {
 		raw := avops.ParamString(params, "driver_b64")
 		if raw == "" {
 			return avopsDriverPlan{}, avops.NewError(409, avops.CodeDriverUnavailable,
 				"未提供操作员自备驱动：params.driver_b64 为空。本入口不内置任何驱动，"+
 					"请把 .sys 的 base64 内容放进请求（或先放到 data/drivers/ 并用 GET /api/v1/drivers 确认）")
 		}
-		svc := avops.ParamString(params, "service_name")
-		// name 是驱动档案名（用于在 manifest.json 里找期望 sha256 / 声明签名者）：
-		// 与既有 byovd_load 路由的 req.Name 同一用途，缺省时自检只能给"未声明哈希"的警告。
-		name := avops.ParamString(params, "name")
-		blob, err := base64.StdEncoding.DecodeString(raw)
-		if err != nil {
+		blob, derr := base64.StdEncoding.DecodeString(raw)
+		if derr != nil {
 			return avopsDriverPlan{}, avops.NewError(400, avops.CodeParamsInvalid,
-				"params.driver_b64 不是合法 base64：%v", err)
+				"params.driver_b64 不是合法 base64：%v", derr)
 		}
-		// **加载前自检**：与既有 byovd_load 路由同一口径（ROADMAP P0-1）——
-		// 有 Errors（典型：上传的 .sys 与 manifest 声明的 sha256 不一致，说明被替换/损坏）
-		// 一律拒绝下发；只有 Warnings（未签名、可能被 HVCI/黑名单静默拒绝）才允许继续。
-		// 漏掉这一步等于分级入口成了"绕过自检的后门"，所以这里刻意重跑一次。
-		verify := drivers.VerifyBytes(name, blob)
+		verify := drivers.VerifyBytes(requested, blob)
 		if len(verify.Errors) > 0 {
 			return avopsDriverPlan{}, avops.NewError(400, avops.CodeDriverSelfcheckFailed,
 				"驱动自检未通过，已拒绝下发（与既有 byovd_load 路由同一口径）：%s",
 				strings.Join(verify.Errors, "；"))
 		}
-		return avopsDriverPlan{
-			Name: svc, Warnings: verify.Warnings,
-			Detail: fmt.Sprintf("操作员自备驱动随请求携带并通过加载前自检（service_name=%s，%d 字节，%s）",
-				svc, len(blob), verify.Summary()),
-		}, nil
-
-	case "byovd_unload":
-		svc := avops.ParamString(params, "service_name")
-		if svc == "" {
-			return avopsDriverPlan{}, avops.NewError(400, avops.CodeParamsInvalid, "params.service_name 必填（要卸载哪个驱动服务）")
-		}
-		return avopsDriverPlan{Name: svc, Detail: fmt.Sprintf("卸载内核服务 %s（由操作员指定服务名）", svc)}, nil
-
-	case "byovd_kill":
-		device := avops.ParamString(params, "device")
-		ioctl := parseIOCTLValue(params["ioctl"])
-		name := ""
-		if device != "" && ioctl != 0 {
-			return avopsDriverPlan{Device: device, IOCTL: ioctl}.normalize(
-				fmt.Sprintf("使用请求显式指定的驱动：device=%s ioctl=0x%06X", device, ioctl)), nil
-		}
-		// 本会话此前 byovd_load 登记过的档案（与既有 byovd_kill 路径同一来源）
-		if d, ok := s.recallSessionDriver(id); ok {
-			device, ioctl, name = d.Device, d.IOCTL, d.Name
-		}
-		// 请求按名字点名驱动档案
-		if device == "" || ioctl == 0 {
-			if want := avops.ParamString(params, "driver"); want != "" {
-				d, ok := sum.FindMeta(want)
-				if !ok {
-					return avopsDriverPlan{}, avops.NewError(409, avops.CodeDriverUnavailable,
-						"未找到驱动档案 %q：请先用 GET /api/v1/drivers 看有哪些（.sys 放到 %s）",
-						want, strings.Join(sum.SearchDirs, " 或 "))
-				}
-				device, ioctl, name = d.Device, d.IOCTL, d.Name
-			}
-		}
-		// 目录里第一个 kill/both 档
-		if (device == "" || ioctl == 0) && sum.Kill != nil {
-			device, ioctl, name = sum.Kill.Device, sum.Kill.IOCTL, sum.Kill.Name
-		}
-		if device == "" || ioctl == 0 {
-			return avopsDriverPlan{}, avops.NewError(409, avops.CodeDriverUnavailable,
-				"无可用驱动档案：请在 params 里直接给 device+ioctl，或先 byovd_load 登记，"+
-					"或把带 device/ioctl 的 manifest.json 放进 %s（当前目录里 %d 个 .sys，档位 %v）",
-				strings.Join(sum.SearchDirs, " 或 "), sum.Total, sum.Purposes)
-		}
-		return avopsDriverPlan{Device: device, IOCTL: ioctl, Name: name,
-			Detail: fmt.Sprintf("使用驱动 %s：device=%s ioctl=0x%06X", name, device, ioctl)}, nil
-
-	case "ppl_kill":
-		if sum.RW == nil {
-			return avopsDriverPlan{}, avops.NewError(409, avops.CodeDriverUnavailable,
-				"无 rw 档驱动，PPL 清除不可用：PPL 保护进程（Defender MsMpEng 等）需要具备内核读写的"+
-					"驱动去改 EPROCESS.Protection；目录 %s 里当前 %d 个 .sys，档位 %v。"+
-					"（既有 /edr/ppl-kill 路由仍可走句柄窃取路线，但对 PPL 进程通常失败 —— 本分级入口"+
-					"刻意不让你「试一下」）",
-				strings.Join(sum.SearchDirs, " 或 "), sum.Total, sum.Purposes)
-		}
-		return avopsDriverPlan{Name: sum.RW.Name, Device: sum.RW.Device,
-			Detail: fmt.Sprintf("使用 rw 档驱动 %s（purpose=%s）", sum.RW.Name, sum.RW.Purpose)}, nil
+		plan.Warnings = verify.Warnings
+		plan.SHA256 = verify.SHA256
+		plan.Size = len(blob)
+		plan.Detail = fmt.Sprintf("%s；加载前自检：%s", plan.Detail, verify.Summary())
 	}
-	return avopsDriverPlan{}, nil
+	return plan, nil
 }
 
-// normalize 把 Detail 填上并返回自身（让上面的构造点保持一行）。
-func (p avopsDriverPlan) normalize(detail string) avopsDriverPlan {
-	p.Detail = detail
-	return p
+// avopsDriverRouteError 把 drivers.RouteError 映射成分级入口的错误码。
+//
+// 为什么按 Code 分支而不是一律 409：参数类问题（purpose 写错、缺 service_name、档案缺
+// device/ioctl）是**请求写错了**，回 400 让调用方改请求；"本机没有这一档驱动"是**环境问题**，
+// 回 409 并给出放什么文件的指引。两者对操作员的下一步动作完全不同。
+func avopsDriverRouteError(err error) error {
+	var re *drivers.RouteError
+	if errors.As(err, &re) {
+		switch re.Code {
+		case drivers.RouteCodeUnknownAction:
+			return avops.NewError(500, avops.CodeUnknownAction, "%s", re.Message)
+		case drivers.RouteCodeUnknownPurpose, drivers.RouteCodeMissingServiceName,
+			drivers.RouteCodeProfileIncomplete:
+			return avops.NewError(400, avops.CodeParamsInvalid, "%s", re.Message)
+		default:
+			return avops.NewError(409, avops.CodeDriverUnavailable, "%s", re.Message)
+		}
+	}
+	return avops.NewError(409, avops.CodeDriverUnavailable, "驱动选路失败：%s", err.Error())
 }
 
 // avopsReasons 计算某动作在本会话/本配置下的**全部**阻塞原因（供 GET 逐动作回显）。
@@ -388,6 +400,80 @@ func (s *Server) avopsReasons(st *avopsSessionState, a avops.Action, p avops.Pol
 		}
 	}
 	return reasons
+}
+
+// driverProfileView 把一个"档位选中的驱动"渲染成预览字段（nil = 该档位没有可用驱动）。
+//
+// 为什么预览里要带签名声明：操作员在点下发之前最需要知道的两件事是
+// "服务端会挑哪个驱动"与"这个驱动的签名情况我声明过没有" —— 缺签名/声明未签名要能一眼看出来，
+// 而不是等下发失败或内核静默拒绝（1275）才发现。
+func driverProfileView(d *drivers.Driver) map[string]interface{} {
+	if d == nil {
+		return nil
+	}
+	view := map[string]interface{}{
+		"name":              d.Name,
+		"file":              d.File,
+		"purpose":           d.Purpose,
+		"service":           d.Service,
+		"device":            d.Device,
+		"ioctl":             d.IOCTL,
+		"declared":          d.Signature.Declared,
+		"declared_signer":   d.Signature.Signer,
+		"require_signature": d.Signature.Require,
+		"declaration_note":  d.Signature.ConsistencyNote(),
+	}
+	// 未声明签名 / 显式声明未签名都要给出明确提示（这就是"缺签名要能看出来"）。
+	switch d.Signature.Declared {
+	case drivers.SignatureSigned:
+		// 声明已签名：预览阶段无法核对（不跑验签），必须说清"这是声明"。
+		view["warning"] = ""
+		view["verify_hint"] = "声明已签名，但预览阶段不验签：实测结论请用 GET /api/v1/drivers/" + d.Name + "/verify"
+	case drivers.SignatureUnsigned:
+		view["warning"] = "manifest 声明该驱动未签名：开启签名强制/内存完整性（HVCI）的内核会拒绝加载（StartService 报 1275）"
+	default:
+		view["warning"] = "manifest 未声明该驱动的签名信息：加载前无法从预览判断签名状态，" +
+			"建议补上 signed（或先用 GET /api/v1/drivers/" + d.Name + "/verify 看实测结论）"
+	}
+	return view
+}
+
+// driverLedgerViewFor 组装某会话（或全局）的驱动清场视图。
+//
+// onlySession=true 时只返回该会话的残留驱动；previewOnly=true 时裁剪掉全量条目
+// （会话级预览接口不该顺带回传整个服务端的加载历史）。
+func (s *Server) driverLedgerViewFor(sessionID string, sessionAlive, previewOnly bool) map[string]interface{} {
+	led := s.driverLedgerOf()
+	pending := led.Pending()
+	if sessionID != "" {
+		pending = led.PendingForSession(sessionID)
+	}
+	alive := map[string]bool{}
+	if sessionID != "" {
+		alive[sessionID] = sessionAlive
+	}
+	cleanup := drivers.BuildCleanupPlan(pending, alive)
+	view := map[string]interface{}{
+		"path":    led.Path(),
+		"pending": pending,
+		"cleanup": cleanup,
+		"counts": map[string]int{
+			"pending": len(pending),
+		},
+		"note": "台账记录的是『服务端创建过相应任务』，不代表目标机执行成功（服务端无法枚举目标机服务）；" +
+			"清场按 service_name 走既有 byovd_unload（L3，需 confirm=true）",
+	}
+	if !previewOnly {
+		view["entries"] = led.All()
+		view["counts"] = map[string]int{
+			"total":   len(led.All()),
+			"pending": len(pending),
+		}
+	}
+	if err := led.LoadError(); err != nil {
+		view["load_error"] = err.Error()
+	}
+	return view
 }
 
 // sessionStatusOf 取会话状态文案（会话缺失时给空串，不回显内部细节）。
@@ -461,9 +547,25 @@ func (s *Server) sessionAVOpsHandler(w http.ResponseWriter, r *http.Request) {
 			"total":          sum.Total,
 			"purposes":       sum.Purposes,
 			"search_dirs":    sum.SearchDirs,
-			"note":           "档位判定只看 manifest 声明（便宜路径）；真正的哈希/签名自检在 byovd_load 下发时与 GET /api/v1/drivers/{name}/verify 里做",
+			// selected：按档位实际会挑中哪个驱动（与下发路径共用 drivers.Route 的选路口径）。
+			// 为什么预览要给出具体驱动名：只回 "kill_available=true" 时，操作员无法判断
+			// "目录里放了三个 kill 档，服务端会挑哪个" —— 那正是自动选路最需要透明的地方。
+			"selected": map[string]interface{}{
+				"kill": driverProfileView(sum.Kill),
+				"rw":   driverProfileView(sum.RW),
+			},
+			// signatures：manifest 的签名**声明**分布（便宜路径，不跑 Authenticode）。
+			"signatures": sum.Signatures,
+			"signature_hint": "这里是 manifest 的签名声明（不跑验签）；实测签名结论与「声明是否与实测一致」" +
+				"见 GET /api/v1/drivers/{name}/verify（返回 declared_signature/declared_signer/signature_consistent），" +
+				"byovd_load 下发时的自检也走同一口径",
+			"note": "档位判定只看 manifest 声明（便宜路径）；真正的哈希/签名自检在 byovd_load 下发时与 GET /api/v1/drivers/{name}/verify 里做",
 		},
-		"message": "排障先看这里：allowed=false 的动作在 reasons 里写了确切原因（机器可读 code + 中文说明），不必发一次试试",
+		// ledger：本会话的残留驱动（服务端记录过加载、但还没下发过卸载）。
+		// 放在排障入口里，是因为"清场"必须在同一个地方能看见：操作员点完 byovd_load 之后，
+		// 关掉页面再回来也要能看到"这台机器上还留着什么"。
+		"driver_ledger": s.driverLedgerViewFor(id, st.Active, true),
+		"message":       "排障先看这里：allowed=false 的动作在 reasons 里写了确切原因（机器可读 code + 中文说明），不必发一次试试",
 	}
 	if st.Sess != nil && st.Sess.Info != nil {
 		resp["status"] = st.Sess.Info.Status
@@ -606,8 +708,11 @@ func (s *Server) execAVOpsHandler(w http.ResponseWriter, r *http.Request) {
 		okCheck(6, "driver", "该动作不需要内核驱动（非 L3）")
 	}
 
-	// 警告在驱动自检之后组装：byovd_load 的"未签名/可能被黑名单拦截"警告就来自第 ⑥ 步。
+	// 警告在驱动自检之后组装：byovd_load 的"未签名/可能被黑名单拦截"警告就来自第 ⑥ 步；
+	// 选路过程里的提示（例如"点名了一个没声明 purpose 的老档案"）也一并进 warnings ——
+	// 只放在 driver.notes 里容易被只读 warnings 的操作员漏掉。
 	warnings := append(avopsWarnings(a, st, p), plan.Warnings...)
+	warnings = append(warnings, plan.Notes...)
 
 	// ── ⑦ 显式超时 ────────────────────────────────────────────────────────
 	timeoutSec, terr := p.ResolveTimeout(req.TimeoutSec)
@@ -626,10 +731,22 @@ func (s *Server) execAVOpsHandler(w http.ResponseWriter, r *http.Request) {
 		reject(8, "dispatched", derr)
 		return
 	}
+
+	// ── ⑧b 记账：加载/卸载的"我下发过什么"落盘（服务端重启后的清场依据）──────────
+	//
+	// 为什么记在 **PushTask 之前**（任务已创建、可能还压在队列里）：推送失败时任务仍在队列里，
+	// 心跳取走后照样会在目标机上执行 —— 只记"推送成功"的那种写法会漏掉这类残留，
+	// 而漏掉一条残留 = 目标机上留着一个没人记得要清的内核服务。
+	// 反过来的代价（记录了一条最终没执行的加载）是"多给一条无害的清理指引"：
+	// 卸载一个不存在的服务在植入端是幂等的（stopKernelService 找不到服务直接返回 nil）。
+	// 台账语义因此写死为"服务端已创建过相应任务"，而不是"目标机执行成功"。
+	warnings = append(warnings, s.recordDriverLifecycle(id, a, plan, taskInfo.ID)...)
+
 	if perr := s.listener.PushTask(id, taskInfo); perr != nil {
 		reject(8, "dispatched", avops.NewError(503, avops.CodePushFailed,
 			"任务 %d 已创建但下发失败：%v（任务仍在队列里，可稍后重试心跳取走；"+
-				"破坏性任务不会自动重投递，若确认没执行可重新下发并分配新 task_id）", taskInfo.ID, perr))
+				"破坏性任务不会自动重投递，若确认没执行可重新下发并分配新 task_id；"+
+				"该次驱动加载/卸载已记入台账 GET /api/v1/drivers/ledger，清场指引以台账为准）", taskInfo.ID, perr))
 		return
 	}
 	okCheck(8, "dispatched", fmt.Sprintf("任务 %d（%s）已下发", taskInfo.ID, taskInfo.TaskType))
@@ -663,9 +780,87 @@ func (s *Server) execAVOpsHandler(w http.ResponseWriter, r *http.Request) {
 		"impact":      impact,
 		"checks":      checks,
 		"warnings":    warnings,
+		// driver 回显"这次到底选了哪个驱动、怎么选的、有什么提示"：
+		// 选路过程不透明是"下发成功但目标机什么都不发生"最常见的成因。
+		"driver": avopsDriverPlanView(plan),
 		"message": fmt.Sprintf("已下发 %s（%s）：结果走既有任务结果通道（GET /api/v1/tasks/%d）",
 			a.Name, a.Tier, taskInfo.ID),
 	})
+}
+
+// avopsDriverPlanView 选路结论的对外回显（L3 之外的动作为空对象）。
+func avopsDriverPlanView(plan avopsDriverPlan) map[string]interface{} {
+	if plan.Detail == "" && plan.Source == "" && plan.Service == "" && plan.Name == "" {
+		return map[string]interface{}{}
+	}
+	out := map[string]interface{}{
+		"detail":  plan.Detail,
+		"source":  plan.Source,
+		"purpose": plan.Purpose,
+		"service": plan.Service,
+		"name":    plan.Name,
+		"notes":   plan.Notes,
+	}
+	if plan.Device != "" || plan.IOCTL != 0 {
+		out["device"] = plan.Device
+		out["ioctl"] = plan.IOCTL
+	}
+	if plan.SHA256 != "" {
+		out["sha256"] = plan.SHA256
+		out["size"] = plan.Size
+	}
+	return out
+}
+
+// recordDriverLifecycle 在任务成功下发后维护驱动台账与会话档案。
+//
+//   - byovd_load：写台账（服务名/设备/IOCTL/档位/哈希/任务号）+ 登记本会话档案，
+//     这样后续 byovd_kill / ppl_kill 能按档位自动选到它，且服务端重启后仍能给出清场指引；
+//   - byovd_unload：把台账条目销账（**只表示服务端下发过卸载**，不代表目标机卸载成功），
+//     并清掉本会话档案里同服务的记录（避免"已卸载却还能被选到"）。
+//
+// 返回值是给操作员看的警告（记账失败不阻断下发，但必须说出来）。
+func (s *Server) recordDriverLifecycle(sessionID string, a avops.Action, plan avopsDriverPlan, taskID uint64) []string {
+	switch a.Name {
+	case "byovd_load":
+		svc := strings.TrimSpace(plan.Service)
+		if svc == "" {
+			return []string{"加载任务已下发，但没有解析出 service_name：驱动加载台账无法记录该驱动，" +
+				"服务端重启后将无法给出它的清场指引（请检查请求参数）"}
+		}
+		name := firstNonEmptyStr(plan.Name, svc)
+		// 先登记会话档案（内存）：它的作用是让"接下来立刻 byovd_kill"能自动选到这个驱动。
+		s.rememberSessionDriver(sessionID, drivers.Driver{
+			Name: name, Service: svc, Device: plan.Device, IOCTL: plan.IOCTL,
+			KillPIDSize: 4, Purpose: plan.Purpose, SHA256: plan.SHA256,
+		})
+		err := s.driverLedgerOf().RecordLoad(drivers.LedgerEntry{
+			SessionID: sessionID, ServiceName: svc, DriverName: name,
+			Device: plan.Device, IOCTL: plan.IOCTL, Purpose: plan.Purpose,
+			SHA256: plan.SHA256, Size: int64(plan.Size), Source: "avops", LoadTaskID: taskID,
+		})
+		if err != nil {
+			logging.Warn("avops", "驱动加载台账写入失败（service=%s task=%d）：%v", svc, taskID, err)
+			return []string{"驱动加载台账写入失败：" + err.Error() +
+				"（任务已下发；但服务端重启后将无法给出该驱动的清场指引，请记下服务名 " + svc + "）"}
+		}
+		return nil
+
+	case "byovd_unload":
+		svc := strings.TrimSpace(plan.Service)
+		if svc == "" {
+			return nil
+		}
+		if err := s.driverLedgerOf().RecordUnload(sessionID, svc, taskID); err != nil {
+			logging.Warn("avops", "驱动卸载台账写入失败（service=%s task=%d）：%v", svc, taskID, err)
+			return []string{"驱动卸载台账写入失败：" + err.Error() + "（任务已下发，但台账里这条仍是「未清场」）"}
+		}
+		if d, ok := s.recallSessionDriver(sessionID); ok && strings.EqualFold(strings.TrimSpace(d.Service), svc) {
+			s.forgetSessionDriver(sessionID)
+		}
+		return nil
+	}
+	return nil
 }
 
 // avopsTimeoutWatchdog 服务端侧显式超时收口。
@@ -728,13 +923,17 @@ func (s *Server) avopsDispatch(id string, a avops.Action, params map[string]inte
 		return s.taskMgr.CreateProcessKill(id, pid)
 
 	case "byovd_load":
+		// Service 走选路结果（请求的 service_name 与档案声明一致时二者相同）：byovd_load 的
+		// service_name 既决定落盘文件名，也是台账里之后用于清场的键。
 		return s.taskMgr.CreateBYOVDLoad(id,
 			avops.ParamString(params, "driver_b64"),
-			avops.ParamString(params, "service_name"),
+			firstNonEmptyStr(plan.Service, avops.ParamString(params, "service_name")),
 			avops.ParamString(params, "device_name"))
 
 	case "byovd_unload":
-		return s.taskMgr.CreateBYOVDUnload(id, avops.ParamString(params, "service_name"))
+		// Service 可能是选路解析出来的（请求 → 本会话登记 → 服务端加载台账）：
+		// 这就是"服务端重启后仍能按记录清场"的落点。
+		return s.taskMgr.CreateBYOVDUnload(id, firstNonEmptyStr(plan.Service, avops.ParamString(params, "service_name")))
 
 	case "byovd_kill":
 		pid, _ := avops.ParamUint32(params, "pid")
@@ -806,7 +1005,7 @@ func avopsTargetsOf(a avops.Action, params map[string]interface{}, plan avopsDri
 			avops.ParamString(params, "service_name"), plan.Detail)
 	case "byovd_unload":
 		return fmt.Sprintf("目标机内核：停止并删除驱动服务 %s 及其 .sys 文件（文件删除不可恢复）",
-			avops.ParamString(params, "service_name"))
+			firstNonEmptyStr(avops.ParamString(params, "service_name"), plan.Service))
 	case "byovd_kill":
 		t := avops.ParamString(params, "process_name")
 		if pid, ok := avops.ParamUint32(params, "pid"); ok {

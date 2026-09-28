@@ -203,6 +203,11 @@ type Server struct {
 	driverMu       sync.Mutex
 	sessionDrivers map[string]drivers.Driver
 
+	// driverLedger 驱动加载台账（v1.4.0 S6 P0-1）：记录"服务端下发过哪些 byovd_load"，
+	// 落盘、跨服务端重启保留，用于重启后的残留驱动清场指引。
+	// nil = 未初始化（首次用到时按 drivers.DefaultLedgerPath 懒初始化）；测试可注入临时路径。
+	driverLedger *drivers.Ledger
+
 	// agentResults 内置 Agent 的工具结果外置存储（v1.4.0 S2）。
 	//
 	// 它只依赖本地目录 + TTL，**与 mcp.enabled（对外 MCP 监听器）无关**：默认配置下
@@ -586,6 +591,9 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/sessions/{id}/edr/byovd-kill", s.byovdKillHandler).Methods("POST")
 	api.HandleFunc("/sessions/{id}/edr/ppl-kill", s.pplKillHandler).Methods("POST")
 	api.HandleFunc("/drivers", s.listDriversHandler).Methods("GET")
+	// 驱动台账：服务端记录过哪些 byovd_load + 可执行的清场指引（v1.4.0 S6 P0-1）。
+	// 注意路径段数与 /drivers/{name}/verify 不同，不会互相抢路由。
+	api.HandleFunc("/drivers/ledger", s.driverLedgerHandler).Methods("GET")
 	// 驱动加载前自检（sha256 一致性 / Authenticode 签名者 / 易受攻击驱动黑名单提示）
 	api.HandleFunc("/drivers/{name}/verify", s.verifyDriverHandler).Methods("GET")
 	api.HandleFunc("/drivers/{name}/raw", s.downloadDriverHandler).Methods("GET")
