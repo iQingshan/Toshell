@@ -55,6 +55,9 @@ type Listener struct {
 type TaskManager interface {
 	Complete(id uint64, exitCode int32, output, errorMsg string) error
 	Fail(id uint64, errorMsg string) error
+	// FailWithResult 失败终态 + **保留植入端回传的输出与退出码**
+	// （v1.4.0 S6 P0-2：非 0 退出码的工具，其 stdout 往往正是排障要看的失败原因）
+	FailWithResult(id uint64, exitCode int32, output, errorMsg string) error
 	Get(id uint64) (*types.TaskInfo, error)
 	GetNext(sessionID string) (*types.TaskInfo, error)
 	GetNextBatch(sessionID string, max int) []*types.TaskInfo
@@ -857,7 +860,7 @@ func (l *Listener) handleResult(conn *transport.Conn, packet *protocol.Packet) {
 			if errMsg == "" && result.ExitCode != 0 {
 				errMsg = fmt.Sprintf("exit code %d", result.ExitCode)
 			}
-			l.taskMgr.Fail(result.TaskID, errMsg)
+			l.taskMgr.FailWithResult(result.TaskID, result.ExitCode, result.Output, errMsg)
 		}
 	}
 

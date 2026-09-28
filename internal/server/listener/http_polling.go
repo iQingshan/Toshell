@@ -617,7 +617,7 @@ func (l *HTTPListener) handleResultHTTP(w http.ResponseWriter, r *http.Request) 
 			if errMsg == "" && result.ExitCode != 0 {
 				errMsg = fmt.Sprintf("exit code %d", result.ExitCode)
 			}
-			l.taskMgr.Fail(result.TaskID, errMsg)
+			l.taskMgr.FailWithResult(result.TaskID, result.ExitCode, result.Output, errMsg)
 		}
 	}
 

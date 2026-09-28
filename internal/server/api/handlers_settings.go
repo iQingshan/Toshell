@@ -187,6 +187,7 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"config not loaded"}`, http.StatusInternalServerError)
 		return
 	}
+	reload := config.LastReload()
 
 	resp := SettingsResponse{
 		General: map[string]interface{}{
@@ -196,6 +197,15 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"log_format":        cfg.Logging.Format,
 			"heartbeat_timeout": cfg.Listener.HeartbeatTimeout.String(),
 			"write_queue_size":  cfg.Listener.WriteQueueSize,
+			// v1.4.0 S6 附带修复：配置热重载结果（**已认证**出口，给完整错误原文）。
+			// 配置文件被写坏时服务端静默沿用旧配置 —— 这里就是"那次改动到底生效没有"
+			// 的权威答案：ok=false 且 error 带原始错误（含路径与解析原因）。
+			"config_path":            reload.Path,
+			"config_reload_ok":       reload.OK,
+			"config_reload_at":       reload.At.Format(time.RFC3339),
+			"config_reload_error":    reload.Error,
+			"config_reload_attempts": reload.Attempts,
+			"config_reload_failures": reload.Failures,
 		},
 		Listener: map[string]interface{}{
 			"enabled":         cfg.Listener.Enabled,

@@ -432,7 +432,7 @@ func (l *TCPListener) handleResultRelayed(childSessionID string, pkt *protocol.P
 			if errMsg == "" && result.ExitCode != 0 {
 				errMsg = fmt.Sprintf("exit code %d", result.ExitCode)
 			}
-			_ = l.taskMgr.Fail(result.TaskID, errMsg)
+			_ = l.taskMgr.FailWithResult(result.TaskID, result.ExitCode, result.Output, errMsg)
 		}
 	}
 	if l.onTaskResult != nil {

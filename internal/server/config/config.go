@@ -14,6 +14,7 @@ import (
 
 	"toshell/internal/common/avops"
 	"toshell/internal/common/transport"
+	"toshell/internal/server/logging"
 )
 
 type Config struct {
@@ -438,6 +439,88 @@ func fireOnChange() {
 	}
 }
 
+// ─── 配置热重载：唯一入口 + 结果可观测（v1.4.0 S6 附带修复）──────────────────
+//
+// 修的既有缺陷（非本次引入）：viper 热重载回调里**只看 Apply() 的返回值、
+// 忽略了读取本身的错误**。而 Apply() 只是把 viper 内存里的值再解一遍 ——
+// 配置文件被写坏（非法 YAML / 编码错误）时，viper.ReadInConfig 压根没被调用，
+// 于是"重载失败"与"重载成功"在外部表现完全一致：静默沿用旧配置 + 日志照旧打
+// "已自动热重载"。操作员以为配置生效了，实际没有（上一轮排障为此浪费了时间）。
+//
+// 现在把「读取 → 解析 → 校验 → 替换 → 记录」抽成一个**可直接调用**的函数 Reload()：
+//   - 先 ReadInConfig（失败即返回原始错误，GlobalConfig 与 viper 内存态都不动）；
+//   - 再 Apply()（解析失败同样返回错误、不替换）；
+//   - 失败打 error 级日志并写明"继续使用旧配置"，成功才打 info；
+//   - 最近一次结果存在 LastReload()，经**既有**诊断出口回传：
+//     GET /api/v1/health（未认证可达 → 只给 ok/时间/失败计数，不含错误原文，
+//     避免把配置文件路径与解析细节泄露给未认证探测者）
+//     GET /api/v1/settings（已认证 → 给完整错误原文，排障就看这里）。
+type ReloadStatus struct {
+	OK       bool      `json:"ok"`
+	At       time.Time `json:"at"`
+	Path     string    `json:"path"`
+	Error    string    `json:"error"`
+	Attempts int       `json:"attempts"`
+	Failures int       `json:"failures"`
+}
+
+var (
+	reloadStatusMu sync.RWMutex
+	reloadStatus   ReloadStatus
+)
+
+// recordReload 记录一次重载结果（err == nil 表示成功）。
+func recordReload(err error, path string) {
+	reloadStatusMu.Lock()
+	reloadStatus.Attempts++
+	reloadStatus.At = time.Now()
+	reloadStatus.Path = path
+	reloadStatus.OK = err == nil
+	if err != nil {
+		reloadStatus.Failures++
+		reloadStatus.Error = err.Error()
+	} else {
+		reloadStatus.Error = ""
+	}
+	reloadStatusMu.Unlock()
+}
+
+// LastReload 返回最近一次配置重载的结果（副本，可安全并发读）。
+func LastReload() ReloadStatus {
+	reloadStatusMu.RLock()
+	defer reloadStatusMu.RUnlock()
+	return reloadStatus
+}
+
+// Reload 从配置文件重新读取、解析并应用配置 —— 热重载的唯一入口。
+//
+// 为什么必须"先 ReadInConfig 再 Apply"：只调 Apply 等于"把 viper 内存里的旧值
+// 再解一遍"，文件坏了也发现不了。这里任何一步失败都**不做替换**并返回原始错误，
+// 调用方（含 WatchConfig 回调）据此把失败显式暴露出来。
+func Reload() error {
+	path := viper.ConfigFileUsed()
+	if path == "" {
+		path = configFilePath
+	}
+	if path == "" {
+		path = resolveConfigPath("")
+	}
+
+	if err := viper.ReadInConfig(); err != nil {
+		recordReload(err, path)
+		logging.Error("config", "配置文件重载失败：%v（**继续使用旧配置**，本次改动未生效）", err)
+		return err
+	}
+	if err := Apply(); err != nil {
+		recordReload(err, path)
+		logging.Error("config", "配置文件重载失败：解析/应用出错 %v（**继续使用旧配置**，本次改动未生效）", err)
+		return err
+	}
+	recordReload(nil, path)
+	logging.Info("config", "配置文件已重新加载并生效 (path=%s)", path)
+	return nil
+}
+
 // Apply 从 viper 重新读取并应用当前配置，通知所有订阅者。
 // 供外部修改配置文件后的自动重载（WatchConfig）与设置 API 保存后调用。
 func Apply() error {
@@ -463,11 +546,21 @@ func Save(updates map[string]interface{}) error {
 	}
 	// 用文件内容同步 viper 内存态（比逐个 viper.Set 更贴近磁盘真实值）
 	if err := viper.ReadInConfig(); err != nil {
+		// 走到这里说明"刚写下去的文件读不回来"（编码/BOM/权限等），只能退回逐项 Set。
+		// 这是异常路径：**必须**说出来，否则又变成"保存看起来成功了，其实内存态是拼出来的"。
+		logging.Error("config", "设置已写回磁盘，但重新读取配置文件失败：%v（本次退回逐项设置 viper 内存态；请检查文件编码/YAML 合法性）", err)
 		for k, v := range updates {
 			viper.Set(k, v)
 		}
 	}
-	return Apply()
+	// 成功写回并应用也记一笔：LastReload() 表达的是"当前生效配置最近一次是怎么来的"，
+	// 设置页保存同样是配置生效的一种来源。
+	if err := Apply(); err != nil {
+		recordReload(err, configFilePath)
+		return err
+	}
+	recordReload(nil, configFilePath)
+	return nil
 }
 
 // configFilePath 记录本次进程实际使用的配置文件绝对路径（Load 时确定）。
@@ -815,14 +908,21 @@ func Load(configPath string) (*Config, error) {
 
 	GlobalConfig = &config
 
+	// 初次加载成功也记一条：LastReload() 的语义是"当前生效配置是怎么来的"，
+	// 只有热重载记录会让"从未重载过"看起来像"上一次重载失败了"。
+	recordReload(nil, configFilePath)
+
 	// 配置热更新：监听配置文件变化（外部编辑或设置 API 写回），
 	// 自动重新加载并通知订阅者，运行中无需重启进程。
+	//
+	// 走 Reload()（v1.4.0 S6 附带修复）：它先 ReadInConfig 再 Apply，
+	// 读取/解析失败时打 error 日志 + 记录 LastReload().OK=false，
+	// **不会**再出现"文件写坏了却宣称已热重载"的假成功。
 	viper.WatchConfig()
 	viper.OnConfigChange(func(_ fsnotify.Event) {
-		if err := Apply(); err != nil {
-			// 配置可能处于半写入状态，忽略本次并保留旧配置，下次变化再试。
-			return
-		}
+		// 失败原因已经由 Reload 内部打日志并记录状态，这里不需要再处理
+		// （配置可能处于半写入状态，下次变化会再试一遍）。
+		_ = Reload()
 	})
 
 	return &config, nil

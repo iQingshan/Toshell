@@ -381,7 +381,11 @@ func NewServer(cfgPath string) (*Server, error) {
 			httpListener.UpdateMimicry(cfg.Listener.MimicryProfile)
 		}
 		apiServer.ReconfigureCopilot(cfg.AI)
-		logging.Info("server", "检测到配置文件变化，已自动热重载 (mimicry=%s)", cfg.Listener.MimicryProfile)
+		// 这行只在配置**真的应用成功**时才会出现（OnChange 由 Apply 成功路径触发，
+		// 而顺序的"读取/解析失败"分支由 config.Reload 打 error 级日志）。
+		// v1.4.0 S6 附带修复前，这里写的是"检测到配置文件变化，已自动热重载"，
+		// 而热重载失败（配置写坏）时它照样会打 —— 是上一轮排障踩的坑。
+		logging.Info("server", "配置变更已应用（热重载成功）(mimicry=%s)", cfg.Listener.MimicryProfile)
 	})
 
 	// ── 对外 MCP 服务端（默认关闭；开启时只绑回环 + 必须有 token + 默认只放行只读工具）──

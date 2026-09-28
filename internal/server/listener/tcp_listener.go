@@ -947,7 +947,7 @@ func (l *TCPListener) handleResult(conn net.Conn, packet *protocol.Packet) {
 			if errMsg == "" && result.ExitCode != 0 {
 				errMsg = fmt.Sprintf("exit code %d", result.ExitCode)
 			}
-			l.taskMgr.Fail(result.TaskID, errMsg)
+			l.taskMgr.FailWithResult(result.TaskID, result.ExitCode, result.Output, errMsg)
 		}
 	}
 	if l.onTaskResult != nil {

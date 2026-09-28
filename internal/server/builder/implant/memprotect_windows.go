@@ -130,6 +130,10 @@ func freeMem(addr uintptr) error {
 	if addr == 0 {
 		return nil
 	}
+	// 同步注销镜像登记（v1.4.0 S6 P0-2）：exec_module 执行完会把镜像交还进程，
+	// 登记表里那条区间必须一起摘掉，否则"已释放的地址区间"会继续参与退出拦截判定。
+	// 对 ctx/参数/输出这类普通缓冲是 no-op（它们从来没被登记过）。
+	guardUnregisterImage(addr)
 	ok, _, callErr := resolveAPI("kernel32.dll", "VirtualFree").
 		Call(addr, 0, memRelease)
 	if ok == 0 {

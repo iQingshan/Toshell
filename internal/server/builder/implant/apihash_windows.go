@@ -43,6 +43,16 @@ func apiHash(s string) uint32 {
 
 // getProcAddr 手工解析模块导出表中哈希匹配的函数地址（RVA -> VA）。
 // 支持 PE32（386）与 PE32+（amd64）两种可选头。
+//
+// ⚠️ **转发导出（forwarder）必须拒掉**：Windows 把一部分 kernel32/kernelbase 的导出
+// 写成"转发字符串"（例如 `kernel32!ExitThread -> NTDLL.RtlExitUserThread`、
+// `kernelbase!ExitProcess -> NTDLL.RtlExitUserProcess`）。这类导出的
+// AddressOfFunctions 项**不是代码 RVA，而是导出目录内一段 ASCII 字符串的 RVA**。
+// 直接 moduleBase+funcRVA 返回，调用方会拿到"字符串地址"并把它当函数调用 ——
+// 实测后果是整个进程立刻消失（内存执行的退出拦截桩就这么被坑过）。
+//
+// 判定方法：功能 RVA 落在导出目录 [exportDirRVA, exportDirRVA+exportDirSize) 内
+// 就是转发项。返回 0 让 getAPI 走 GetProcAddress 兜底（系统 API 会正确解转发）。
 func getProcAddr(moduleBase uintptr, hash uint32) uintptr {
 	if moduleBase == 0 {
 		return 0
@@ -59,12 +69,14 @@ func getProcAddr(moduleBase uintptr, hash uint32) uintptr {
 	}
 	// 可选头 Magic：PE32=0x10B，PE32+=0x20B
 	magic := *(*uint16)(unsafe.Pointer(ntHeaders + 0x18))
-	var exportDirRVA uint32
+	var exportDirRVA, exportDirSize uint32
 	switch magic {
 	case 0x10B: // PE32
 		exportDirRVA = *(*uint32)(unsafe.Pointer(ntHeaders + 0x18 + 0x60))
+		exportDirSize = *(*uint32)(unsafe.Pointer(ntHeaders + 0x18 + 0x64))
 	case 0x20B: // PE32+
 		exportDirRVA = *(*uint32)(unsafe.Pointer(ntHeaders + 0x18 + 0x70))
+		exportDirSize = *(*uint32)(unsafe.Pointer(ntHeaders + 0x18 + 0x74))
 	default:
 		return 0
 	}
@@ -92,6 +104,11 @@ func getProcAddr(moduleBase uintptr, hash uint32) uintptr {
 		if h == hash {
 			ord := *(*uint16)(unsafe.Pointer(moduleBase + uintptr(addrOfNameOrdinals) + uintptr(i*2)))
 			funcRVA := *(*uint32)(unsafe.Pointer(moduleBase + uintptr(addrOfFunctions) + uintptr(uint32(ord)*4)))
+			if funcRVA >= exportDirRVA && funcRVA < exportDirRVA+exportDirSize {
+				// 转发导出：funcRVA 指向的是转发字符串，不是代码。
+				// 交回 0，让调用方走 GetProcAddress（系统会解开转发链）。
+				return 0
+			}
 			return moduleBase + uintptr(funcRVA)
 		}
 	}

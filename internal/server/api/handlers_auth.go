@@ -18,10 +18,30 @@ import (
 	"toshell/internal/server/logging"
 )
 
+// healthHandler 健康检查。
+//
+// v1.4.0 S6 附带修复：这里顺带回传"最近一次配置热重载是否成功"。
+// 为什么放在 health 里：配置文件写坏时服务端会**静默沿用旧配置**，
+// 而操作员唯一的诊断入口就是 health（顶栏状态、运维探针都用它）。
+//
+// 注意 health 是**未认证可达**的（见 auth 中间件对 /api/v1/health 的放行），
+// 所以这里只给 ok/时间/失败次数，**不给错误原文**（错误里含配置文件路径与
+// YAML 解析细节）；完整错误原文在已认证的 GET /api/v1/settings 里。
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
+	reload := config.LastReload()
+	body := map[string]interface{}{
+		"status":    "ok",
+		"timestamp": time.Now().Format(time.RFC3339),
+		"config_reload": map[string]interface{}{
+			"ok":       reload.OK,
+			"at":       reload.At.Format(time.RFC3339),
+			"attempts": reload.Attempts,
+			"failures": reload.Failures,
+		},
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok","timestamp":"` + time.Now().Format(time.RFC3339) + `"}`))
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) systemStatsHandler(w http.ResponseWriter, r *http.Request) {

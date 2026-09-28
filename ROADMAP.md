@@ -63,7 +63,7 @@
 | **S6** L2 / L3 / L4 真实执行验证 | 🟡 部分完成 | 已有实测：L2+ 默认 `allow_l2/l3/l4=false` → **被拒**（缺 confirm→409、tier 不符→400、未知动作→400、L2→403、L3 无驱动→409、超上限→400，且被拒动作**没有产生任何任务**）；L0 真实下发回传有记录。**放行路径零实测** | **L2/L3/L4 真实执行未验证**（需授权 VM + 快照 + 操作员自备 `rw`/`kill` 档 `.sys`）；面板侧"破坏性动作成功下发"分支同样未实测（真机只点到"弹确认层后取消"） |
 | **S6** L4 落地动作 | ❌ 未开工 | 代码事实：`TierL4.Implemented = false`、`ActionsOfTier(TierL4)` 为空（有单测断言为 0）；`avops.allow_l4=true` 也不会让任何动作变成可下发（刻意不造"点了没反应"的假入口） | 需要植入端独立的 AMSI/ETW 抑制任务类型 + 登记进 L4 + 前端入口。AMSI patch 对 Go 默认载荷收益≈0，只在进程内加载 .NET/脚本时才有意义 |
 | **S6** 驱动体系（`purpose` 选路 / 残留驱动清场 / catalog 签名驱动） | ❌ 未开工 | 代码事实：`ppl_kill` 仍只走句柄窃取；无按 `purpose`(kill/rw/both) 自动选路、无进程重启后的残留驱动服务清场、catalog 签名驱动只能给"未内嵌签名" | **纯代码项、无外部材料硬前置**（可先做）：`purpose` 选路 + 缺档时明确提示"无 rw 档驱动，PPL 清除不可用（走句柄窃取）" + 清场任务 + `CryptCATAdminCalcHashFromFileHandle` |
-| **S6** 内存执行加固（hook `ExitProcess`/`RtlExitUserProcess` + stdout/stderr 重定向） | ⚠️ 卡在本地 stash | `git stash@{0}`：`wip: S6 P0-2 memory-exec hardening + config reload fix (interrupted subagent)`，实测 **20 个文件 / +454 −204**（`imgexec_windows.go` 重构、`memprotect_windows.go`、`blob_windows.go`、`apihash_windows.go`、`builder/implant/main.go` + `release/implant/*` 镜像、`config.go`、`handlers_settings.go`、`handlers_auth.go`、`task/task.go` + 四个 listener），含**「配置热重载报错可见」**；**主分支上这项等于没做** | 先决策**捡回还是丢弃重做**，再补完并验证；它是 S6 验收项"`exe_mem` 跑原生工具后植入端不掉线"的前置（第 3 项） |
+| **S6** 内存执行加固（hook `ExitProcess`/`RtlExitUserProcess` + stdout/stderr 重定向） | 🟡 部分完成 | 已从 `git stash@{0}` **捡回并补完**（新增 `mexecguard_windows.go` + `imgexec_windows.go` 重构 + `apihash_windows.go` 转发导出修复 + `memprotect_windows.go` 注销 + `config.go`/`handlers_auth.go`/`handlers_settings.go`/`task.go` 与四个 listener），含同 stash 的**「配置热重载报错可见」**；真机实测（windows/386 植入端 + mingw 32 位 `exit7.exe`，TCP 全链路）：改前 HEAD 模板下载荷执行**当秒** `Connection cleared` → 15s 后 `广播 session_offline`、任务停在 `sent`；改后 30s 内 **15 次采样全程 `active`**、退出码 **7**、载荷 stdout `HELLO_MEMEXEC`、`whoami` 回执正常，连续两次 `exe_mem` 与 `exit` 自杀均正常；配置写坏 → error 级原始错误 + `/settings` 回传原文 + `/health` `ok:false` | ① 运行时 `GetProcAddress` 解析地址后裸调 / 静态链入的退出调用**拦不到**；② `TerminateProcess(自身真实句柄)`/`NtTerminateProcess(真实句柄)` 放行（桩只认 `GetCurrentProcess()` 伪句柄）；③ `WriteFileEx`/`NtWriteFile`/自开 `CONOUT$` 的输出不捕获，**且宿主自身没有有效 std 句柄时（无控制台方式启动，例如被 WMI/服务拉起）同样捕获不到** —— 此时结果里会明确写"未捕获到任何内容（可能原因…）"而不是给空串；④ 原计划的 **inline hook 双保险未做**（只做 IAT 层）；⑤ `dll` 路径在宿主线程上同步执行被映射代码，该分支**未真机验证**（详见 S6 阶段详情 P0-2 段） |
 | **S6** 屏幕流 / 截图跨平台（P0-3） | ❌ 未开工 | 代码事实：只有 Windows 实现（GDI BitBlt + PrintWindow 回退）；`screen_stream_unix.go` 是 stub（`//go:build !windows && !light`，直接返回 "only supported on Windows"）；无 X11 / ScreenCaptureKit / DXGI 代码 | Linux(X11) / macOS(ScreenCaptureKit) / Windows DXGI 增量捕获；三项都必须真机验证（第 9 项） |
 | **S6** 工程收尾（P3） | ❌ 未开工 | `scripts/e2e_smoke.ps1` 已存在但**未接进 CI**；前端任务列表虚拟滚动、Sessions/仪表盘 WS 事件统一订阅、运行指标上界面、服务端在线更新均无实现 | e2e 接 CI（零依赖可先做）；多通道语义对齐；配置热更新边界文档化；前端虚拟滚动 + WS 统一订阅；可观测性上界面；自更新（需先做服务化守护 + 可信更新源决策，第 10 项） |
 
@@ -86,12 +86,13 @@
 - **验收口径**：一次声明 `session_list` + `session_context`，两者都进审计与 `tool` 回执；新增黄金集用例（`internal/server/ai/testdata/golden/cases.json`）；`go test ./internal/server/ai/...` 绿。
 - **需要你（操作员）提供什么**：无。
 
-#### 3. 捡回 / 丢弃 `git stash@{0}`，补完内存执行加固
+#### 3. 捡回 / 丢弃 `git stash@{0}`，补完内存执行加固 —— ✅ 本轮已完成（保留编号以免打断交叉引用）
 
 - **做什么**：先决策**捡回还是丢弃重做**，然后补完 hook `ExitProcess`/`RtlExitUserProcess`（IAT + inline hook 双保险，把载荷退出改成只退线程 → 宿主不掉线）与 stdout/stderr 重定向捕获；同 stash 里被叫停的「配置热重载报错可见」（`config.go` / `handlers_settings.go` / `handlers_auth.go` / 四个 listener）一并处理。
 - **为什么**：它是 S6 验收项"`exe_mem` 跑原生工具后植入端不掉线"的**前置**；半成品已 20 文件 / +454 −204，丢掉等于白丢已完成的重构，捡回则需复核被叫停处的正确性（`release/implant/*` 镜像要同步）。
 - **验收口径**：`attrib.exe`/`cmd.exe` 在 `exe_mem` 下执行完植入端**不掉线**、带输出的工具能拿到回传内容；配置热重载出错时设置页能看到原因（不再静默失败）；`go test ./...` 全绿。（真机放行环境见第 4/5 项。）
-- **需要你（操作员）提供什么**：决策 —— **捡回 `git stash@{0}` 还是丢弃重做**。
+- **结果（本轮）**：已**捡回并补完**（`git stash@{0}` 仍保留作备份，未 drop）。真机验收：改前 HEAD 模板下载荷执行**当秒掉线**（`Connection cleared` → 15s 后 `广播 session_offline`、任务停在 `sent`），改后 30s 全程 `active` + 退出码 **7** + stdout `HELLO_MEMEXEC` + `whoami` 回执 + 连续两次 `exe_mem` + `exit` 自杀均正常；配置写坏 → error 级原始错误 + "继续使用旧配置" + `/settings` 回传原文。`go build`/`go vet`/`go test ./...`（**19 个测试包**）全绿、两份镜像 **64 文件 SHA-256 一致**。**未做**：inline hook 那一半（IAT 层已够用，理由见 S6 阶段详情）；`attrib.exe`/`cmd.exe` 本身未单独跑（用的是等价的自编 32 位原生 exe）。
+- **需要你（操作员）提供什么**：无（本轮已闭环）；若要扩到 amd64 与 HTTP/WS/MQTT 通道可再排一轮。
 
 #### 4. S3 验收环境 + 落地链
 
@@ -146,7 +147,7 @@
 
 ### 阶段详情（S1~S6）
 
-> 每个阶段**先列「✅ 已完成」，再列「❌ 未完成 / 待做」，最后单列「🚫 已定论不做」**（S6 另有「⚠️ 卡在本地 stash」）；同一件事只出现在一处，口径与上面的状态总览一致。
+> 每个阶段**先列「✅ 已完成」，再列「❌ 未完成 / 待做」，最后单列「🚫 已定论不做」**（S6 的 P0-2 从"卡在本地 stash"捡回后为 **🟡 部分完成**，与总览表同口径）；同一件事只出现在一处，口径与上面的状态总览一致。
 
 #### S1 开放 MCP 服务接口 + 公共执行基础设施
 
@@ -281,8 +282,13 @@
 - **屏幕流/截图跨平台（P0-3）未开工**：Linux(X11) / macOS(ScreenCaptureKit) + Windows DXGI 增量捕获（需真机验证，因此排在最后）。
 - **工程收尾（P3）未开工**：e2e 冒烟接进 CI（tag 前）、多通道语义对齐、配置热更新边界文档化、前端任务列表虚拟滚动与 WS 事件统一订阅、可观测性指标暴露到界面、**服务端在线更新（自更新）**（先做服务化守护 → 原子替换 → sha256/签名校验与防降级 → sqlite 备份与回滚 → 可信源白名单，默认关闭）。
 
-**⚠️ 卡在本地 stash**
-- **内存执行加固（P0-2）**：hook `ExitProcess`/`RtlExitUserProcess`（把载荷退出改成只退线程，**宿主不掉线**）+ stdout/stderr 重定向捕获的实现**被叫停**，改动仍在 **`git stash@{0}`**（`wip: S6 P0-2 memory-exec hardening + config reload fix (interrupted subagent)`，**20 个文件 / +454 −204**：`imgexec_windows.go` 重构、`memprotect_windows.go`、`blob_windows.go`、`apihash_windows.go`、`builder/implant/main.go` + `release/implant/*` 镜像、`config.go`、`handlers_settings.go`、`handlers_auth.go`、`task/task.go` + 四个 listener，含**「配置热重载报错可见」**）。**当前主分支上这项等于没做** —— 需要先决定"**捡回还是丢弃**"，再排期；它是 S6 验收项"`exe_mem` 跑原生工具后植入端不掉线"的前置。
+**🟡 部分完成（P0-2 内存执行加固 + 「配置热重载报错可见」：本轮从 `git stash@{0}` 捡回并补完）**
+- **解决什么**：`fileless-exec` 的 `exe_mem`/`dll` 把 PE **反射映射进植入端自己的进程**，被执行的程序收尾调 `ExitProcess`/`RtlExitUserProcess` 会连宿主一起结束 —— **会话永久掉线**（服务端只看到"目标机掉线了"）、任务永远停在 `sent`。现在在 **IAT 层**（被映射镜像自身 + 已加载模块两层，后者才覆盖 `msvcrt`/`ucrtbase` 这类 CRT 自己的 IAT —— "main 返回"这条最常见的收尾路径走的正是它们）把退出类调用改写为**原生机器码桩**：只 `ExitThread(退出码)` 并记录退出码/命中来源，**宿主存活**；stdout/stderr 在 `WriteFile`/`WriteConsoleA|W` 按 std 句柄截流回传。**宿主自身收尾结构性不受影响**：层 2 显式跳过 `ntdll`/`kernel32`/`kernelbase` 与宿主主镜像，宿主走的是 `os.Exit`/`exit` 任务/自杀路径，一个字节没动。同 stash 的**「配置热重载报错可见」**一并落地：`config.Reload()` 先 `ReadInConfig` 再 `Apply`，失败打 error 级日志 + 原始错误 + "继续使用旧配置"，结果经 `/health`（未认证：只给 ok/时间/失败计数，不泄露路径与解析细节）与 `/settings`（已认证：给完整原文）回传。
+- **实测证据（windows/386 植入端 + mingw 32 位原生 `exit7.exe`，TCP 全链路真机跑通；载荷由服务端 `fileless-exec` 以 `kind=exe_mem` 下发）**：
+  - 改前（HEAD 模板，`TOSHELL_IMPLANT_TEMPLATE_DIR` 指向 `git worktree` 出的 `.tmp-verify/pre-p02`）：载荷执行**当秒**服务端记 `Connection cleared` → `判定离线，15s 后广播` → `广播 session_offline`；植入端进程消失，任务停在 `sent`（第 2 次下发 500）。**直接调 `ExitProcess` 与 CRT 收尾两条路径都是这个结果** —— 旧实现的重定向目标取自 `resolveAPI`，而本机 `kernel32!ExitThread` 是**转发导出**（`NTDLL.RtlExitUserThread`），旧 `getProcAddr` 把"转发字符串的 RVA"当函数地址返回，重定向实际指向数据，反而把宿主打死（本轮已在 `apihash_windows.go` 修掉：转发项一律返回 0 交给 `GetProcAddress`）。
+  - 改后（当前工作区模板）：30s 内 **15 次采样全程 `active`**，植入端进程存活；任务 `exit_code=7`，结果里明确写出 `加固已生效：退出拦截+输出捕获（镜像 IAT N 处 / 已加载模块(CRT 等) IAT 23 处）`、`[退出拦截] 载荷调用 kernel32!ExitProcess(7) 已被改写为 ExitThread：只结束载荷线程，宿主植入端**未退出**`、`--- 载荷 stdout (15 字节) --- HELLO_MEMEXEC`；随后 `whoami` 回执 `desktop-sfkhr1b\123`（exit_code 0）；**连续两次 `exe_mem` 都成功**（第二次 IAT 命中 0 处 = 幂等，加固仍在）；`exit` 任务仍能自杀（`status=completed`、`output=implant exit acknowledged`）—— **宿主正常退出路径未被这次拦截逻辑破坏**。
+  - 配置侧：把配置写坏后热重载 → `2026/09/28 16:01:15 [ERROR] [config] 配置文件重载失败：While parsing config: yaml: line 6: did not find expected key（**继续使用旧配置**，本次改动未生效）`，`GET /settings` 回传同一原文、`GET /health` 回 `ok:false failures:2`；恢复成合法 YAML → `[INFO] [config] 配置文件已重新加载并生效` + `[INFO] [server] 配置变更已应用（热重载成功）`。
+- **剩余什么 / 明确不覆盖（如实）**：① 载荷运行时用 `GetProcAddress`/`LdrGetProcedureAddress` 解析出 `ExitProcess`/`RtlExitUserProcess` 再**裸调**，或把退出调用**静态链入/内联**进自身代码 —— 不经过任何被改的 IAT，**拦不到**；② `TerminateProcess(<本进程的真实句柄>)` / `NtTerminateProcess(<真实句柄>)` **放行**（原生桩只能比较常量伪句柄 `GetCurrentProcess() == -1`）；③ `WriteFileEx`/`NtWriteFile`/自己 `CreateFile("CONOUT$")` 再写的输出**不捕获**，并且**宿主自身没有有效 std 句柄时（无控制台方式启动）同样捕获不到** —— 这两类情况结果里会写明"未捕获到任何内容（可能原因…）"而不是静默给空串（本轮实测：WMI 直起、植入端无控制台 → 捕获为空；用 `cmd /c … > log` 给了真实 stdout 后正常拿到 `HELLO_MEMEXEC`）；④ 原计划的 **inline hook 双保险未做** —— 只做了 IAT 层（inline hook 需搬运被覆盖函数序言，失败模式是"被 hook 的 API 全进程变砖"，对宿主可用性的风险大于收益）；⑤ `dll` 路径是在**宿主线程**上同步执行被映射代码，若该 DLL 调 `ExitProcess`，改写后的 `ExitThread` 结束的是宿主自己的线程，这条分支**未做真机验证**（`blob_windows.go` 里"判定走栈上镜像帧"的注释与实现不符，实现在 `mexecguard_windows.go`，属文档待修）；⑥ 真机结论只在 **TCP 通道 + windows/386** 上取得，HTTP/WS/MQTT 与 amd64 未跑。
 
 **🚫 已定论不做**
 - 无（本阶段没有"定论不做"项；"不造 L4 假入口"是显式取舍，见上面的待做）。
@@ -307,10 +313,10 @@
 ### P0-2 内存执行加固（`exe_mem` 的可用边界收窄）
 
 - **已达成的部分**：v1.3.4 **下发前 PE 预检**（`internal/server/builder/pecheck.go` + `handlers_fileless.go`）—— 手写解析 PE 头（架构/DLL/TLS/CLR/重定位）+ Go 载荷识别（`.gopclntab`、`\xff Go buildinf:`），`exe_mem`/`dll` 命中硬边界直接 400 拒绝并给出 `reasons`/`suggestion`/`pe_info`，`warn` 类照常下发但回传 warnings，`force:true` 可强制（留痕）；前端展示原因并支持强制下发。
-- **现状**：`ExitProcess`/`RtlExitUserProcess` hook 与 stdout/stderr 重定向的实现**卡在 `git stash@{0}`**（20 文件 / +454 −204，被叫停），主分支上等于没做；donut 路径的 `warn` 项细化未做。
-- **未做**：见「后续优化清单」第 3 项。
-- **验收口径**：`attrib.exe`/`cmd.exe` 这类原生工具在 `exe_mem` 下执行完，植入体**不掉线**；带输出的工具能拿到返回内容；Go 载荷被明确拒绝（已达成）。
-- **需要操作员提供**：决策（捡回 / 丢弃重做）；真机验收需放行环境。
+- **现状**：`ExitProcess`/`RtlExitUserProcess` 的 IAT 层拦截 + stdout/stderr 捕获**已从 `git stash@{0}` 捡回并补完、真机验收通过**（改前载荷执行即掉线，改后 30s 全程在线 + 退出码/stdout 回传 + `whoami` 回执）；同 stash 的「配置热重载报错可见」一并验收。**剩余**：运行时解析地址后裸调/静态链入的退出调用拦不到、`TerminateProcess(自身真实句柄)` 放行、`WriteFileEx`/`NtWriteFile` 输出不捕获、inline hook 双保险未做、`dll` 路径未真机验证（详见 S6 阶段详情的 P0-2 段）。
+- **未做**：见「后续优化清单」第 3 项（该项已完成，保留编号以免打断交叉引用）与 S6 阶段详情的 P0-2「剩余什么」。
+- **验收口径**：`attrib.exe`/`cmd.exe` 这类原生工具在 `exe_mem` 下执行完，植入体**不掉线**；带输出的工具能拿到返回内容；Go 载荷被明确拒绝（已达成）。**前两项已用"会调 `ExitProcess` 的 32 位原生 exe"在真机上验收通过**（真实 `attrib.exe`/`cmd.exe` 未单独跑）。
+- **需要操作员提供**：无（决策与真机验收本轮已闭环）；amd64 载荷与 HTTP/WS/MQTT 通道的复测仍可另做。
 
 ### P0-3 屏幕流 / 截图：跨平台 + 增量捕获
 
@@ -362,7 +368,7 @@
 
 - **多通道一致性**：MQTT/relay/HTTP-polling 与 TCP 的判活、忙期、任务重放语义对齐（TCP 最完整；已统一判活入口 `Session.IsAlive`，其余语义仍待对齐）。
 - **Release/打包**：✅ CI 三级校验（`toserver -version` == tag、zip 内容清单、`checksums.txt`）已完成；❌ tag 前接 `e2e_smoke.ps1` 未做。
-- **配置热更新边界**：心跳超时等会话参数改动后对存量会话的生效时机文档化（现为"改动后新会话立即生效、存量会话按采样自适应"）；另有 `git stash@{0}` 里的"配置热重载报错可见"待处置。
+- **配置热更新边界**：心跳超时等会话参数改动后对存量会话的生效时机文档化（现为"改动后新会话立即生效、存量会话按采样自适应"）；`git stash@{0}` 里的"配置热重载报错可见"**已捡回并真机验收**（见 S6 阶段详情 P0-2 段），这里只剩"生效时机文档化"本身未做。
 - **前端**：✅ 杀软对抗页信息架构已重排（BYOVD 区块 + 驱动加载前自检结论直接标在按钮与提示区）；❌ 任务列表虚拟滚动（大量任务不卡）、Sessions/仪表盘 WS 事件统一订阅组件（现在多处重复实现）未做。
 - **可观测性**：屏幕流帧限速丢弃数、广播去抖抑制次数等运行指标暴露到界面/日志汇总（当前只在日志里；v1.3.4 已把"真正烘焙进载荷的参数"写进构建日志）。
 - **服务端在线更新（自更新）**：
@@ -444,8 +450,8 @@
 | 现象 | 影响 | 处置建议 |
 |---|---|---|
 | garble v0.16 要求 Go ≥ 1.26，本机 go1.25.0 → 任何 garble 构建必失败 | 混淆选项不可用（界面已如实显示"不可用 + 原因"） | 升级 Go 或安装匹配版本 garble（属环境问题，非代码缺陷；本机已装 v0.15.0 可用） |
-| 本机装有 360/电脑管家/无边界安全系统，**任何新生成或未签名的 PE 一执行就被拒并删文件**（连 Hello-World Go 程序也一样，MS 签名程序正常） | **本机无法做任何"动态/行为"验证**（载荷上不了线、`go test` 的新测试二进制也被杀） | 动态验证放到干净 VM（仅 Defender）或 CI；长期解见 P0-5（代码签名 / 由已签名宿主加载） |
+| 本机装有 360/电脑管家/无边界安全系统，**新生成或未签名的 PE 用 `Start-Process`/`cmd start`/`.NET Process.Start` 启动一律 `Access is denied`**（连 Hello-World Go 程序也一样，MS 签名程序正常），且植入端 exe 放一会儿会被直接删文件 | 常规启动路径下本机做不了动态验证（`go test` 的新测试二进制同样会被杀） | **可用绕法（本轮实测有效）**：用 **WMI `Win32_Process.Create`** 启动载荷（拦截只挂在用户态 `CreateProcess` 调用方上，走 `WmiPrvSE` 起进程不受影响）；需要真实 stdout 时用 `cmd.exe /c "payload.exe > log 2>&1"` 包一层（给不了控制台就没法验输出回传）。长期解仍是干净 VM（仅 Defender）或 CI |
 | Go 编译的 EXE 用 `exe_mem` 反射执行会崩宿主（双 Go runtime） | ✅ v1.3.4 已在下发前**明确拒绝**并给建议（P0-2 预检） | —— |
-| `exe_mem` 下载荷自行退出会带走植入体（CRT 内部 ExitProcess） | 只对"跑完即退"的工具致命 | hook `ExitProcess`/`RtlExitUserProcess` 的半成品在 `git stash@{0}`（20 文件 / +454 −204），见「后续优化清单」第 3 项 |
+| `exe_mem` 下载荷自行退出会带走植入体（CRT 内部 ExitProcess） | 只对"跑完即退"的工具致命 | ✅ **本轮已修并真机验收**：IAT 双层拦截（镜像 + 已加载模块）改写为原生 `ExitThread` 桩、stdout/stderr 回传。改前载荷执行当秒掉线、改后 30s 全程在线且退出码/stdout 正确；覆盖边界见 S6 阶段详情 P0-2 段 |
 | PPL 进程杀不掉（无具备内核读写的 `rw` 档驱动） | Defender 等 PPL 保护进程需句柄窃取 | 补 `rw` 档驱动档案与 `purpose` 选路（见「后续优化清单」第 5 项 / 附 A P0-1） |
 | 一条上线命令的下载地址依赖人工配置 `public_host` | 配置错则命令不可用（已有告警与自动回退） | 可加"服务端主动探测该地址可达性"的自检（与「后续优化清单」第 10 项的可观测性一起做） |
