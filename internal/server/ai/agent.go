@@ -413,6 +413,10 @@ type pendingState struct {
 	traces   []ToolTrace
 	// traceID 挂起前的 trace id：审批通过后恢复循环仍用同一条，审计可串起来。
 	traceID string
+	// unhandled 同一条 assistant 消息里排在待审批调用之后、本次不会执行的调用。
+	// 恢复（ResolveAgentConsent）时逐个补"未执行"回执：一条消息声明的 N 个调用，
+	// 历史里就一定有 N 条回执，不会出现"声明了却不执行也不回执"。
+	unhandled []ToolCall
 }
 
 // AgentManager 管理所有 run（并发上限 + 取消）。

@@ -181,6 +181,10 @@ type pendingSession struct {
 	// traceID 挂起前的 trace id：用户 allow/deny 后恢复循环时沿用同一条 trace，
 	// 保证"审批请求 → 实际执行 → 审计日志"能被同一个 id 串起来。
 	traceID string
+	// unhandled 同一条 assistant 消息里排在待审批调用之后、本次不会执行的调用。
+	// 恢复时逐个补"未执行"回执：一条消息声明的 N 个调用，历史里就一定有 N 条回执。
+	// 见 unexecutedToolReplies / unhandledCallsAfter。
+	unhandled []ToolCall
 }
 
 func New(cfg config.AIConfig, executor ToolExecutor) *Copilot {
@@ -497,12 +501,14 @@ func (c *Copilot) runLoop(ctx context.Context, messages []Message, traceID strin
 			}, nil
 		}
 		budgetExhausted := false
-		for _, tc := range msg.ToolCalls {
+		for i, tc := range msg.ToolCalls {
 			// 工具调用数上限：逐个检查（一轮可能返回多个 tool_calls），保证不超发。
 			if limits.MaxToolCalls > 0 && toolCalls >= limits.MaxToolCalls {
 				stopReason = stopReasonMaxToolCalls
 				logging.Warn("ai", "copilot trace=%s stop_reason=%s tool_calls=%d limit=%d",
 					traceID, stopReason, toolCalls, limits.MaxToolCalls)
+				// 同一条消息里排在它后面的调用这次不会执行：补显式回执（与自主循环同一不变量）。
+				messages = append(messages, unexecutedToolReplies(msg.ToolCalls[i:], "已达本次 run 的工具调用上限")...)
 				budgetExhausted = true
 				break
 			}
@@ -535,6 +541,8 @@ func (c *Copilot) runLoop(ctx context.Context, messages []Message, traceID strin
 					args:     args,
 					traces:   append([]ToolTrace(nil), traces...),
 					traceID:  traceID,
+					// 同一批里排在它后面的调用本次也不会执行：恢复时补回执，不静默丢弃。
+					unhandled: unhandledCallsAfter(messages, tc.ID),
 				}
 				c.pendingMu.Unlock()
 				return &ChatResult{
@@ -629,6 +637,15 @@ func (c *Copilot) ResolveConsent(ctx context.Context, token string, allow bool) 
 	view := c.toolResultView(resultRef{Tool: p.tool.Function.Name, CallID: p.tool.ID, TraceID: p.traceID}, out)
 
 	msgs := append(p.messages, Message{Role: "tool", ToolCallID: p.tool.ID, Content: view.Text})
+	// 同一批里排在待审批调用之后的其它调用：本次不会执行，补显式回执。
+	// 不补的话恢复后的历史就是"声明 N 个、只有 1 条回执"，模型会以为自己都调过了。
+	if note := unexecutedToolReplies(p.unhandled, "同一批的前一个调用在等待用户审批，本次未执行"); len(note) > 0 {
+		msgs = append(msgs, note...)
+		for _, tc := range p.unhandled {
+			logging.Info("agent-audit", "trace=%s tool=%s call_id=%s executed=false reason=awaiting_consent",
+				p.traceID, tc.Function.Name, tc.ID)
+		}
+	}
 	// 恢复循环时沿用挂起前的 trace_id：审批、执行与日志必须是同一条 trace。
 	res, err := c.runLoop(ctx, msgs, p.traceID)
 	if err != nil {
@@ -692,6 +709,10 @@ func (c *Copilot) ResolveAgentConsent(ctx context.Context, run *AgentRun, allow 
 
 	// 追加 tool 结果消息，恢复循环。用 p.messages 作为基础，避免重复。
 	run.Messages = append(p.messages, Message{Role: "tool", ToolCallID: p.tool.ID, Content: view.Text})
+	// 同一条 assistant 消息里排在待审批调用之后的其它调用：本次不会执行，
+	// 恢复时补显式回执——否则历史成了"声明 N 个、只有 1 条回执"，模型会以为它们跑过了。
+	// （快照里的 unhandled 由 waitForConsent 按声明顺序记下。）
+	fillUnexecutedToolReplies(run, p.traceID, p.unhandled, "同一批的前一个调用在等待用户审批，本次未执行")
 
 	// 后台继续自主循环由调用方（resumeAgentAsync）发起
 	return nil, nil
@@ -1329,6 +1350,77 @@ type streamToolCall struct {
 	} `json:"function"`
 }
 
+// ─── 同批工具调用的"未执行回执" ──────────────────────────────────────
+//
+// 一条 assistant 消息可以声明**多个** tool_call（模型的并行工具调用）。上游要求每个
+// tool_call_id 都有一条 tool 回执紧跟其后；但比协议更要紧的是**执行**不能丢。
+//
+// v1.4.0 实测事故（用户报告）：一次声明 2 个调用（session_list + session_context）时，
+// 自主循环只取了 ToolCalls[0]，第二个既不执行、也没有任何日志——审计里只有 1 条
+// [agent-audit]，历史里则是"声明 2 个、回执 1 条"。协议层的 400 由装配出口的
+// sanitizeToolPairs 补"未完成"回执兜住了，但**模型的意图被静默篡改**：它以为两个工具
+// 都跑过了。根因与修复见 RunAgent 里工具执行段。
+//
+// 下面三个函数是"要么执行、要么明确回执"这条不变量的实现：任何提前收敛/挂起的分支在
+// return 之前，为不会再执行的调用补一条如实写着"未执行"的回执，并逐条写审计日志。
+
+// unexecutedToolReplies 生成"未执行"回执消息（纯函数，便于单测）。
+// 正文如实写"未执行"、不伪造结果：模型据此知道这次动作没有产出，需要时可重新发起。
+func unexecutedToolReplies(calls []ToolCall, reason string) []Message {
+	if len(calls) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "本次执行在它之前就收敛或挂起了"
+	}
+	note := "（该工具调用未执行：" + reason + "。需要的话请重新调用。）"
+	out := make([]Message, 0, len(calls))
+	for _, tc := range calls {
+		out = append(out, Message{Role: "tool", ToolCallID: tc.ID, Content: note})
+	}
+	return out
+}
+
+// fillUnexecutedToolReplies 把"已声明但不会再执行"的调用补进 run.Messages，并逐条审计。
+//
+// 审计行与正常执行共用 component=agent-audit，用 executed=false 区分：于是"跳过一次调用"
+// 在日志里是**可见**的（旧实现里它连一行日志都没有，这是问题最难排查的地方）。
+func fillUnexecutedToolReplies(run *AgentRun, traceID string, calls []ToolCall, reason string) {
+	if len(calls) == 0 {
+		return
+	}
+	run.Messages = append(run.Messages, unexecutedToolReplies(calls, reason)...)
+	for _, tc := range calls {
+		logging.Info("agent-audit", "run=%s trace=%s tool=%s call_id=%s executed=false reason=%s",
+			run.ID, traceID, tc.Function.Name, tc.ID, reason)
+	}
+	run.appendTimeline("tool_skip", fmt.Sprintf("⏭ %d 个同批工具调用未执行：%s", len(calls), reason))
+}
+
+// unhandledCallsAfter 找出"同一条 assistant 消息里排在 callID 之后"的调用。
+//
+// 挂起（审批 / 长任务）时用它把"这批里还有哪些没走到"存进挂起快照，恢复时补回执；
+// 于是"声明 N 个 → 历史里 N 条回执"在挂起路径上同样成立，而不是只依赖装配出口的兜底。
+//
+// 为什么从 run.Messages 反推而不是由调用方传参数：循环总是先写 assistant 消息（含全部
+// tool_calls）再逐个执行，从历史里取声明顺序不会错位；传参一旦错位就会写出配不上声明者的
+// 回执（上游同样拒绝）。找不到声明者时返回 nil，交给 sanitizeToolPairs 装配兜底，不猜。
+func unhandledCallsAfter(msgs []Message, callID string) []ToolCall {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			continue
+		}
+		for j, tc := range m.ToolCalls {
+			if tc.ID == callID {
+				return append([]ToolCall(nil), m.ToolCalls[j+1:]...)
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
 // ─── 自主 Agent 循环 ────────────────────────────────────────────────
 // RunAgent 在后台驱动一个 AgentRun 自主运行：LLM 流式思考 → 若请求工具则
 // 执行并回喂 → 循环 → 直至产出最终答复。全程经 run.Events() 推事件，异步不阻塞。
@@ -1523,180 +1615,226 @@ func (c *Copilot) RunAgent(ctx context.Context, run *AgentRun) (*AgentStream, er
 			return ag, nil
 		}
 
-		// 执行工具调用：一次只做一个（严格串行，避免多任务并发导致结果与任务错位）。
-		// 单个工具（尤其 task_submit/run_command 等下发任务类）执行并 task_wait 完成后，
-		// 把结果以 tool 消息回喂，回到 LLM 决定下一步，保证结果与任务一一对应、不乱序。
-		tc := ag.ToolCalls[0]
-		args := toolArgs(tc.Function.Arguments)
-		// 防死循环（相同工具 + 相同参数）：签名 = 工具名 + 规范化参数 JSON 的 sha256 前 16 hex。
-		// 第 2 次出现 → 工具结果后追加系统提示；第 3 次 → 停止循环（stop_reason=loop_detected）。
-		// 只读工具豁免（查两次同一会话列表是正常行为），理由见 loopGuardAction 注释。
-		level := toolLevel(tc.Function.Name)
-		sig := loopSignature(tc.Function.Name, args)
-		loopSeen[sig]++
-		action := loopGuardAction(loopSeen[sig], level)
-		if action == loopStop {
-			stopReason = stopReasonLoopDetected
-			logging.Warn("ai", "agent run=%s trace=%s stop_reason=%s tool=%s level=%s identical_calls=%d args=%s",
-				run.ID, traceID, stopReason, tc.Function.Name, level, loopSeen[sig], truncate(argsJSON(args), 200))
-			run.setStopReason(stopReason)
-			run.appendTimeline("stop", "🛑 工具 "+tc.Function.Name+" 以相同参数重复调用，已停止（防死循环）trace="+traceID)
-			// 收敛时尽量产出真实报告而不是动作清单（报告里点名是哪个工具/参数触发的）。
-			if len(run.Traces) > 0 {
-				note := stopReasonText(stopReason, runUsage{Turns: turn, ToolCalls: toolCalls}, limits) +
-					fmt.Sprintf(" 触发详情：工具 %s，参数 %s。", tc.Function.Name, truncate(argsJSON(args), 200))
-				if _, rerr := c.finalizeWithReport(ctx, run, note); rerr == nil {
-					return nil, fmt.Errorf("tool loop detected: %s", tc.Function.Name)
-				}
+		// 执行工具调用：一条 assistant 消息里声明的**每个** tool_call 都必须被独立处理
+		// （执行 / 去重回放 / 挂起各按规则走），但严格串行——不并发执行，避免结果与调用错位。
+		//
+		// ⚠️ v1.4.0 修（用户实测"同一条 assistant 消息里的第二个工具调用被静默跳过"）：
+		// 旧实现这里只有一句 `tc := ag.ToolCalls[0]`，处理完第一个调用就进入下一轮 LLM。
+		// 模型一次声明 2 个调用时，第二个**既不执行、也没有任何日志**（审计里只有 1 条
+		// [agent-audit]），而 assistant 消息已经把 2 个调用写进了历史——历史于是成了
+		// "声明 2 个、回执 1 条"。协议层的 400 由装配出口的 sanitizeToolPairs 补"未完成"
+		// 回执兜住，但**执行**是真的丢了：模型以为两个工具都跑过了。
+		//
+		// 现在改为逐个处理。不变量：一条消息声明的 N 个调用，要么各自执行（含去重回放/
+		// 长任务挂起/审批挂起），要么在这里拿到一条明确的"未执行"回执——任何提前收敛的
+		// 分支在 return 之前都必须调 fillUnexecutedToolReplies 把后面的调用补齐。
+		declared := ag.ToolCalls
+		aborted := false
+		for callIdx, tc := range declared {
+			// 工具调用数上限：与同步 runLoop 同一判定，但要**逐个**检查——上限是硬边界，
+			// 一条消息里声明再多也不许超发（旧实现只在轮首查一次，多调用会整批漏检）。
+			if limits.MaxToolCalls > 0 && toolCalls >= limits.MaxToolCalls {
+				stopReason = stopReasonMaxToolCalls
+				logging.Warn("ai", "agent run=%s trace=%s stop_reason=%s tool_calls=%d limit=%d",
+					run.ID, traceID, stopReason, toolCalls, limits.MaxToolCalls)
+				fillUnexecutedToolReplies(run, traceID, declared[callIdx:], "已达本次 run 的工具调用上限")
+				aborted = true
+				break
 			}
-			reply := loopStopReply(tc.Function.Name, args, run.Traces)
-			run.setReply(reply)
-			run.emit(AgentEventFinal, reply, "")
-			run.emitDone()
-			run.setStatus(AgentDone)
-			run.closeEvents()
-			return nil, fmt.Errorf("tool loop detected: %s", tc.Function.Name)
-		}
-
-		// 分级审批护栏：按 ai.consent_policy 判断该等级是否需要用户同意（graded=只读免审、
-		// confirm/danger 需审；all=都要审；off=都不审）。delegate 一律按 danger（toolLevel 硬兜底）。
-		if needsConsent(policy, level) {
-			c.waitForConsent(ctx, run, tc, args, traceID, level)
-			// run 已被挂起（awaiting_consent），停止本轮循环，等 resumeAgentAsync 恢复。
-			return nil, errAgentPaused
-		}
-
-		// 预算计数：本次工具调用计入 max_tool_calls（含下面被去重复用的调用——
-		// 模型确实"发起"了这次调用，占用了本次 run 的动作预算）。
-		toolCalls++
-
-		// 命令级去重（信息收集空转的结构性拦截）：exec/run_command/语义命令若本 run
-		// 已执行成功过，不再向植入端重复下发，直接回放上次完整结果。模型若仍反复要求
-		// 同一命令（execStall≥2），判定为空转 → 强制收敛输出最终情报报告。
-		// 仅「信息收集/侦察」类请求启用，避免误伤提权后的复验命令。
-		if ek := reconExecKey(run, tc.Function.Name, args); ek != "" {
-			if prev, ok := run.getCachedExec(ek); ok {
-				run.mu.Lock()
-				run.execStall++
-				stall := run.execStall
-				run.mu.Unlock()
-				logging.Info("agent-audit", "run=%s trace=%s dedup tool=%s key=%s (stall=%d)", run.ID, traceID, tc.Function.Name, ek, stall)
-				// 回放的是**上次转换后的模型可见文本**（含外置句柄与截断标注），
-				// 因此"去重复用"不会把一份被截断的结果当成完整结果回喂给模型。
-				replay := prev.View
-				if replay.Text == "" {
-					replay = mcp.ModelView{Text: "（该命令已在本次任务中执行过，未产生新信息）"}
+			args := toolArgs(tc.Function.Arguments)
+			// 防死循环（相同工具 + 相同参数）：签名 = 工具名 + 规范化参数 JSON 的 sha256 前 16 hex。
+			// 第 2 次出现 → 工具结果后追加系统提示；第 3 次 → 停止循环（stop_reason=loop_detected）。
+			// 只读工具豁免（查两次同一会话列表是正常行为），理由见 loopGuardAction 注释。
+			level := toolLevel(tc.Function.Name)
+			sig := loopSignature(tc.Function.Name, args)
+			loopSeen[sig]++
+			action := loopGuardAction(loopSeen[sig], level)
+			if action == loopStop {
+				stopReason = stopReasonLoopDetected
+				logging.Warn("ai", "agent run=%s trace=%s stop_reason=%s tool=%s level=%s identical_calls=%d args=%s",
+					run.ID, traceID, stopReason, tc.Function.Name, level, loopSeen[sig], truncate(argsJSON(args), 200))
+				// 本次调用不执行，同一条消息里排在它后面的也不会执行：全部补显式回执。
+				// 绝不"只处理到第一个就 return"——那正是第二个调用被静默跳过的成因。
+				fillUnexecutedToolReplies(run, traceID, declared[callIdx:], "同一批调用触发了防死循环停止")
+				run.setStopReason(stopReason)
+				run.appendTimeline("stop", "🛑 工具 "+tc.Function.Name+" 以相同参数重复调用，已停止（防死循环）trace="+traceID)
+				// 收敛时尽量产出真实报告而不是动作清单（报告里点名是哪个工具/参数触发的）。
+				if len(run.Traces) > 0 {
+					note := stopReasonText(stopReason, runUsage{Turns: turn, ToolCalls: toolCalls}, limits) +
+						fmt.Sprintf(" 触发详情：工具 %s，参数 %s。", tc.Function.Name, truncate(argsJSON(args), 200))
+					if _, rerr := c.finalizeWithReport(ctx, run, note); rerr == nil {
+						return nil, fmt.Errorf("tool loop detected: %s", tc.Function.Name)
+					}
 				}
-				run.appendTimeline("tool_result", "⏭ 重复命令已去重（本次任务已执行过，结果复用）")
-				run.Traces = append(run.Traces,
-					ToolTrace{Name: tc.Function.Name, Args: args, Result: replay.Text}.withResultMeta(replay))
-				run.emit(AgentEventToolResult, toolResultEvent(tc.Function.Name, traceID, replay, ""), "")
-				run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: replay.Text})
-				if action == loopWarn {
-					run.Messages = append(run.Messages, Message{Role: "system", Content: loopNudge(tc.Function.Name, args)})
-				}
-				if stall >= 2 {
-					// 空转判定：同一命令第二次重复且模型仍不收敛 → 强制输出报告，杜绝刷屏
-					return c.finalizeWithReport(ctx, run,
-						"你已两次重复执行同一命令（无新信息）。工具阶段到此为止。")
-				}
-				continue
+				reply := loopStopReply(tc.Function.Name, args, run.Traces)
+				run.setReply(reply)
+				run.emit(AgentEventFinal, reply, "")
+				run.emitDone()
+				run.setStatus(AgentDone)
+				run.closeEvents()
+				return nil, fmt.Errorf("tool loop detected: %s", tc.Function.Name)
 			}
-		}
 
-		// 长任务挂起（v1.4.0 S2）：预估耗时 ≥ 阈值的工具**不再在本循环里同步干等**。
-		// 同步等待会把 Agent 并发槽位（AgentConcurrency 默认 2）占满整个工具耗时
-		// （一个 credentials 就是 180s），期间其它指令只能排队。
-		// 位置刻意放在"命令级去重"之后：命中缓存的重复命令应当直接回放结果，
-		// 而不是再走一次提交/挂起（否则去重对长任务工具形同虚设）。
-		// 判定为纯函数（ShouldSuspendLongTask），预估超时来自创建任务的同一份映射。
-		if c.longTasks != nil {
-			timeoutSec, isTaskTool := c.longTasks.LongTaskPlan(tc.Function.Name, args)
-			if suspend, reason := ShouldSuspendLongTask(c.longTaskPolicy(), tc.Function.Name, isTaskTool, timeoutSec); suspend {
-				if _, ok := c.suspendForTask(ctx, run, tc, args, traceID, turn); ok {
-					logging.Info("ai", "agent run=%s trace=%s 长任务挂起（%s），释放并发槽位等待任务完成",
-						run.ID, traceID, reason)
-					return nil, errAgentAwaitTask
-				}
-				// 提交失败：退回同步路径，让同步 InvokeTool 给出与改造前一致的错误结果。
+			// 分级审批护栏：按 ai.consent_policy 判断该等级是否需要用户同意（graded=只读免审、
+			// confirm/danger 需审；all=都要审；off=都不审）。delegate 一律按 danger（toolLevel 硬兜底）。
+			// 挂起快照里会记下"同一批里还有哪些调用没走到"（unhandledCallsAfter），
+			// 恢复时补回执——挂起路径同样不允许"声明了却不执行也不回执"。
+			if needsConsent(policy, level) {
+				c.waitForConsent(ctx, run, tc, args, traceID, level)
+				// run 已被挂起（awaiting_consent），停止本轮循环，等 resumeAgentAsync 恢复。
+				return nil, errAgentPaused
 			}
-		}
 
-		// 执行工具
-		run.emit(AgentEventToolStart, ToolStart{Name: tc.Function.Name, Args: args, TraceID: traceID}, "")
-		run.appendTimeline("tool_start", tc.Function.Name+" "+truncate(tc.Function.Arguments, 160))
-		result, err := c.executor.InvokeTool(tc.Function.Name, args)
-		trace := ToolTrace{Name: tc.Function.Name, Args: args}
-		var out string
-		if err != nil {
-			out = "error: " + err.Error()
-			trace.Error = err.Error()
-		} else {
-			if b, jerr := json.Marshal(result); jerr == nil {
-				out = string(b)
-			} else {
-				out = fmt.Sprintf("%v", result)
-			}
-		}
+			// 预算计数：本次工具调用计入 max_tool_calls（含下面被去重复用的调用——
+			// 模型确实"发起"了这次调用，占用了本次 run 的动作预算）。
+			toolCalls++
 
-		// 唯一的"结果 → 模型可见文本"转换点（与同步循环、审批恢复路径同一实现）：
-		// 超限结果落盘为句柄，模型只看到摘要 + 显式截断说明 + 回读指引。
-		view := c.toolResultView(resultRef{
-			Tool: tc.Function.Name, CallID: tc.ID, RunID: run.ID, TraceID: traceID,
-		}, out)
-		trace.Result = view.Text
-		trace = trace.withResultMeta(view)
-
-		// 命令执行成功后写入去重缓存（仅成功结果可回放，失败不缓存允许重试）。
-		// 缓存的是转换后的 ModelView：回放时句柄与截断标注一并复用。
-		if err == nil && trace.Error == "" && !strings.Contains(out, `"failed"`) && !strings.Contains(out, `"exit_code":-1`) {
+			// 命令级去重（信息收集空转的结构性拦截）：exec/run_command/语义命令若本 run
+			// 已执行成功过，不再向植入端重复下发，直接回放上次完整结果。模型若仍反复要求
+			// 同一命令（execStall≥2），判定为空转 → 强制收敛输出最终情报报告。
+			// 仅「信息收集/侦察」类请求启用，避免误伤提权后的复验命令。
 			if ek := reconExecKey(run, tc.Function.Name, args); ek != "" {
-				run.rememberExec(ek, cachedExec{OK: true, Full: view.Text, View: view, Brief: truncate(summarizeToolResult(tc.Function.Name, out), 300)})
+				if prev, ok := run.getCachedExec(ek); ok {
+					run.mu.Lock()
+					run.execStall++
+					stall := run.execStall
+					run.mu.Unlock()
+					logging.Info("agent-audit", "run=%s trace=%s dedup tool=%s key=%s (stall=%d)", run.ID, traceID, tc.Function.Name, ek, stall)
+					// 回放的是**上次转换后的模型可见文本**（含外置句柄与截断标注），
+					// 因此"去重复用"不会把一份被截断的结果当成完整结果回喂给模型。
+					replay := prev.View
+					if replay.Text == "" {
+						replay = mcp.ModelView{Text: "（该命令已在本次任务中执行过，未产生新信息）"}
+					}
+					run.appendTimeline("tool_result", "⏭ 重复命令已去重（本次任务已执行过，结果复用）")
+					run.Traces = append(run.Traces,
+						ToolTrace{Name: tc.Function.Name, Args: args, Result: replay.Text}.withResultMeta(replay))
+					run.emit(AgentEventToolResult, toolResultEvent(tc.Function.Name, traceID, replay, ""), "")
+					run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: replay.Text})
+					if action == loopWarn {
+						run.Messages = append(run.Messages, Message{Role: "system", Content: loopNudge(tc.Function.Name, args)})
+					}
+					if stall >= 2 {
+						// 空转判定：同一命令第二次重复且模型仍不收敛 → 强制输出报告，杜绝刷屏。
+						// 同一条消息里排在它后面的调用这次不会再执行：先补显式回执再收敛。
+						fillUnexecutedToolReplies(run, traceID, declared[callIdx+1:],
+							"同一批的前一个命令被判定为空转，工具阶段提前收敛")
+						return c.finalizeWithReport(ctx, run,
+							"你已两次重复执行同一命令（无新信息）。工具阶段到此为止。")
+					}
+					continue
+				}
 			}
-		}
 
-		// 失败刹车：连续失败 >= 3 次 → 强制收敛，输出已完成动作+下一步建议，不再让 LLM 无限瞎试。
-		isFail := err != nil || trace.Error != "" || strings.Contains(out, `"failed"`) || strings.Contains(out, `"exit_code":-1`)
-		if isFail {
-			consecutiveFail++
-			run.appendTimeline("tool_result", "❌ "+tc.Function.Name+": "+truncate(trace.Error, 200))
-		} else {
-			consecutiveFail = 0
-			run.appendTimeline("tool_result", "✅ "+tc.Function.Name+" → "+truncate(summarizeToolResult(tc.Function.Name, out), 220))
-		}
-		if consecutiveFail >= 3 {
-			logging.Warn("ai", "agent run=%s trace=%s: %d consecutive failures, converging to summary", run.ID, traceID, consecutiveFail)
+			// 长任务挂起（v1.4.0 S2）：预估耗时 ≥ 阈值的工具**不再在本循环里同步干等**。
+			// 同步等待会把 Agent 并发槽位（AgentConcurrency 默认 2）占满整个工具耗时
+			// （一个 credentials 就是 180s），期间其它指令只能排队。
+			// 位置刻意放在"命令级去重"之后：命中缓存的重复命令应当直接回放结果，
+			// 而不是再走一次提交/挂起（否则去重对长任务工具形同虚设）。
+			// 判定为纯函数（ShouldSuspendLongTask），预估超时来自创建任务的同一份映射。
+			// 挂起快照同样会记下"同一批里还有哪些调用没走到"（见 suspendForTask 里的 unhandled），
+			// 任务结果回来恢复时补回执。
+			if c.longTasks != nil {
+				timeoutSec, isTaskTool := c.longTasks.LongTaskPlan(tc.Function.Name, args)
+				if suspend, reason := ShouldSuspendLongTask(c.longTaskPolicy(), tc.Function.Name, isTaskTool, timeoutSec); suspend {
+					if _, ok := c.suspendForTask(ctx, run, tc, args, traceID, turn); ok {
+						logging.Info("ai", "agent run=%s trace=%s 长任务挂起（%s），释放并发槽位等待任务完成",
+							run.ID, traceID, reason)
+						return nil, errAgentAwaitTask
+					}
+					// 提交失败：退回同步路径，让同步 InvokeTool 给出与改造前一致的错误结果。
+				}
+			}
+
+			// 执行工具
+			run.emit(AgentEventToolStart, ToolStart{Name: tc.Function.Name, Args: args, TraceID: traceID}, "")
+			run.appendTimeline("tool_start", tc.Function.Name+" "+truncate(tc.Function.Arguments, 160))
+			result, err := c.executor.InvokeTool(tc.Function.Name, args)
+			trace := ToolTrace{Name: tc.Function.Name, Args: args}
+			var out string
+			if err != nil {
+				out = "error: " + err.Error()
+				trace.Error = err.Error()
+			} else {
+				if b, jerr := json.Marshal(result); jerr == nil {
+					out = string(b)
+				} else {
+					out = fmt.Sprintf("%v", result)
+				}
+			}
+
+			// 唯一的"结果 → 模型可见文本"转换点（与同步循环、审批恢复路径同一实现）：
+			// 超限结果落盘为句柄，模型只看到摘要 + 显式截断说明 + 回读指引。
+			view := c.toolResultView(resultRef{
+				Tool: tc.Function.Name, CallID: tc.ID, RunID: run.ID, TraceID: traceID,
+			}, out)
+			trace.Result = view.Text
+			trace = trace.withResultMeta(view)
+
+			// 命令执行成功后写入去重缓存（仅成功结果可回放，失败不缓存允许重试）。
+			// 缓存的是转换后的 ModelView：回放时句柄与截断标注一并复用。
+			if err == nil && trace.Error == "" && !strings.Contains(out, `"failed"`) && !strings.Contains(out, `"exit_code":-1`) {
+				if ek := reconExecKey(run, tc.Function.Name, args); ek != "" {
+					run.rememberExec(ek, cachedExec{OK: true, Full: view.Text, View: view, Brief: truncate(summarizeToolResult(tc.Function.Name, out), 300)})
+				}
+			}
+
+			// 失败刹车：连续失败 >= 3 次 → 强制收敛，输出已完成动作+下一步建议，不再让 LLM 无限瞎试。
+			isFail := err != nil || trace.Error != "" || strings.Contains(out, `"failed"`) || strings.Contains(out, `"exit_code":-1`)
+			if isFail {
+				consecutiveFail++
+				run.appendTimeline("tool_result", "❌ "+tc.Function.Name+": "+truncate(trace.Error, 200))
+			} else {
+				consecutiveFail = 0
+				run.appendTimeline("tool_result", "✅ "+tc.Function.Name+" → "+truncate(summarizeToolResult(tc.Function.Name, out), 220))
+			}
+			if consecutiveFail >= 3 {
+				logging.Warn("ai", "agent run=%s trace=%s: %d consecutive failures, converging to summary", run.ID, traceID, consecutiveFail)
+				run.Traces = append(run.Traces, trace)
+				run.emit(AgentEventToolResult, toolResultEvent(tc.Function.Name, traceID, view, trace.Error), "")
+				// 这次调用**已经执行**（只是失败了），回执必须留在历史里：否则装配出口会把它
+				// 当成"未完成调用"补一条与事实不符的说明，模型也看不到失败原因。
+				run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: view.Text})
+				logging.Info("agent-audit", "run=%s trace=%s tool=%s level=%s call_id=%s args=%s ok=%v err=%v",
+					run.ID, traceID, tc.Function.Name, level, tc.ID, truncate(tc.Function.Arguments, 200), trace.Error == "", trace.Error)
+				// 同一条消息里排在它后面的调用不会再执行：补显式回执，不静默丢弃。
+				fillUnexecutedToolReplies(run, traceID, declared[callIdx+1:],
+					"同一批的前一个工具连续失败，工具阶段已强制收敛")
+				// 收敛时尽量产出真实报告而不是动作清单
+				if len(run.Traces) > 0 {
+					if _, rerr := c.finalizeWithReport(ctx, run, "工具连续失败多次，工具阶段到此为止。"); rerr == nil {
+						return nil, fmt.Errorf("%d consecutive tool failures", consecutiveFail)
+					}
+				}
+				summary := buildActionSummary(run.Traces)
+				run.setReply(summary)
+				run.emit(AgentEventFinal, summary, "")
+				run.emitDone()
+				run.setStatus(AgentDone)
+				run.closeEvents()
+				return nil, fmt.Errorf("%d consecutive tool failures", consecutiveFail)
+			}
+
 			run.Traces = append(run.Traces, trace)
 			run.emit(AgentEventToolResult, toolResultEvent(tc.Function.Name, traceID, view, trace.Error), "")
-			// 收敛时尽量产出真实报告而不是动作清单
-			if len(run.Traces) > 0 {
-				if _, rerr := c.finalizeWithReport(ctx, run, "工具连续失败多次，工具阶段到此为止。"); rerr == nil {
-					return nil, fmt.Errorf("%d consecutive tool failures", consecutiveFail)
-				}
+			run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: view.Text})
+			// 第 2 次相同签名：**工具结果之后**追加一条系统提示，要求换策略或直接给结论。
+			// 多数情况下模型只是没意识到自己在重复，提示一次比直接掐断更有效。
+			if action == loopWarn {
+				run.Messages = append(run.Messages, Message{Role: "system", Content: loopNudge(tc.Function.Name, args)})
+				run.appendTimeline("loop_warn", "⚠️ "+tc.Function.Name+" 相同参数重复调用，已追加换策略提示")
 			}
-			summary := buildActionSummary(run.Traces)
-			run.setReply(summary)
-			run.emit(AgentEventFinal, summary, "")
-			run.emitDone()
-			run.setStatus(AgentDone)
-			run.closeEvents()
-			return nil, fmt.Errorf("%d consecutive tool failures", consecutiveFail)
-		}
 
-		run.Traces = append(run.Traces, trace)
-		run.emit(AgentEventToolResult, toolResultEvent(tc.Function.Name, traceID, view, trace.Error), "")
-		run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: tc.ID, Content: view.Text})
-		// 第 2 次相同签名：**工具结果之后**追加一条系统提示，要求换策略或直接给结论。
-		// 多数情况下模型只是没意识到自己在重复，提示一次比直接掐断更有效。
-		if action == loopWarn {
-			run.Messages = append(run.Messages, Message{Role: "system", Content: loopNudge(tc.Function.Name, args)})
-			run.appendTimeline("loop_warn", "⚠️ "+tc.Function.Name+" 相同参数重复调用，已追加换策略提示")
+			// 动作审计：记录 agent 每次工具调用（trace/等级/调用 id/工具名/参数/成败），供追溯/合规。
+			// 结构化日志 component=agent-audit（可按该组件过滤审计轨迹）。
+			logging.Info("agent-audit", "run=%s trace=%s tool=%s level=%s call_id=%s args=%s ok=%v err=%v",
+				run.ID, traceID, tc.Function.Name, level, tc.ID, truncate(tc.Function.Arguments, 200), trace.Error == "", trace.Error)
 		}
-
-		// 动作审计：记录 agent 每次工具调用（trace/等级/调用 id/工具名/参数/成败），供追溯/合规。
-		// 结构化日志 component=agent-audit（可按该组件过滤审计轨迹）。
-		logging.Info("agent-audit", "run=%s trace=%s tool=%s level=%s call_id=%s args=%s ok=%v err=%v",
-			run.ID, traceID, tc.Function.Name, level, tc.ID, truncate(tc.Function.Arguments, 200), trace.Error == "", trace.Error)
+		if aborted {
+			// 单轮工具调用数已达上限（剩余调用已补"未执行"回执）：走收尾逻辑，
+			// 与同步 runLoop 的 budgetExhausted 同一处理方式。
+			break
+		}
 	}
 
 	// 预算耗尽（轮次 / 工具调用数 / 墙钟 / token）：不静默中断——先让模型基于已收集结果整理
@@ -1928,6 +2066,9 @@ func (c *Copilot) waitForConsent(ctx context.Context, run *AgentRun, tc ToolCall
 		args:     args,
 		traces:   append([]ToolTrace(nil), run.Traces...),
 		traceID:  traceID,
+		// 同一条 assistant 消息里排在它后面的调用本次也不会执行：记进快照，
+		// 恢复（ResolveAgentConsent）时补"未执行"回执，不静默丢弃。
+		unhandled: unhandledCallsAfter(run.Messages, tc.ID),
 	}
 	run.mu.Unlock()
 	run.setStatus(AgentWaitConsent)

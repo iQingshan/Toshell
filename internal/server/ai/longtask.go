@@ -165,6 +165,9 @@ type pendingTaskState struct {
 	traces   []ToolTrace
 	traceID  string
 	handle   LongTaskHandle
+	// unhandled 同一条 assistant 消息里排在挂起调用之后、本次不会执行的调用。
+	// 任务结果回来恢复时逐个补"未执行"回执（见 unexecutedToolReplies）。
+	unhandled []ToolCall
 }
 
 // suspendForTask 提交长任务并把 run 置为等待态（不设终态、不关事件通道）。
@@ -198,6 +201,8 @@ func (c *Copilot) suspendForTask(ctx context.Context, run *AgentRun, tc ToolCall
 		traces:   append([]ToolTrace(nil), run.Traces...),
 		traceID:  traceID,
 		handle:   h,
+		// 同一批里排在它后面的调用本次不会执行：记进快照，恢复时补回执（不静默丢弃）。
+		unhandled: unhandledCallsAfter(run.Messages, tc.ID),
 	}
 	run.WaitingOn = h.WaitingOn
 	run.Status = AgentWaitTask
@@ -272,17 +277,26 @@ func (c *Copilot) CompleteTaskResume(run *AgentRun, rctx TaskResumeContext, resu
 	run.StopReason = ""
 	run.Status = AgentRunning
 	run.UpdatedAt = time.Now()
+	// unhandled 同一条消息里排在挂起调用之后、本次不会执行的调用（锁外补回执用）。
+	var unhandled []ToolCall
 	if p != nil {
 		// 用挂起时的消息快照作为基础（与审批恢复同一做法）：避免恢复期间对 run.Messages
 		// 的其它追加导致同一批消息被写两遍。
 		run.Traces = append(run.Traces, p.traces...)
 		run.Messages = append(append([]Message(nil), p.messages...),
 			Message{Role: "tool", ToolCallID: rctx.CallID, Content: view.Text})
+		unhandled = p.unhandled
 	} else {
+		// （Rebuild 路径下没有挂起快照，缺少的配对由 sanitizeToolPairs 在装配出口兜底。）
 		run.Messages = append(run.Messages, Message{Role: "tool", ToolCallID: rctx.CallID, Content: view.Text})
 	}
 	run.Traces = append(run.Traces, trace)
 	run.mu.Unlock()
+
+	// 同一批里排在挂起调用之后的其它调用：本次没被执行 → 补显式回执，不静默丢弃。
+	// 刻意放在锁外：fillUnexecutedToolReplies 会写 timeline，而 timeline 自己加锁。
+	fillUnexecutedToolReplies(run, rctx.TraceID, unhandled,
+		"同一批的前一个调用转为长任务等待，本次未执行")
 
 	status := "✅ 任务已返回"
 	if resultErr != nil {
