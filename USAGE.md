@@ -1,6 +1,6 @@
 # ToShell Team Server 使用说明
 
-> **当前版本: v1.4.0(2026-09,开发中)** · 更新日志见文末「附」章节。
+> **当前版本: v1.4.0(2026-09-28 已发布)** · 更新日志见 [CHANGELOG.md](CHANGELOG.md) 与文末「附」章节。
 
 > ToShell 是一个自托管的 C2(命令与控制)框架,用于授权红队演练、渗透测试与安全研究。请仅在获得授权的前提下使用。
 
@@ -544,6 +544,17 @@ python scripts/reset_release_db.py --db release/data/toshell.db
 ---
 
 ## 附、更新日志与新增功能
+
+### v1.4.0(2026-09-28)
+
+- **开放 MCP 接口 + 公共执行基础设施(S1)**:工具元数据单源化——38 个工具(37 + 回读元工具 `result_read`)按 read 13 / confirm 14 / danger 11 分档,`GET /api/v1/mcp/tools`、内置 AI function schema 与 MCP `tools/list` 三处同源;所有工具统一结果信封 `{status,data,error,meta}`,超限结果落盘 `data/mcp-results/` 并用 `result_read` 分页回读(不再静默截断);审批从"允许列表 + fail-open"改为**默认危险、只读白名单免审批**,并修掉 `plugin_upload`/`fileless_exec` 的路径穿越;对外 MCP 服务端 `mcp.*` 默认关闭、只绑回环、必须有 token。
+- **Agent 长任务可靠性(S2)**:任务等待改**事件驱动**(不再 sleep 轮询)、4 张 `agent_*` 表落盘 + 重启对账;长结果外置成句柄;上下文按常驻/任务/工作/历史四层装配 + `max_context_tokens`/`max_run_tokens` 双预算(超预算先压缩后停止);SSE 支持 `Last-Event-ID` 断点续传,事件缺口用 `resync` 显式告知;三处硬上限 + 防死循环;离线黄金集 12 例随 CI 跑。
+- **免杀分层治理(S3)**:字符串混淆补齐转义字面量与反引号原始字符串、DLL 路径降特征;签名顺序契约(`finalize_order.go`,**签名必须是最后一步**);Go 版本串全文件擦除;PE 资源/图标/版本信息/时间戳(步骤 `pe_resource_patch`,**默认不注入**)+ 一键中性预设 `resource_preset="neutral"`;节名规范化(步骤 `section_normalize`,**默认执行**,实测 −512 B、节数 6→5);顺带修掉"用了资源预设的载荷无法运行"的回归(五份产物 `LoadLibraryEx` 5/5 通过)。
+- **体积分档与内存加载(S4)**:新增 `exec_module` 内存模块(ABI v1 + 一次性 token + 9 步校验链,`-tags execmodule` 门控);会话能力位图 `internal/common/features` 改由载荷上报(light 11 项 / full 31 项),不再给未编译进载荷的能力造"点了没反应"的假面板。发布版实测:light/tcp 2,946,805 B、execmodule 门控 +27,136 B、full 相对 light +575,488 B;`nano ≤1.8 MB` 与传输栈模块化**已定论不做**。
+- **低特征通道(S5)**:`listener.ws_path` 只对一条路径升级(变形路径与不完整握手一律普通 404,不再回 `Sec-Websocket-Version`)、`listener.ws_host_allowlist` 收窄 Host、植入端 WS 与 HTTP 同口径吃 `front_domain`;不支持中继的通道从"静默失败"改为明确 **409**。
+- **杀软对抗分级 AV-Ops(S6)**:新增 `GET/POST /api/v1/av-ops` 与 `GET/POST /api/v1/sessions/{id}/av-ops`(七步前置检查 + `impact{}`/`checks[]`/`warnings[]` + 中文原因,排障先看后者);L0 侦察默认开、L1 温和需二次确认、**L2+ 出厂关闭**且 fail-closed;破坏性任务**禁止服务端自动重投递**;控制台新增「对抗分级」面板;**内存执行加固**(`exe_mem`/`dll` 载荷退出不再带走宿主,stdout/stderr 回传)与**配置热重载报错可见**同版落地。
+- **AI/agent 修复**:流式调用改**空闲超时**(`ai.timeout` = 连续多久没收到数据)且出错兜底必带失败原因;上游缺 tool_call id 时补稳定 id,新增 `context.sanitizeToolPairs()` 在装配出口补齐"未完成回执"(不伪造结果),修掉 `assistant.tool_calls` 与 `tool` 不成对导致的 400。
+- **如实边界(未验证/未做)**:真实证书/EV 与目标机信任链、真实 CDN 域前置、`wss` 真实证书链、uTLS/JA3 指纹、HTTP/2 均**未落地**;AV-Ops 的 **L2/L3/L4 从未在真机执行**(L4 无落地动作);`exec_module` 只真机跑过 **TCP** 通道、单帧上限 4 MiB(未做分块);内存执行加固只覆盖 IAT 间接调用(**inline hook 未做**),**无控制台启动时捕获不到 stdout**;`nano ≤1.8 MB` 在 Go 里做不到。逐条实现细节与全部未验证项见 `CHANGELOG.md` 的 v1.4.0 段。
 
 ### v1.3.5(2026-09)
 

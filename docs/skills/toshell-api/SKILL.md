@@ -5,7 +5,7 @@ description: 通过 REST API 远程驱动 ToShell C2 团队服务器 —— 认�
 
 # ToShell C2 — REST API 调用参考（AI Skill）
 
-**适用版本：v1.4.0（开发中；上一发布版 v1.3.5）。** 端点与字段取自源码：路由见 `internal/server/api/api.go` 的 `setupRoutes`，响应形状见 `handlers_*.go`/`json_response.go`，配置键见 `configs/server.yaml.example`。
+**适用版本：v1.4.0（2026-09-28 已发布；上一发布版 v1.3.5）。** 端点与字段取自源码：路由见 `internal/server/api/api.go` 的 `setupRoutes`，响应形状见 `handlers_*.go`/`json_response.go`，配置键见 `configs/server.yaml.example`。
 
 > ⚠️ **授权纪律**：只操作**用户明确授权**的服务器与目标会话；命令执行、凭据收集、注入、内存/驱动加载等影响会话的操作先确认用户意图，`ai.consent_mode=normal` 时还需走审批端点。
 
@@ -467,4 +467,4 @@ curl -s -X POST http://127.0.0.1:18082/mcp -H "Authorization: Bearer $MCP_TOKEN"
 
 
 
-> 版本契约：本文面向 **v1.4.0（开发中；上一发布版 v1.3.5）**。端点以运行中服务的 `GET /api/v1/mcp/tools`、`GET /api/v1/builders`、`GET /api/v1/av-ops` 与源码为准；如与本文不符，以运行服务为准并回写本文。
+> 版本契约：本文面向 **v1.4.0（2026-09-28 已发布；上一发布版 v1.3.5）**。端点以运行中服务的 `GET /api/v1/mcp/tools`、`GET /api/v1/builders`、`GET /api/v1/av-ops` 与源码为准；如与本文不符，以运行服务为准并回写本文。

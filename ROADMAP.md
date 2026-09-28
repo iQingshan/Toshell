@@ -6,7 +6,7 @@
 
 ---
 
-## 当前版本状态（v1.3.5 已发布）
+## 当前版本状态（v1.4.0 已发布 · 2026-09-28；下表为 v1.3.5 基线）
 
 | 能力 | 状态 |
 |---|---|
@@ -30,7 +30,7 @@
 
 ---
 
-## v1.4.0 迭代计划（分阶段落地，当前目标）
+## v1.4.0 迭代计划（已随 v1.4.0 发布落地 · 剩余项转入「后续优化清单」）
 
 > **执行方式**：分 6 个阶段，每阶段**先在本地完成实现与验证**（编译 / 类型检查 / 单元测试 / 本地服务端与 UI 联调），确认通过后再提交推送。
 > **详细方案**（接口签名、DDL、YAML、协议报文、里程碑人日、验证矩阵）保存在本地文档 `docs/plan/*.md` 与 `docs/PLAN-NEXT-ROUND.md`（**不入库**）；本节即为其入库版本。
@@ -50,9 +50,9 @@
 | **S3** 落地链与验收环境 | ❌ 未开工（缺验收环境与材料） | 8 条链目前只有**命令模板与降级建议**，无一条真机落地记录；本机未签名 PE 在**进程创建阶段**即被拒（连 Hello-World Go 也一样）→ 本机做不出运行期结论；两级验收环境至今未建立 | 真实证书/EV + 信任链落地；白加黑 / 不落 PE 加器链真机实测；干净 VM（仅 Defender）+ 装 360 的目标机 + 宿主 exe/DLL/SCT 素材 |
 | **S3** 动态免杀批次 2（C2 地址/sessionID 改 `[]byte` 纳入 sleep mask、启动期 ntdll 脱钩 + ETW patch、单稳加固） | ❌ 未开工 | 批次 1（sleep mask / 去 RWX / apihash）已实现但**运行期零实测**；批次 2 未动一行代码，且依赖批次 1 的验收环境 | 同上一行（放行环境 / 目标机）；另需把 `docs/EVASION.md` §3.1 的动态测试矩阵脚本化 |
 | **S4** 能力位图（前置阻塞项） | ✅ 完成 | `internal/common/features` 唯一纯函数（档案/tag/OS → 能力集 + `tabs` + `cap:v1:<hex>`）烘进载荷并随心跳上报；服务端 `Resolve()` 上报优先、老载荷按 OS 兜底并标 `source`。实测 light 载荷 **11 项**能力、tabs 仅 av·files·info·process·shell；full **31 项** | 无（"light 档也点亮注入/截图按钮"的旧缺陷已修） |
-| **S4** `exec_module` 契约与 ABI | ✅ 完成 | `internal/common/moduleabi`（ABI v1，三份副本单测钉住）+ 一次性 token + 9 步校验链 + `TypeModuleData(0x0E)`；实测门控 **+26,112 B**、示例模块 **7,680 B**、`credentials` 搬模块可省 **67,584 B**；真机 E2E **21/21**、两份植入端镜像 **63 文件 SHA-256 一致** | 已知边界：**只真机测过 TCP 通道**（HTTP/WS/MQTT 已接线未真机跑）；单帧上限 **4 MiB** 未做分块；**未暴露给 MCP/Agent 工具面** |
-| **S4** 体积实测矩阵（V0~V7） | ✅ 完成 | windows/386 同参数实测：地板 801,280 B；核心标准库地板 2,010,624 B；light/tcp 2,895,093 B；+`bof` = **0**；+`evasionscan` = +7,168 B；http +2,508,801 B；websocket +2,149,382 B；mqtt +2,452,993 B；full/tcp +573,440 B | 无（矩阵已落成本文件 S4 阶段的表格） |
-| **S4** 体积分档结论（nano / light / full） | 🟡 部分完成 | light / full 两档已实现且有实测；但**目标体积未达成**（light 实测 2.90 MB > 目标 2.4 MB；full 3.47 MB > 目标 3.2 MB）；且**默认档仍是 `full`**（代码事实：`features.NormalizeProfile("")` → full、前端生成载荷页默认 `profile:'full'`）—— 本文件旧版"默认档改为 light"的说法与代码不符，已更正 | ① 默认档是否改 `light` 需明确定论；② `light ≤2.4 MB` 只能靠 stdlib 瘦身（手写 JSON/精简 `fmt`、避开 `crypto/tls`）后重测；③ 每档的功能对账表与构建命令待补齐 |
+| **S4** `exec_module` 契约与 ABI | ✅ 完成 | `internal/common/moduleabi`（ABI v1，三份副本单测钉住）+ 一次性 token + 9 步校验链 + `TypeModuleData(0x0E)`；实测门控 **+27,136 B**、示例模块 **7,680 B**、`credentials` 搬模块可省 **67,584 B**；真机 E2E **21/21**、两份植入端镜像 **63 文件 SHA-256 一致** | 已知边界：**只真机测过 TCP 通道**（HTTP/WS/MQTT 已接线未真机跑）；单帧上限 **4 MiB** 未做分块；**未暴露给 MCP/Agent 工具面** |
+| **S4** 体积实测矩阵（V0~V7） | ✅ 完成 | windows/386 同参数实测（发布版口径）：地板 801,280 B；核心标准库地板 2,010,624 B；light/tcp **2,946,805 B**；+`bof` = **0**；+`evasionscan` = +7,168 B；http **+2,508,808 B**；websocket **+2,150,923 B**；mqtt +2,452,993 B；full/tcp **+575,488 B** | 无（矩阵已落成本文件 S4 阶段的表格） |
+| **S4** 体积分档结论（nano / light / full） | 🟡 部分完成 | light / full 两档已实现且有实测；但**目标体积未达成**（light 实测 2.95 MB > 目标 2.4 MB；full 3.52 MB > 目标 3.2 MB）；且**默认档仍是 `full`**（代码事实：`features.NormalizeProfile("")` → full、前端生成载荷页默认 `profile:'full'`）—— 本文件旧版"默认档改为 light"的说法与代码不符，已更正 | ① 默认档是否改 `light` 需明确定论；② `light ≤2.4 MB` 只能靠 stdlib 瘦身（手写 JSON/精简 `fmt`、避开 `crypto/tls`）后重测；③ 每档的功能对账表与构建命令待补齐 |
 | **S4** nano（≤1.8 MB） | 🚫 已定论不做 | 实测核心标准库地板 **2.01 MB**（`net`+`json`+`fmt`）已高于 nano 目标 1.8 MB；Go 做不到，要做得换第二套 C 植入端，工作量与维护成本远超收益 | 不排入 v1.4.0；若日后有"≤1.8 MB 且要跨平台"的硬需求再单独立项 |
 | **S4** 传输栈瘦身与模块化 | 🚫 已定论不做 | 实测 http/ws/mqtt 各 +2.1~2.5 MB，但这是 `net/http` + `crypto/tls` 的成本、**不是可裁剪的冗余**：现有构建已按通道 tag 只编一个传输，没有重复可回收；想省只能手写 TLS（不现实且不安全）或换 uTLS（只会更大） | 保持现状；把"要小就选 tcp 档"写进分档说明即可，不再为此投入 |
 | **S4 / P2** 工具库与远程加载 | ❌ 未开工 | 代码事实：`data/tools/` 下只有 `.gitkeep`，无 `manifest.json`、无任何工具、无下载校验代码 | 目录规范 + `manifest.json`（sha256/来源/许可）+ 远程加载闭环「下载→校验→内存加载→执行→回传→清理」；需第三方下载源与哈希清单策略（第 7 项） |
@@ -67,7 +67,7 @@
 | **S6** 屏幕流 / 截图跨平台（P0-3） | ❌ 未开工 | 代码事实：只有 Windows 实现（GDI BitBlt + PrintWindow 回退）；`screen_stream_unix.go` 是 stub（`//go:build !windows && !light`，直接返回 "only supported on Windows"）；无 X11 / ScreenCaptureKit / DXGI 代码 | Linux(X11) / macOS(ScreenCaptureKit) / Windows DXGI 增量捕获；三项都必须真机验证（第 9 项） |
 | **S6** 工程收尾（P3） | ❌ 未开工 | `scripts/e2e_smoke.ps1` 已存在但**未接进 CI**；前端任务列表虚拟滚动、Sessions/仪表盘 WS 事件统一订阅、运行指标上界面、服务端在线更新均无实现 | e2e 接 CI（零依赖可先做）；多通道语义对齐；配置热更新边界文档化；前端虚拟滚动 + WS 统一订阅；可观测性上界面；自更新（需先做服务化守护 + 可信更新源决策，第 10 项） |
 
-### 后续优化清单（按优先级，v1.4.0 收尾）
+### 后续优化清单（按优先级，v1.4.0 发布后收尾）
 
 > **排序依据**：① 先修**用户已实测到的**正确性/可观察性缺陷（改动小、收益直观）→ ② 再处置**已有半成品**（丢掉就白丢）→ ③ 再做**零外部材料依赖**的纯代码项（可与其他项并行）→ ④ 最后做"**没有操作员提供的材料就无法验收**"的事，并按"谁阻塞谁"排（S3 验收环境是动态批次 2 与 S6 真机验证的共同前置，所以排在它们前面）。
 > 本清单取代旧版「下一步优先级」表：编号即执行顺序，每项补齐"做什么 / 为什么 / 验收口径 / 需要你提供什么"四段。
@@ -214,9 +214,9 @@
 
 **✅ 已完成**
 - **能力位图（前置阻塞项）**：`/sessions/{id}/capabilities` 原来**只按 OS** 推导（用 `light` 档构建的载荷照样点亮注入/截图/凭据/EDR/BYOVD 面板，点下去只得到"未包含在精简构建中"）。现在新增 `internal/common/features` 作为**唯一一份纯函数**（档案/tag/OS → 能力集合 + `tabs` + `cap:v1:<hex>` 位图；未知档案 fail-closed 归入 light），构建期把位图烘进载荷（照旧走字符串混淆），植入端经**已有**的 `Modules` 字段随心跳上报（四条传输一致），服务端 `Resolve()` **上报优先、老载荷按 OS 兜底**并标 `source: reported|os_fallback` + `source_note`。**实测**：light 载荷 **11 项**能力 / tabs 只有 av·files·info·process·shell；full 载荷 **31 项**、注入/截图/凭据/EDR/BYOVD/插件按真实编译结果点亮。
-- **内存模块按需裁剪**：现有 `light` 档案已裁掉注入/EDR/凭据/BYOVD/截图/插件/中继（`!light` 构建约束，实测 full−light = **573 KB**，见下表 V6）。**如实边界**：粒度是"整档"—— `injection`/`edr`/`stomp`/`imgexec` 目前**不能各自独立开关 tag**；需要单模块级裁剪时走 `exec_module` 按需加载（下方）。
+- **内存模块按需裁剪**：现有 `light` 档案已裁掉注入/EDR/凭据/BYOVD/截图/插件/中继（`!light` 构建约束，实测 full−light = **+575,488 B（约 575 KB）**，见下表 V6）。**如实边界**：粒度是"整档"—— `injection`/`edr`/`stomp`/`imgexec` 目前**不能各自独立开关 tag**；需要单模块级裁剪时走 `exec_module` 按需加载（下方）。
 - **`exec_module` 契约与 ABI**：新增 `internal/common/moduleabi`（ABI v1 + C 头 `builder/implant_c/module/tsh_module.h`，三份副本由单测钉住）+ `internal/server/modules`（清单 / sha256 硬拦 / 一次性 token）+ 接口 `POST|GET /api/v1/sessions/{id}/module` + 二进制帧 `TypeModuleData(0x0E)`。模块**只接受原生 C PE**（Go/CLR/TLS 目录硬拒 —— 反射映射宿主里跑 Go 模块会出两个 runtime），`tsh_module_main(ctx*)` 拿得到参数与返回值（ctx 只用 ≤4 字节标量，386 用 `__stdcall`）。9 步校验链全部返回机器可读 code + 中文文案：会话 active / 已登记 / **sha256 与大小硬拦** / 架构与 PE 实际位宽一致 / ABI 导出存在（新增 `builder.ExportedNames`）/ 三层版本握手 / token（绑定 session+module+sha256+size+abi、TTL 120s、用后即废）/ 下发 fail-closed / 审计。能力位只追加第 32 位、**不加空面板**，默认载荷零行为变化（无 tag 时 +512 B，给出"未包含在本次构建中"的明确错误而非 `Unknown task type`）。
-- **`exec_module` 实测**（windows/386，同参数）：light/tcp 2,895,605 → light+execmodule 2,921,717（门控 **+26,112**）；示例模块 `cred_probe`（C + `-nostdlib`）**7,680 字节**，把 `credentials` 搬成模块可省 **67,584**。判读：`exec_module` 买到的是"最小载荷 + 按需全功能 + 模块可服务端更新"，**不是**体积数量级下降 —— 真正的数量级在传输栈。
+- **`exec_module` 实测**（windows/386，同参数）：light/tcp 2,946,805 → light+execmodule 2,973,941（门控 **+27,136**）；示例模块 `cred_probe`（C + `-nostdlib`）**7,680 字节**，把 `credentials` 搬成模块可省 **67,584**。判读：`exec_module` 买到的是"最小载荷 + 按需全功能 + 模块可服务端更新"，**不是**体积数量级下降 —— 真正的数量级在传输栈。
 - **模板文件名/函数名中性化**：`exec_module_windows.go`/桩 → `xload_windows.go`/`xload_stub.go`，`handleXLoad`/`handleXData`；E2E 复测 pclntab 内模块相关残留 **1 处 → 0 处**。
 - **体积实测矩阵（V0~V7）**（windows/386，`-s -w -buildid= -H windowsgui -trimpath`，Go 1.20.14；按 1 MB = 10⁶ 字节计）：
 
@@ -224,25 +224,27 @@
 |---|---|---|---|
 | 空程序（地板） | 801,280 | — | **Go runtime 地板 0.80 MB** |
 | 空程序 + `net`+`json`+`fmt`+`os`+`time` | 2,010,624 | — | **核心标准库地板 2.01 MB**（已超 nano 目标 1.8 MB） |
-| V0 light / tcp | 2,895,093 | 基准 | 当前默认档 |
-| V1 light / tcp + `bof` | 2,895,093 | **0** | light 档本就排除 BOF，tag 无效果（与能力位图一致） |
-| V2 light / tcp + `evasionscan` | 2,902,261 | +7,168 | 杀软进程枚举 7 KB |
-| V3 light / **http** | 5,403,894 | **+2,508,801** | 引入 `net/http`+`crypto/tls` |
-| V4 light / **websocket** | 5,044,475 | +2,149,382 | 再叠 gorilla/websocket |
-| V5 light / **mqtt** | 5,348,086 | +2,452,993 | 再叠 MQTT 库 |
-| V6 full / tcp | 3,468,533 | +573,440 | 全部 Windows 可选功能（注入/EDR/凭据/BYOVD/截图/插件/中继） |
-| V7 full / mqtt | 5,921,526 | +3,026,433 | 最重组合 |
+| V0 light / tcp | **2,946,805** | 基准 | 当前默认档 |
+| V1 light / tcp + `bof` | 2,946,805 | **0** | light 档本就排除 BOF，tag 无效果（与能力位图一致） |
+| V2 light / tcp + `evasionscan` | 2,953,973〔换算〕 | +7,168 | 杀软进程枚举 7 KB |
+| V3 light / **http** | 5,455,613 | **+2,508,808** | 引入 `net/http`+`crypto/tls` |
+| V4 light / **websocket** | 5,097,728 | +2,150,923 | 再叠 gorilla/websocket |
+| V5 light / **mqtt** | 5,399,798 | +2,452,993 | 再叠 MQTT 库 |
+| V6 full / tcp | 3,522,293 | **+575,488** | 全部 Windows 可选功能（注入/EDR/凭据/BYOVD/截图/插件/中继） |
+| V7 full / mqtt | 5,975,286〔换算〕 | +3,026,433 | 最重组合 |
 
-  判读：① 体积大头是**传输栈**（http/ws/mqtt 各 +2.1~2.5 MB），比所有功能 tag 加起来（+0.57 MB）还大一个量级；② light/tcp 的 2.90 MB 里 **2.01 MB 是核心标准库地板**，我们的代码只占约 0.89 MB；③ 所以 `light ≤2.4 MB` 只能靠 stdlib 瘦身，`nano ≤1.8 MB` 在 Go 里做不到。
+> **口径说明（2026-09-28 对齐）**：地板两行与 V0 / V3 / V4 / V5 / V6 是**发布版（v1.4.0）工作区**的逐档实测（与 [README.md](README.md)「植入端体积（v1.4.0 本机实测）」同源）；**V2 / V7 未随发布版重测**，其绝对值按"发布版基准 + 同一迭代早期实测增量"换算（V2 = light/tcp + 7,168；V7 = full/tcp + mqtt 增量 2,452,993），标〔换算〕，只作量级参考。本文 **S3 阶段详情**里的绝对字节数（3,469,557 / 3,469,045 / 3,574,517 / 3,574,005）同样是**早期迭代口径**，保留原因：它们只用于支撑"−512 B / 默认不注入时字节数完全一致"这类**相对**结论；绝对体积一律以本表与 README 为准。
+
+  判读：① 体积大头是**传输栈**（http/ws/mqtt 各 +2.1~2.5 MB），比所有功能 tag 加起来（+0.58 MB）还大一个量级；② light/tcp 的 2.95 MB 里 **2.01 MB 是核心标准库地板**，我们的代码只占约 0.94 MB；③ 所以 `light ≤2.4 MB` 只能靠 stdlib 瘦身，`nano ≤1.8 MB` 在 Go 里做不到。
 
 **❌ 未完成 / 待做**
-- **分档与目标体积**：nano / light / full 三档只实现了 light / full；**默认档仍是 `full`**（代码事实：`features.NormalizeProfile("")` → full、前端生成载荷页默认 `profile:'full'` —— 本文件旧版"默认档改为 `light`"的说法与代码不符，已更正）；**目标体积未达成**（light 实测 2.90 MB > 目标 2.4 MB；full 3.47 MB > 目标 3.2 MB）；每档的功能对账表与构建命令待补齐（前端按能力位图的提示已落地）。
+- **分档与目标体积**：nano / light / full 三档只实现了 light / full；**默认档仍是 `full`**（代码事实：`features.NormalizeProfile("")` → full、前端生成载荷页默认 `profile:'full'` —— 本文件旧版"默认档改为 `light`"的说法与代码不符，已更正）；**目标体积未达成**（light 实测 2.95 MB > 目标 2.4 MB；full 3.52 MB > 目标 3.2 MB）；每档的功能对账表与构建命令待补齐（前端按能力位图的提示已落地）。
 - **`exec_module` 的已知边界**：只真机测过 TCP 通道（HTTP/WS/MQTT 已接线并编译通过、未真机跑）；单帧下发上限 **4 MiB**（未做分块）；模块自身字符串是明文（只存操作员 `data/modules/`，按需下发、不落目标磁盘）；token 只在内存（服务端重启使在途 token 失效）；**未暴露给 MCP/Agent 工具面**（保守口径）。
 - **工具库与远程加载（P2）**：`data/tools/` 只有 `.gitkeep`，未开工（见「后续优化清单」第 7 项）。
 
 **🚫 已定论不做**
-- **传输栈瘦身与模块化**：实测 http/ws/mqtt 各 +2.1~2.5 MB（V3/V4/V5），比全部功能 tag 之和（+573 KB）大一个数量级 —— 但这部分是 `net/http` + `crypto/tls` 的成本、**不是可裁剪的冗余**：① 现有构建**已经**按通道 tag 只编一个传输（tcp 档不会带上 http/ws/mqtt 的字节，所以"模块化"并没有可回收的重复）；② 想省下这 2 MB 只能手写 TLS 客户端（不现实且不安全）或换 uTLS（只会更大）。结论：**保持现状**，把"要小就选 tcp 档"写进分档说明即可。
-- **`nano` 档（≤1.8 MB）**：核心标准库地板已 **2.01 MB**（V0 表），nano 只能走 **C 植入端**或手写收发层 / 精简 `fmt`+JSON。**已决定不排入 v1.4.0**（等于第二套植入端，工作量与维护成本都远超收益）；若后续确有"≤1.8 MB 且要跨平台"的硬需求，再单独立项。
+- **传输栈瘦身与模块化**：实测 http/ws/mqtt 各 +2.1~2.5 MB（V3/V4/V5），比全部功能 tag 之和（+575 KB）大一个数量级 —— 但这部分是 `net/http` + `crypto/tls` 的成本、**不是可裁剪的冗余**：① 现有构建**已经**按通道 tag 只编一个传输（tcp 档不会带上 http/ws/mqtt 的字节，所以"模块化"并没有可回收的重复）；② 想省下这 2 MB 只能手写 TLS 客户端（不现实且不安全）或换 uTLS（只会更大）。结论：**保持现状**，把"要小就选 tcp 档"写进分档说明即可。
+- **`nano` 档（≤1.8 MB）**：核心标准库地板已 **2.01 MB**（见上表"空程序 + `net`+`json`+`fmt`+`os`+`time`"行），nano 只能走 **C 植入端**或手写收发层 / 精简 `fmt`+JSON。**已决定不排入 v1.4.0**（等于第二套植入端，工作量与维护成本都远超收益）；若后续确有"≤1.8 MB 且要跨平台"的硬需求，再单独立项。
 
 #### S5 新增低特征通道
 

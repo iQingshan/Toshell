@@ -3,7 +3,7 @@
 > 自托管的 C2（命令与控制）远程管理平台，用于**授权红队演练、渗透测试与安全研究**。
 > **仅限获得授权后使用。** 严禁未授权的入侵 / 攻击 / 数据窃取。
 
-**v1.4.0** · [MIT License](LICENSE) · [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) · 作者：青山 / Q1lintu / c0ffee · 联系：[qingshan@88.com](mailto:qingshan@88.com)
+**v1.4.0**（2026-09-28 已发布） · [MIT License](LICENSE) · [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) · 作者：青山 / Q1lintu / c0ffee · 联系：[qingshan@88.com](mailto:qingshan@88.com)
 
 ---
 
@@ -304,8 +304,8 @@ go build -tags webui -ldflags "-s -w" -o toserver ./cmd/server
   再往下要动的是"不用 Go"或者"把传输栈也模块化"（后者已被否决：模块化传输栈会让最常用的回连路径多一次下发与失败面）。
   这条如实写在这里，避免把"体积分档"误解成"能做到 1 MB 级"。
 
-> 注：[CHANGELOG.md](CHANGELOG.md) 的 S4 段记的是**同一迭代早期**的数字（light/tcp 2,895,605、full 3,469,045），
-> 比上表各小约 50 KB —— 上表是**当前工作区代码**的实测，其后阶段（内存执行加固等）新增的代码也已计入。
+> 注：上表是**发布版（v1.4.0）工作区代码**的本机实测口径；[CHANGELOG.md](CHANGELOG.md) 的 S4 段与本文同口径，
+> 只记相对增量（`execmodule` 门控 +27,136 字节、`full` 相对 `light` +575,488 字节），绝对体积以本表为准。
 
 > ⚠️ **必须知道的边界**：在装有 360/电脑管家等国产安全软件的主机上，**未签名的 PE 会在进程创建阶段被直接拒绝执行并删除文件**（实测：连一个只有 `time.Sleep` 的 Hello-World Go 程序也被拒，而微软签名的 `notepad.exe` 副本可正常执行）。这属于"签名/信誉/策略"拦截，**改载荷代码无用**。v1.3.5 给出的解法是：
 > 1. **签名**：配好证书后勾选「代码签名」重新构建（自签名证书还需导入目标机「受信任的根证书颁发机构」，否则状态是"已签名但链不受信任"，仍可能被拦）；

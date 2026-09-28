@@ -172,7 +172,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.zip }}
-          # 版本号跟随 tag（v1.3.x）；标题也用 tag 名
+          # 版本号跟随 tag（v1.4.x）；标题也用 tag 名
           name: ${{ github.ref_name }}
           # 固定正文：不要用 generate_release_notes —— 它会在每次重跑（多平台矩阵 / 重打 tag）
           # 时重复追加一行 "Full Changelog: ..."，导致正文被刷屏。
