@@ -861,9 +861,20 @@ export const agentApi = {
     api.post<{ run_id: string; status: string }>(`/agent/runs/${runId}/consent`, { decision }),
   /** SSE 事件流：thinking / message / tool_start / tool_result / final / done / status / resync
    *  shouldContinue 用于"用户已经切到别的 run"时停止自动重连（默认一直续传）。
-   *  续传：内部记录每个事件的 `id:`，断线后带 `Last-Event-ID` 重连，服务端会恰好补齐缺口。 */
-  events: (runId: string, onEvent: (ev: AgentStreamEvent) => void, onDone: () => void, shouldContinue?: () => boolean) =>
-    streamAgent(runId, onEvent, onDone, shouldContinue),
+   *  续传：内部记录每个事件的 `id:`，断线后带 `Last-Event-ID` 重连，服务端会恰好补齐缺口。
+   *
+   *  initialEventId：**跨轮共享的水位线**。run 是跨轮复用的（同一条 session_id 续接同一个 run，
+   *  后续指令都新开一条 SSE），把"这个 run 上我已经消费过的最大事件 id"传进来，新一轮就只收
+   *  本轮增量（服务端 `snap.After(lastID)`）：不会重复回放已消费的缓冲，也不会因为服务端对运行中
+   *  的 run 采用"从当前开始"语义、或对终态 run 的 200 条尾巴回放上限而漏掉本轮开头的增量。
+   *  不传/传 0 = 服务端默认语义。 */
+  events: (
+    runId: string,
+    onEvent: (ev: AgentStreamEvent) => void,
+    onDone: () => void,
+    shouldContinue?: () => boolean,
+    initialEventId?: number,
+  ) => streamAgent(runId, onEvent, onDone, shouldContinue, initialEventId),
 }
 
 export interface AgentStreamEvent {
@@ -883,13 +894,24 @@ const SSE_MAX_RECONNECTS = 8
 // v1.4.0：支持**断点续传**。服务端每个 run 事件带 `id: <seq>`，断线后按 `Last-Event-ID`
 // 续传即可补齐缺口，不必退化成"只能靠 2s 轮询重建视图"。两类缺口由服务端用 `resync`
 // 事件显式告知（缓冲淘汰 / 运行期丢事件），这里原样交给调用方处理，**不静默吞掉**。
+//
+// initialEventId：调用方（同一个 run 的上一轮）已经消费过的最大事件 id。它同时是**第一条连接**
+// 的水位线——这是"只收本轮增量"的关键。实测（.tmp-verify 的 A/B）服务端缺省语义是两种：
+//   - run 还在跑：`lastSent = snap.Head`（"从当前开始"）→ 连接建立前已 emit 的增量**永久丢失**
+//     （实测：续接轮首个 SSE 晚 1.5s 连接，正文前 8 个字符不见了，流式正文从半句开始）；
+//   - run 已终态：`snap.Tail(200)`（回放缓冲尾部，条数有上限）→ 该轮最早的一批增量被上限吃掉
+//     （实测：一轮 300+ 增量时，无水位线只收到后 200 条，正文从第 103 个增量才开始）。
+// 传了水位线就统一变成 `snap.After(lastID)`：不漏（水位线之后的都补发）也不重
+// （水位线之前的一律不发，所以既不会把上一轮内容再发一遍，也不会重复追加已渲染的正文）。
 async function streamAgent(
   runId: string,
   onEvent: (ev: AgentStreamEvent) => void,
   onDone: () => void,
   shouldContinue?: () => boolean,
+  initialEventId = 0,
 ) {
-  let lastEventId = 0
+  // 水位线初值 = 上一轮的最大事件 id（没有则 0 = 服务端默认语义）。
+  let lastEventId = initialEventId > 0 ? Math.floor(initialEventId) : 0
   let retryMs = SSE_DEFAULT_RETRY_MS
   let terminal = false
 
@@ -934,6 +956,18 @@ async function streamAgent(
             closed = true
             break
           }
+        }
+        // 调用方已经不再关心这条流（典型场景：用户发出了下一轮指令，同一 run 换了一条新连接）：
+        // 立刻停读并断开。同一个 run 的多个 SSE 连接是**分食**同一条事件通道的（服务端
+        // `run.Events()` 是单通道，不是广播），上一轮遗留的连接多活一秒，就可能把本轮的事件
+        // 抢走一半，表现成"本轮正文缺一段"。这里主动退场，把它让给本轮的那条连接。
+        if (!closed && shouldContinue && !shouldContinue()) {
+          try {
+            await reader.cancel()
+          } catch {
+            /* 取消失败不影响后续：连接随请求对象一起被回收 */
+          }
+          closed = true
         }
       }
       if (terminal) break

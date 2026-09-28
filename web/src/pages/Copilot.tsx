@@ -6,6 +6,8 @@ import type { AgentStreamEvent } from '../api'
 import type { Session } from '../types'
 import { useCopilotStore } from '../stores/copilotStore'
 import type { CopilotMsg, AgentAct } from '../stores/copilotStore'
+import { filterRoundTimeline } from './agentRound'
+import type { RoundBaseline, RunTimelineEvent } from './agentRound'
 import { markdown } from '../utils/markdown'
 import './Copilot.css'
 
@@ -233,13 +235,45 @@ export function Copilot() {
       if (!agentSessionRef.current) agentSessionRef.current = res.data.session_id || runId
       activeRunIdRef.current = runId
 
+      // 本轮基线：发指令那一刻该 run 上"属于上一轮"的 timeline 尾部快照 + 本轮用户文本。
+      // 用上一次观测到的快照而不是再 GET 一次：GET 会与已经启动的本轮抢时间（可能把本轮最前面
+      // 几行算进基线，反而漏渲染）。新 run / 没观测到过快照时 ts=0，等价于"整条 timeline 都属于本轮"。
+      const seen = runTimelineRef.current.get(runId)
+      roundBaseRef.current.set(runId, {
+        len: seen?.len || 0,
+        ts: seen?.ts || 0,
+        objective: truncateLine(text, 200),
+      })
+
       // 主路径：轮询 status() 直到终态（绝对可靠，不依赖长连接）。
       // SSE 作为实时增量增强——SSE 断开/失败不影响结论，轮询兜底一定渲染最终结果。
       pollRun(runId)
       setStreamGap('')
       // SSE 作为实时增量增强；断线会自动带 Last-Event-ID 续传（见 api/index.ts 的 streamAgent），
-      // shouldContinue 保证用户切到别的 run 后旧连接不再重连。
-      agentApi.events(runId, (ev) => handleAgentEvent(ev), () => { /* SSE 断开时轮询仍在 */ }, () => activeRunIdRef.current === runId)
+      // shouldContinue 保证用户发了下一轮指令后旧连接不再重连。
+      //
+      // 续接轮的关键：把本 run 上"已经消费过的最大事件 id"作为**初始水位线**传进去。
+      // run 是多轮复用的，每轮都新开一条 SSE：没有水位线时，服务端对运行中的 run 走"从当前开始"
+      // （连接建立前已 emit 的增量永久丢失 → 流式正文从半句开始），对已终态的 run 走
+      // "回放缓冲尾部 Tail(200)"（条数有上限，本轮最早的一批增量会被吃掉）。带上水位线后统一
+      // 变成"只发 seq > 水位线"：既不丢本轮开头，也不可能重发已经消费过的内容。
+      const gen = ++roundGenRef.current
+      agentApi.events(
+        runId,
+        (ev) => {
+          // 水位线要**先于**"是否属于本轮"的判断推进：即便这条事件来自上一轮的遗留连接，它同样
+          // 证明该 run 的 seq 已经走到这里，下一轮的水位线必须跟上，否则下次会把这段又回放一遍。
+          noteWaterline(runId, ev.id)
+          // 上一轮的遗留连接（含它的自动重连）不得把内容写进本轮气泡——它的消息增量可能属于上一轮。
+          if (gen !== roundGenRef.current) return
+          handleAgentEvent(ev)
+        },
+        () => {
+          /* SSE 断开时轮询仍在 */
+        },
+        () => activeRunIdRef.current === runId && gen === roundGenRef.current,
+        runWaterlineRef.current.get(runId),
+      )
     } catch (e: any) {
       const errText = e?.response?.data?.error || (e instanceof Error ? e.message : String(e))
       // 结束占位，替换为错误
@@ -257,6 +291,32 @@ export function Copilot() {
   // 自主记忆会话 ID：首次创建后记录，后续指令续接同一上下文（保持 agent 完整记忆）
   const agentSessionRef = useRef<string | null>(null)
 
+  // ── 跨轮复用 run 的显示层状态（全部按 run_id 分键）────────────────────────
+  // agent run 会被多轮指令复用（同一条 session_id 续接同一个 run），由此带来三个"整条 run"与
+  // "本轮"口径不一致的坑，这三张表就是用来把两者分开的：
+  //   runTimelineRef  : 每次观测到的 timeline 尾部快照（条数 + 最后一条 ts）→ 下一轮基线的来源
+  //   roundBaseRef    : 本轮基线（本轮用户文本 + 上一轮 timeline 水位）→ buildActs 据此只切本轮
+  //   runWaterlineRef : 本 run 上已经消费过的最大 SSE 事件 id → 下一轮连接的初始水位线
+  const runTimelineRef = useRef<Map<string, { len: number; ts: number }>>(new Map())
+  const roundBaseRef = useRef<Map<string, RoundBaseline>>(new Map())
+  const runWaterlineRef = useRef<Map<string, number>>(new Map())
+  // 本轮连接代次：send() 每次自增。上一轮遗留的 SSE 连接（含它自己的自动重连）不得把内容写进本轮气泡。
+  const roundGenRef = useRef(0)
+
+  // 记录某 run 的 timeline 尾部快照，作为"下一次 send 时的本轮基线"。
+  // 空 timeline 不更新：否则会把已知基线抹成 0，下一轮就会把整条 timeline 当成本轮。
+  const rememberTimeline = (runId: string, data: any) => {
+    const tl = Array.isArray(data?.timeline) ? data.timeline : []
+    if (tl.length === 0) return
+    runTimelineRef.current.set(runId, { len: tl.length, ts: Number(tl[tl.length - 1]?.ts) || 0 })
+  }
+
+  // 推进某 run 的 SSE 水位线（只增不减）：值是服务端 run 内单调的事件 seq。
+  const noteWaterline = (runId: string, id?: number) => {
+    if (!id || id <= 0) return
+    if (id > (runWaterlineRef.current.get(runId) || 0)) runWaterlineRef.current.set(runId, id)
+  }
+
   // 轮询主路径：稳定拉取 run 状态，直到终态，渲染最终结果。SSE 断连时的可靠兜底。
   const pollRun = async (runId: string) => {
     let attempts = 0
@@ -271,9 +331,11 @@ export function Copilot() {
       try {
         const st = await agentApi.status(runId)
         const data = st.data
+        // 记下本轮 timeline 尾部快照：这就是"下一轮"的基线来源（终态那次轮询拿到的就是本轮的收尾快照）
+        rememberTimeline(runId, data)
         // 执行过程以「日志行」写入会话气泡：🎯 目标 → 🔧 工具调用 → ✅/❌ 结果
-        // （不再用独立的计划/时间线面板，一切都在对话流里）
-        const acts = buildActs(data)
+        // （不再用独立的计划/时间线面板，一切都在对话流里；且只渲染**本轮**的行，见 buildActs）
+        const acts = buildActs(data, runId)
         if (acts.length > 0) {
           useCopilotStore.getState().setLastActs(acts)
         }
@@ -289,16 +351,25 @@ export function Copilot() {
     }, 2000)
   }
 
-  // buildActs 把 run 状态（目标 + 时间线）整理成会话内联的日志行。
+  // buildActs 把 run 状态（**本轮**目标 + **本轮**时间线）整理成会话内联的日志行。
   // 行格式：icon + 文本；tool_start=🔧，tool_result 依内容 ✅/❌/⏭，错误=⚠️。
-  const buildActs = (data: any): AgentAct[] => {
+  //
+  // 为什么必须按"本轮"切：run 是跨轮复用的，`data.timeline` 是整条 run 累积的时间线（服务端上限
+  // 400 条），直接渲染就会在新气泡里把前几轮的 🔧/✅ 再画一遍（假重复）。切法见 agentRound.ts：
+  // 用 send() 时记下的基线（上一轮最后一条 timeline 的 ts）保留 ts 严格更大的条目。
+  // 目标同理：服务端 Objective 会被"最新 user 消息"覆盖，但它只在首轮 LLM 返回之后才更新，
+  // 续接轮的第一个轮询会读到**上一轮**的目标——所以有基线时直接用本轮发出去的用户文本。
+  // 没有基线（页面刷新后重新接上、老服务端没有 ts）时全部退回改动前的行为，不崩不空白。
+  const buildActs = (data: any, runId?: string): AgentAct[] => {
     const acts: AgentAct[] = []
-    if (data?.objective) {
-      acts.push({ i: '🎯', t: String(data.objective) })
+    const base = runId ? roundBaseRef.current.get(runId) : undefined
+    const objective = base?.objective ? base.objective : data?.objective ? String(data.objective) : ''
+    if (objective) {
+      acts.push({ i: '🎯', t: truncateLine(objective, 200) })
     }
-    const tl: { kind: string; text: string }[] = data?.timeline || []
+    const tl: RunTimelineEvent[] = data?.timeline || []
     // 只保留过程行：跳过 final（回复正文单独渲染），thinking 无时间线条目
-    for (const ev of tl.slice(-80)) {
+    for (const ev of filterRoundTimeline(tl, base)) {
       if (ev.kind === 'final') continue
       if (ev.kind === 'tool_start') {
         acts.push({ i: '🔧', t: truncateLine(ev.text, 160) })
@@ -318,7 +389,20 @@ export function Copilot() {
 
   const truncateLine = (s: string, n: number) => (s && s.length > n ? s.slice(0, n) + '…' : (s || ''))
 
-  // 处理一条 SSE 事件：增量渲染到最后一条 assistant 消息
+  // 处理一条 SSE 事件：增量渲染到最后一条 assistant 消息。
+  //
+  // 与轮询的分工（这个分工不能改坏）：
+  //   - `tool_start/tool_result` **不**在这里维护：它们由 pollRun 的 buildActs() 从服务端 timeline
+  //     统一生成（2s 轮询是权威且稳定的那份数据源），SSE 只负责"别让 thinking 转圈卡住"。
+  //     若两边都写，同一行工具日志会被渲染两次——这正是"看起来重复执行了一遍"的另一半来源。
+  //   - `message/final/state` 的正文只由 SSE 增量渲染（轮询只在终态用 `reply` 整体替换一次兜底）。
+  //
+  // 为什么现在的组合既不重复也不丢事件：
+  //   重复：① 过程行只有 poll→buildActs 一个来源，且 buildActs 只取**本轮** timeline（基线切分）；
+  //         ② SSE 每条连接带跨轮水位线，服务端只发 seq > 水位线 的事件，不会把上一轮缓冲再回放；
+  //         ③ 上一轮遗留的连接（含其重连）被本轮代次挡在气泡外，并会被 streamAgent 主动断开。
+  //   丢事件：水位线同时消除了"运行中的 run 从当前开始"语义——连接建立前已 emit 的增量会按
+  //         `snap.After(lastID)` 补发；真正补不上的缺口仍由服务端 resync 显式告知并拉 run 详情对齐。
   const handleAgentEvent = (ev: AgentStreamEvent) => {
     const s = useCopilotStore.getState()
     switch (ev.event) {
@@ -381,7 +465,9 @@ export function Copilot() {
           void agentApi
             .status(rid)
             .then((st) => {
-              const acts = buildActs(st.data)
+              // 补一次 run 详情对齐：同样只取本轮行（resync 可能随后又收到事件，基线不变）
+              rememberTimeline(rid, st.data)
+              const acts = buildActs(st.data, rid)
               if (acts.length > 0) useCopilotStore.getState().setLastActs(acts)
             })
             .catch(() => {
@@ -402,6 +488,8 @@ export function Copilot() {
       try {
         // 拉最终状态（若 SSE 中途断开/丢失 final，这里兜底渲染建议）
         const st = await agentApi.status(rid)
+        // 收尾快照就是本轮的最终 timeline 水位 → 下一次 send 的本轮基线
+        rememberTimeline(rid, st.data)
         const reply = st?.data?.reply
         if (reply) {
           useCopilotStore.getState().appendToLast({ role: 'assistant', content: reply, thinking: false, streaming: false })
