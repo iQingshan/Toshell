@@ -3,9 +3,14 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"net/textproto"
+	"path/filepath"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"toshell/internal/common/types"
@@ -54,49 +59,128 @@ func (s *Server) getPluginHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(p)
 }
 
+// uploadPluginHandler 处理 multipart 插件上传（POST /api/v1/plugins，表单字段 file）。
+//
+// 安全要点（审计 H4/H2 边界）：
+//   - 文件名只允许纯 basename，真正落盘名统一用 filepath.Base(raw)；
+//   - 标准库 multipart 已按 RFC 7578 对 filename 做 filepath.Base，但这里保留原始
+//     filename 额外检查：显式含 ".." 路径分量的请求直接 400，不静默归一后接受；
+//   - 文件名校验（字符/长度/扩展名）在读取文件内容之前完成，非法名不落盘；
+//   - 参数/名字类错误返回 400 + 中文原因（不再包成 500），只有真正的服务端故障才 500。
 func (s *Server) uploadPluginHandler(w http.ResponseWriter, r *http.Request) {
-	maxSize := int64(50 * 1024 * 1024)
+	const maxSize = int64(50 * 1024 * 1024)
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
-	if err := r.ParseMultipartForm(maxSize); err != nil {
-		http.Error(w, `{"error":"File too large"}`, http.StatusBadRequest)
-		return
-	}
-
-	file, header, err := r.FormFile("file")
+	mr, err := r.MultipartReader()
 	if err != nil {
-		http.Error(w, `{"error":"No file provided"}`, http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-
-	if !plugin.IsValidPluginType(header.Filename) {
-		http.Error(w, `{"error":"Invalid plugin type. Supported: .exe, .dll, .bin, .raw, .sc, .o, .obj"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "无效的 multipart 上传请求：Content-Type 必须是 multipart/form-data")
 		return
 	}
 
-	data, err := io.ReadAll(file)
-	if err != nil {
-		http.Error(w, `{"error":"Failed to read file"}`, http.StatusInternalServerError)
-		return
+	var (
+		fileName    string // 已按 filepath.Base 归一的落盘名
+		rawFileName string // 原始 filename（仅用于识别目录/穿越信息）
+		fileData    []byte
+		description string
+	)
+
+	for {
+		part, perr := mr.NextPart()
+		if perr == io.EOF {
+			break
+		}
+		if perr != nil {
+			writeJSONError(w, http.StatusBadRequest, "解析 multipart 请求失败："+perr.Error())
+			return
+		}
+
+		field := part.FormName()
+		raw := multipartRawFilename(part.Header)
+
+		if field == "file" && raw != "" {
+			rawFileName = raw
+			fileName = filepath.Base(raw)
+			// 目录信息本应被丢弃；但显式 ".." 穿越尝试一律 400（不写入任何文件）。
+			if rawFileName != fileName && hasDotDotPathComponent(rawFileName) {
+				_ = part.Close()
+				writeJSONError(w, http.StatusBadRequest, "文件名不能包含路径穿越（..）")
+				return
+			}
+			// 先校验名字，再读内容：非法名不落盘、也不在内存里收整包。
+			if verr := plugin.ValidatePluginName(fileName); verr != nil {
+				_ = part.Close()
+				writeJSONError(w, http.StatusBadRequest, verr.Error())
+				return
+			}
+			data, rerr := io.ReadAll(io.LimitReader(part, maxSize))
+			_ = part.Close()
+			if rerr != nil {
+				writeJSONError(w, http.StatusBadRequest, "读取上传文件失败："+rerr.Error())
+				return
+			}
+			fileData = data
+			continue
+		}
+
+		if field == "description" {
+			b, rerr := io.ReadAll(io.LimitReader(part, 64<<10))
+			_ = part.Close()
+			if rerr == nil {
+				description = string(b)
+			}
+			continue
+		}
+		_ = part.Close()
 	}
 
-	description := r.FormValue("description")
+	if rawFileName == "" {
+		writeJSONError(w, http.StatusBadRequest, "未提供文件：请用表单字段 file 上传")
+		return
+	}
 
 	mgr := plugin.GetManager()
 	if mgr == nil {
-		http.Error(w, `{"error":"Plugin manager not initialized"}`, http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "插件管理器未初始化")
 		return
 	}
 
-	p, err := mgr.Add(header.Filename, data, description)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+	p, aerr := mgr.Add(fileName, fileData, description)
+	if aerr != nil {
+		if errors.Is(aerr, plugin.ErrInvalidName) {
+			writeJSONError(w, http.StatusBadRequest, aerr.Error())
+		} else {
+			writeJSONError(w, http.StatusInternalServerError, aerr.Error())
+		}
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
+	// 成功统一返回 200（历史为 201；前端按 res.ok/2xx 判断，无兼容问题）。
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(p)
+}
+
+// multipartRawFilename 从 part 头里取**未经 filepath.Base 归一**的原始 filename，
+// 仅用于识别客户端是否上传了带目录/穿越信息的文件名；落盘名仍用 filepath.Base。
+func multipartRawFilename(h textproto.MIMEHeader) string {
+	cd := h.Get("Content-Disposition")
+	if cd == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(cd)
+	if err != nil {
+		return ""
+	}
+	return params["filename"]
+}
+
+// hasDotDotPathComponent 判断文件名中是否含 ".." 路径分量（/ 与 \ 均视为分隔符）。
+func hasDotDotPathComponent(raw string) bool {
+	for _, comp := range strings.FieldsFunc(raw, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if comp == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) deletePluginHandler(w http.ResponseWriter, r *http.Request) {

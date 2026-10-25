@@ -303,6 +303,17 @@ type ListenerConfig struct {
 	MQTTTopicPrefix string `mapstructure:"mqtt_topic_prefix" json:"mqtt_topic_prefix"`
 	// MQTTEmbeddedBroker 为 true 时启动内嵌 broker（brokerURL 为空时默认监听本机端口）。
 	MQTTEmbeddedBroker bool `mapstructure:"mqtt_embedded_broker" json:"mqtt_embedded_broker"`
+	// MQTTEmbeddedBind 内嵌 MQTT broker 的绑定地址（只填主机，端口用 listener.port）。
+	// **默认 127.0.0.1**：内嵌 broker 是给"外部 broker 不可用"场景的兜底，
+	// 只承载 AES-GCM 加密帧，不应该被公网匿名订阅/投递。只有显式改成别的
+	// 地址（如 0.0.0.0）才会对外监听；改成通配地址前请务必配置
+	// mqtt_username/mqtt_password，并确认防火墙策略。
+	MQTTEmbeddedBind string `mapstructure:"mqtt_embedded_bind" json:"mqtt_embedded_bind"`
+	// MQTTUsername / MQTTPassword 内嵌 broker 的可选账号密码。
+	// 非空时挂 mochi 的 auth.Hook 做真实校验（服务端自身 MQTT 客户端也会带上）。
+	// 为空时仍匿名放行，但内嵌 broker 默认只绑回环（见 MQTTEmbeddedBind）。
+	MQTTUsername string `mapstructure:"mqtt_username" json:"mqtt_username"`
+	MQTTPassword string `mapstructure:"mqtt_password" json:"mqtt_password"`
 	// FrontDomain 域前置拟态域名：植入端 HTTPS 轮询时用作 TLS SNI 与 HTTP Host。
 	// 把 C2 服务器部署在 CDN/反代后面后，目标机出站流量表现为访问该合法域名，
 	// 可过基于域名的出口白名单。空 = 不使用域前置（SNI/Host 用服务器地址）。
@@ -802,6 +813,11 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("listener.encryption_key", "")
 	viper.SetDefault("listener.write_queue_size", 500)
 	viper.SetDefault("listener.mimicry_profile", "cdn")
+	// 内嵌 MQTT broker 默认只绑回环（审计 M5）。此前 broker 直接绑
+	// listener.host（示例配置 0.0.0.0），匿名可订阅/注入 up 主题。
+	viper.SetDefault("listener.mqtt_embedded_bind", "127.0.0.1")
+	viper.SetDefault("listener.mqtt_username", "")
+	viper.SetDefault("listener.mqtt_password", "")
 	// WS 主动探测面（v1.4.0 S5 第 0 步）：默认路径**必须**与现役植入端一致（"/"），
 	// 所以这里直接引用 transport 的常量而不是再抄一遍字面量（抄一遍就会漂移）。
 	viper.SetDefault("listener.ws_path", transport.DefaultUpgradePath)

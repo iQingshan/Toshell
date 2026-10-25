@@ -36,7 +36,7 @@ import (
 
 var (
 	// version/commit/buildTime 由构建时 -ldflags 注入（默认 dev 构建）。
-	version   = "1.4.1"
+	version   = "1.4.2"
 	commit    = "dev"
 	buildTime = "unknown"
 )
@@ -109,18 +109,12 @@ func NewServer(cfgPath string) (*Server, error) {
 	var configChanged bool
 
 	if cfg.Auth.AdminPassword == "" {
-		plainPassword, err := generateRandomPassword(16)
+		hashedPassword, err := bootstrapAdminPassword("data")
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate admin password: %w", err)
-		}
-		hashedPassword, err := auth.HashPassword(plainPassword)
-		if err != nil {
-			return nil, fmt.Errorf("failed to hash admin password: %w", err)
+			return nil, err
 		}
 		cfg.Auth.AdminPassword = hashedPassword
 		viper.Set("auth.admin_password", hashedPassword)
-		log.Printf("[SECURITY] First start - generated admin password: %s", plainPassword)
-		log.Printf("[SECURITY] Store this password securely! It will not be shown again.")
 		configChanged = true
 	}
 
@@ -667,6 +661,46 @@ func registerDefaultListener(cfg *config.Config, db *database.Database) {
 		return
 	}
 	logging.Info("server", "Default listener registered: %s:%d (%s)", cfg.Listener.Host, cfg.Listener.Port, protocol)
+}
+
+// initialAdminPasswordFile 首次启动自动生成的管理员明文口令落盘文件名（位于数据目录）。
+// 固定约定：data/initial-admin-password.txt；管理员首次登录后应立即修改口令并删除该文件。
+// data/* 已被 .gitignore 覆盖，不会误提交。
+const initialAdminPasswordFile = "initial-admin-password.txt"
+
+// bootstrapAdminPassword 首次启动（配置中没有显式口令）时生成随机管理员口令：
+//   - 明文**只**写入 0600 的独立文件，绝不打印到 stdout/日志（审计 L2）：
+//     stdout 常被 systemd/journald、容器日志、CI 采集并长期留存；
+//   - 返回 bcrypt 哈希，由调用方写回配置；
+//   - 落盘失败按致命错误处理：否则管理员拿不到口令，服务等于被锁死。
+func bootstrapAdminPassword(dataDir string) (string, error) {
+	plain, err := generateRandomPassword(16)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate admin password: %w", err)
+	}
+	hashed, err := auth.HashPassword(plain)
+	if err != nil {
+		return "", fmt.Errorf("failed to hash admin password: %w", err)
+	}
+	path := filepath.Join(dataDir, initialAdminPasswordFile)
+	if err := writeInitialAdminPassword(path, plain); err != nil {
+		return "", fmt.Errorf("failed to write initial admin password to %s: %w", path, err)
+	}
+	// 只报路径，不报口令本身（日志会被采集、转发、留存）。
+	log.Printf("[SECURITY] 已生成初始管理员口令，见 %s（首次登录后请立即修改，并删除该文件）", path)
+	return hashed, nil
+}
+
+// writeInitialAdminPassword 以 0600 权限写入初始管理员明文口令。
+// Windows 上 os.WriteFile 的 perm 位不生效（无 POSIX mode），实际访问控制由 NTFS ACL
+// 决定，部署时请用 icacls 收紧；这里仍传 0600，保证 Linux/macOS 上只有属主可读写。
+func writeInitialAdminPassword(path, password string) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(path, []byte(password+"\n"), 0o600)
 }
 
 // generateRandomPassword generates a random alphanumeric password of the given length.

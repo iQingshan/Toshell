@@ -408,6 +408,12 @@ func (l *TCPListener) handleConnection(conn net.Conn) {
 
 			packet, err := l.parsePacketFromData(data)
 			if err != nil {
+				// 压缩炸弹：解压超限按协议错误断开整条连接（与普通坏帧的"跳过
+				// 这一帧继续读"区分开），否则攻击者可以在同一连接上反复触发。
+				if errors.Is(err, errDecompressedTooLarge) {
+					fmt.Printf("[WARN] [tcp-listener] Decompressed frame exceeds limit, closing connection: %v\n", err)
+					return
+				}
 				continue
 			}
 			l.handlePacket(conn, packet)

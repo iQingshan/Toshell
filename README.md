@@ -21,6 +21,7 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 | [docs/VSHELL-ANALYSIS.md](docs/VSHELL-ANALYSIS.md) | **同类项目的设计取舍**：对一份第三方 C2 复刻的架构对比、可借鉴点与**许可证红线**（只吸收设计、不搬代码） |
 | [docs/LOADERS.md](docs/LOADERS.md) | **不落地未签名 PE 怎么上线**：白加黑、计划任务、rundll32/mshta/certutil、内存加载链的前置条件与取舍 |
 | [docs/DEPLOY-DOMAIN-CDN.md](docs/DEPLOY-DOMAIN-CDN.md) | 用**域名 + CDN / Nginx 反代 / 域前置**上线时的配置与排错 |
+| [docs/SECURITY-FIXES-1.4.2.md](docs/SECURITY-FIXES-1.4.2.md) | **v1.4.2 安全修复说明**：本轮审计修了什么、升级的破坏性变更、以及**残余风险（样本 ≈ 协议身份）** |
 | [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么 |
 | [ROADMAP.md](ROADMAP.md) | 已做 / 待做的路线与优先级 |
 | [SECURITY.md](SECURITY.md) · [DISCLAIMER.md](DISCLAIMER.md) | 漏洞披露流程 · 授权与合规边界 |
@@ -100,6 +101,23 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 
 **加密通信**
 - 控制帧 AES-256-GCM 认证加密 + 隧道数据 SM4-GCM（国密自研），密钥域分离；配置热更新。
+
+## v1.4.2 安全修复（必读）
+
+按第三方安全审计报告修复 **4 High + 9 Medium + 3 Low**；修复后逐条回放审计 PoC **全部被拒**。逐条说明见 [docs/SECURITY-FIXES-1.4.2.md](docs/SECURITY-FIXES-1.4.2.md)。
+
+| 修复 | 一句话 |
+|---|---|
+| 路径穿越（**H2/H3/H4/M9**） | 载荷名/插件名收敛为"纯文件名 + 白名单后缀 + 目录边界断言"；写盘加 `O_NOFOLLOW`。此前**认证后可读任意文件（含 JWT/协议密钥）或删/写任意文件** |
+| 未认证伪造（**H1/M1**） | `/api/v1/implant/{register,heartbeat,result}` 加认证 + 结果**归属校验**；心跳不再能跨会话覆盖、也不能复活 dead 会话 |
+| 任务被抢（**M2**） | HTTP 轮询 `/task` 改为**每次上线一个会话令牌**，先验令牌再取任务 |
+| 资源耗尽（**M4/M7**） | 所有入口限请求体（64 KiB / 16 MiB）；gzip 解压限 32 MiB |
+| 面收敛（**M5/M6/M8**） | 内嵌 MQTT 默认只绑 `127.0.0.1`；`?token=` 仅 WS 两条路径可用；WS 校验 Origin + shell WS 读上限 |
+| 密钥卫生（**L2/L4/L5**） | 初始口令不进日志（写 0600 文件）；清掉文档/脚本里的开发密钥；设置接口不再回显 webhook secret |
+
+> ⚠️ **三条破坏性变更**：① 那 3 个兼容端点要凭据 + `SessionID`；② 仍走 `GET /task` 的自研客户端会 403（需带上注册响应里的 `session_token`；**仓库内模板不受影响，不需要重新下发**）；③ 管理 API 不再接受 `?token=`。
+>
+> ⚠️ **残余风险（未修，属设计层）**：载荷里的协议密钥是**全局同一把**且可逆，"拿到一个样本 ≈ 拿到协议层身份"。请把载荷 ID/URL 与样本当敏感信息、每场演练独立 `listener.encryption_key`。修复方向在 ROADMAP（每植入端密钥 / 帧重放防护 / 一次性短 TTL 下载 URL）。
 
 ## v1.4.1 重点变化（补丁版）
 

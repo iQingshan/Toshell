@@ -45,7 +45,7 @@ import (
 // 服务端标识。版本与 cmd/server/main.go 的 version 常量保持一致（不引入反向依赖）。
 const (
 	ServerName    = "toshell"
-	ServerVersion = "1.4.1"
+	ServerVersion = "1.4.2"
 )
 
 // 支持的 MCP 协议版本（新的在前）。

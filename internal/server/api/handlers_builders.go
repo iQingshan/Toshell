@@ -183,7 +183,18 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == "" {
+	// 载荷名会参与磁盘路径拼接（旧副本清理、按名下载、遗留文件查找），必须在
+	// 进入任何文件操作之前收敛成「单段安全文件名」。否则 name="../x" 就是认证后
+	// 任意文件删除 / 任意文件读（审计 H2/H3）。空名仍走服务端生成的默认名。
+	if req.Name != "" {
+		safe, err := safePayloadName(req.Name)
+		if err != nil {
+			logging.Warn("builder", "拒绝非法载荷名 %q: %v", req.Name, err)
+			writeJSONError(w, http.StatusBadRequest, unsafePayloadNameMsg)
+			return
+		}
+		req.Name = safe
+	} else {
 		req.Name = fmt.Sprintf("implant-%d", time.Now().Unix())
 	}
 	if req.Format == "" {
@@ -371,14 +382,31 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 		// 移除 builder 按旧规则(名称)写入的副本，避免一次生成留下两个文件。
 		// 必须按 builder 实际写盘的文件名（GetOutputFilename）精确删除，
 		// 否则对 raw 等格式（builder 写无扩展名文件）会残留旧文件导致列表出现两条。
-		_ = os.Remove(filepath.Join(implantDir, s.builder.GetOutputFilename(opts)))
-		// 兜底：历史遗留的 name.ext 形式副本一并清理
+		// 该文件名由服务端 builder 生成（不可信度低），但仍过一遍 resolveInDir：
+		// 任何清理动作都只允许发生在 implantDir 内。
+		if out := s.builder.GetOutputFilename(opts); out != "" {
+			if p, err := resolveInDir(implantDir, out); err != nil {
+				logging.Warn("builder", "跳过清理旧产物 %q（越界）: %v", out, err)
+			} else {
+				_ = os.Remove(p)
+			}
+		}
+		// 兜底：历史遗留的 name.ext 形式副本一并清理。
+		// 审计 H2：req.Name 无过滤时这里可删任意文件。现在 req.Name 已在入口过
+		// safePayloadName，这里再断言一次（纵深防御）；任何一步失败只跳过删除并记
+		// warn —— 清理是尽力而为，绝不让它影响本次构建结果（更不能 500）。
 		if req.Name != "" {
 			oldName := req.Name
 			if oldExt := payloadExt(req.Format, req.OS); oldExt != "" {
 				oldName = req.Name + "." + oldExt
 			}
-			_ = os.Remove(filepath.Join(implantDir, oldName))
+			if _, err := safePayloadName(req.Name); err != nil {
+				logging.Warn("builder", "跳过清理旧副本（载荷名非法）%q: %v", req.Name, err)
+			} else if p, err := resolveInDir(implantDir, oldName); err != nil {
+				logging.Warn("builder", "跳过清理旧副本 %q（越界）: %v", oldName, err)
+			} else {
+				_ = os.Remove(p)
+			}
 		}
 	}
 
@@ -479,17 +507,30 @@ func (s *Server) downloadPayloadHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// 兼容旧调用:按名称在磁盘上查找已存在的载荷文件。
+	//
+	// 审计 H3：这里曾经把 req.Name 与 req.Format **原样**拼进路径，而 filepath.Join
+	// 只做词法 Clean —— name="../configs/server" + format="yaml" 就能读到
+	// configs/server.yaml；format="y/../../etc/passwd" 甚至能把 ".." 藏进后缀里。
+	// 现在：name 必须过 safePayloadName（单段 + 字符白名单），format 只在固定
+	// 白名单内才作为后缀候选（"format 是标签，不是路径"），每个候选再过
+	// resolveInDir 断言仍落在 implantDir 内。
 	if req.Name != "" {
+		name, nameErr := safePayloadName(req.Name)
+		if nameErr != nil {
+			logging.Warn("builder", "拒绝按非法载荷名下载 %q: %v", req.Name, nameErr)
+			writeJSONError(w, http.StatusBadRequest, unsafePayloadNameMsg)
+			return
+		}
 		implantDir := s.cfg.Implant.OutputDir
 		if implantDir == "" {
 			implantDir = "./implants"
 		}
-		exts := []string{req.Format, "exe", "dll", "bin", "txt", "raw", "so"}
-		for _, ext := range exts {
-			if ext == "" {
+		for _, ext := range payloadDownloadExts(req.Format) {
+			p, resolveErr := resolveInDir(implantDir, name+"."+ext)
+			if resolveErr != nil {
+				logging.Warn("builder", "跳过越界的载荷下载候选 %q.%s: %v", name, ext, resolveErr)
 				continue
 			}
-			p := filepath.Join(implantDir, req.Name+"."+ext)
 			if _, err := os.Stat(p); err == nil {
 				serveFileDownload(w, r, p, "")
 				return
@@ -734,6 +775,32 @@ func payloadExt(format, osName string) string {
 	}
 }
 
+// payloadDownloadExts 返回「按名称下载」允许尝试的扩展名白名单（不含点）。
+//
+// req.Format 只有在白名单内时才排第一位（保留「format 优先命中」的旧行为），
+// 其余固定候选去重后追加。请求里的任意字符串**永远不会**成为路径的一部分 ——
+// 审计 H3 的 format="y/../../etc/passwd" 正是靠这条被挡掉。
+func payloadDownloadExts(format string) []string {
+	allowed := map[string]struct{}{
+		"exe": {}, "dll": {}, "bin": {}, "txt": {}, "raw": {}, "so": {},
+	}
+	seen := make(map[string]struct{}, len(allowed))
+	out := make([]string, 0, len(allowed))
+	if f := strings.ToLower(strings.TrimSpace(format)); f != "" {
+		if _, ok := allowed[f]; ok {
+			out = append(out, f)
+			seen[f] = struct{}{}
+		}
+	}
+	for _, ext := range []string{"exe", "dll", "bin", "txt", "raw", "so"} {
+		if _, ok := seen[ext]; ok {
+			continue
+		}
+		out = append(out, ext)
+	}
+	return out
+}
+
 // locateImplantFile finds the real file on disk for a DB record, mirroring the
 // lookup used by serveStoredImplant. It returns the matching file name and true
 // when the payload file actually exists in the directory. 只做精确匹配,
@@ -775,17 +842,26 @@ func (s *Server) serveStoredImplant(w http.ResponseWriter, r *http.Request, imp 
 		implantDir = "./implants"
 	}
 
+	// 审计 M9：这里的 imp.Name / imp.Filename 来自数据库，历史上构建请求的 Name
+	// 是**原样入库**的（可能含 "../.."），而 serveStoredImplant 又会被**未认证**的
+	// GET /api/v1/implant/payload/{id} 调用 —— 直接 Join 就等于未认证任意文件读。
+	// 现在每个候选都过 resolveInDir，越界的一律跳过（不报 500，行为与"文件不存在"一致）。
 	candidates := []string{
-		filepath.Join(implantDir, imp.Filename),
-		filepath.Join(implantDir, imp.Name+"."+imp.Format),
-		filepath.Join(implantDir, imp.Name+"."+payloadExt(imp.Format, imp.OS)),
-		filepath.Join(implantDir, imp.Name+".exe"),
-		filepath.Join(implantDir, imp.Name+".txt"),
+		imp.Filename,
+		imp.Name + "." + imp.Format,
+		imp.Name + "." + payloadExt(imp.Format, imp.OS),
+		imp.Name + ".exe",
+		imp.Name + ".txt",
 	}
 
 	var filePath string
-	for _, p := range candidates {
-		if p == "" {
+	for _, cand := range candidates {
+		if cand == "" {
+			continue
+		}
+		p, err := resolveInDir(implantDir, cand)
+		if err != nil {
+			logging.Warn("builder", "跳过越界的载荷候选 %q（记录 %s）: %v", cand, imp.ID, err)
 			continue
 		}
 		if _, err := os.Stat(p); err == nil {
@@ -799,8 +875,13 @@ func (s *Server) serveStoredImplant(w http.ResponseWriter, r *http.Request, imp 
 		return
 	}
 
-	dlName := imp.Name + filepath.Ext(filePath)
-	if imp.Name == "" {
+	// 下载名（Content-Disposition）只允许安全文件名；DB 里的历史 Name 可能含
+	// 路径分隔符或控制字符，校验失败时退回磁盘文件名（build-<ns>.ext）。
+	dlName := ""
+	if safe, err := safePayloadName(imp.Name); err == nil {
+		dlName = safe + filepath.Ext(filePath)
+	}
+	if dlName == "" {
 		dlName = filepath.Base(filePath)
 	}
 	serveFileDownload(w, r, filePath, dlName)
@@ -817,8 +898,15 @@ func (s *Server) downloadStoredImplantHandler(w http.ResponseWriter, r *http.Req
 
 	// Directory-only entries carry a "file:" prefixed synthetic ID.
 	if strings.HasPrefix(id, "file:") {
-		filePath := filepath.Join(implantDir, strings.TrimPrefix(id, "file:"))
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		// 审计加固：合成 ID 的后半段来自文件名/URL，必须限制在 implantDir 内。
+		// 注意本 handler 同时挂在**未认证**的 /api/v1/implant/payload/{id} 上。
+		filePath, err := resolveInDir(implantDir, strings.TrimPrefix(id, "file:"))
+		if err != nil {
+			logging.Warn("builder", "拒绝越界的 file: 载荷下载 %q: %v", id, err)
+			http.Error(w, `{"error":"非法载荷文件路径"}`, http.StatusBadRequest)
+			return
+		}
+		if _, err := os.Stat(filePath); err != nil {
 			http.Error(w, `{"error":"Implant file not found on disk"}`, http.StatusNotFound)
 			return
 		}
@@ -901,9 +989,16 @@ func (s *Server) downloadImplantHandler(w http.ResponseWriter, r *http.Request) 
 		implantDir = "./implants"
 	}
 
-	filePath := filepath.Join(implantDir, name)
+	// 审计加固：{name} 来自 URL，不能直接 Join（否则 "../../x" 可读目录外文件）。
+	// 先词法+物理断言仍在 implantDir 内，再判断存在性。
+	filePath, err := resolveInDir(implantDir, name)
+	if err != nil {
+		logging.Warn("builder", "拒绝越界的载荷下载 %q: %v", name, err)
+		http.Error(w, `{"error":"非法载荷文件名"}`, http.StatusBadRequest)
+		return
+	}
 
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	if _, err := os.Stat(filePath); err != nil {
 		http.Error(w, `{"error":"File not found"}`, http.StatusNotFound)
 		return
 	}
@@ -924,7 +1019,13 @@ func (s *Server) deleteStoredImplantHandler(w http.ResponseWriter, r *http.Reque
 	// Directory-only entries carry a "file:" prefixed synthetic ID; only the
 	// file on disk is removed, there is no DB record to clean up.
 	if strings.HasPrefix(id, "file:") {
-		filePath := filepath.Join(implantDir, strings.TrimPrefix(id, "file:"))
+		// 审计加固：删除是不可逆写操作，合成 ID 的后半段必须严格限制在 implantDir 内。
+		filePath, err := resolveInDir(implantDir, strings.TrimPrefix(id, "file:"))
+		if err != nil {
+			logging.Warn("builder", "拒绝越界的 file: 载荷删除 %q: %v", id, err)
+			http.Error(w, `{"error":"非法载荷文件路径"}`, http.StatusBadRequest)
+			return
+		}
 		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -948,9 +1049,15 @@ func (s *Server) deleteStoredImplantHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Delete file from disk
-	filePath := filepath.Join(implantDir, imp.Filename)
-	os.Remove(filePath)
+	// Delete file from disk.
+	// 审计加固：imp.Filename 虽然由服务端生成，但历史/手工库行不可信 ——
+	// 只允许删除 implantDir 内的文件；越界时跳过删除并记 warn（DB 记录仍按
+	// 用户意图删除，避免留下永远删不掉的脏行）。
+	if filePath, err := resolveInDir(implantDir, imp.Filename); err != nil {
+		logging.Warn("builder", "跳过越界的载荷删除 %q（记录 %s）: %v", imp.Filename, id, err)
+	} else {
+		os.Remove(filePath)
+	}
 
 	// Delete from database
 	if err := db.DeleteImplant(id); err != nil {

@@ -12,12 +12,21 @@ description: 通过 REST API 远程驱动 ToShell C2 团队服务器 —— 认�
 ## 1. 连接与认证
 
 - 基础路径 `{scheme}://{host}:{api_port}/api/v1`；本地开发默认 `http://127.0.0.1:18081/api/v1`（`server.api_port`）。
-- 两种认证，二选一（`auth.*` 控制）：`X-API-Key: <key>`（脚本/Agent 首选，密钥在 `auth.api_keys`，可多个）或 `Authorization: Bearer <JWT>`；也接受 `?token=<JWT>`（WS/SSE/调试方便）。
+- 两种认证，二选一（`auth.*` 控制）：`X-API-Key: <key>`（脚本/Agent 首选，密钥在 `auth.api_keys`，可多个）或 `Authorization: Bearer <JWT>`。`?token=<JWT>` **只对 WebSocket 端点放行**（`/api/v1/ws/events` 与 `/api/v1/sessions/{id}/shell`）—— 浏览器 WebSocket API 无法自定义请求头，只能用查询串；其余路径一律**忽略**查询串 token（即使 JWT 有效也按未认证 → 401，响应提示改用 `Authorization` 头），避免 JWT 进入 Nginx/代理访问日志、浏览器历史与 Referer（审计 M6）。
 - 登录 `POST /login`，**body 是 JSON**（不是 form）：`{"username":"admin","password":"..."}` → `{"token":"...","username":"admin"}`。`auth.enabled=false` 时任意凭据都发 token；5 分钟内连续 5 次失败锁定 5 分钟 → `429`。
 - `GET /health`、`/login` 不经 API Key/JWT 中间件；`/api/v1/implant/*` 豁免 Web 防护。
 - **Web 防护（防测绘，`web.*`）在认证之前**：启用后所有请求都需 Basic 凭据 / 入口 Cookie / 有效 API Key 或 JWT；未认证时 `unauth_mode=disguise` 返回 **404**、`basic` 返回 401。故"health 免认证"只在 Web 防护关闭时成立，带凭据的脚本始终放行。
 - **错误信封** `{"error":"..."}`。**构建失败**经 `writeJSONError` 输出，含换行/引号的错误文本已转义，**是合法 JSON**，可直接 `JSON.parse`；其余 handler 用 `http.Error` 写字符串（`text/plain`），多为 `{"error":...}` 形状但不保证合法 JSON，解析失败时读原始文本。
 - 起步：`GET /health` → 带凭据 `GET /sessions`。
+
+### 1.1 凭据等价于 root：API Key / JWT 必须按高权限凭据对待（审计 L6）
+
+管理 API Key / JWT（以及 Web 登录口令）在 ToShell 里**没有 RBAC 分级**：任何一把有效凭据都能调用全部管理接口。其中设置接口的 `builder.mingw_gcc_path` / `builder.sign_signtool_path` 会在构建/签名时被当作**子进程路径执行** —— 能改这两个配置，就等于能让服务端执行任意本地程序。因此：
+
+- 按 **root 凭据** 管理：不要共享 key/账号，不要贴进聊天、工单、截图或 CI 明文变量（用 secret store / CI secret 注入）；
+- 每把 key 只给一个人/一个自动化，怀疑泄露立即 `rotate_api_key`，再用 `remove_api_key` 删掉旧值；
+- 管理 API **没有内置 TLS**（审计 M6）：跨主机访问必须放在 TLS 终止代理之后；代理访问日志会记录完整 URL，所以更不要把 JWT 放进查询串；
+- 构建/签名路径属于高权限变更：改完请核对 `GET /logs` 与配置文件 diff，发现非预期修改先轮换凭据再排查。
 
 ## 2. 端点总览
 
@@ -207,11 +216,11 @@ curl -s -X POST "$BASE/mcp/tools/exec" -H "X-API-Key: $KEY" -H 'Content-Type: ap
 
 **`security`**：`admin_username`、`new_password`（明文，保存时 bcrypt，**≥8 位**）；`auth_enabled`/`jwt_enabled`/`api_key_enabled` 可改，但**服务端拒绝三者同时为 false → HTTP 400**；`api_keys` 整组替换（`[]` 清空，不传=不改，含 `****` 的项忽略）；`rotate_api_key:true` 生成新 key 追加并**仅本次**回传 `new_api_key`；`remove_api_key:"<key>"` 移除指定 key。
 
-**其它段**：`listener` —— `enabled`/`host`/`public_host` 热生效，`port`/`protocol`/`tls_enabled` 需重启，`mimicry_profile` 须为已知模板名，`front_domain` 须为合法域名，`mimicry_site` 须为 http(s) URL。`implant` —— `interval`/`jitter`(≤100)/`retry_wait`/`kill_date`/`working_hours`/`startup_delay_min|max`(≥0) 是**后续构建载荷的缺省值**。`notifications` —— `enabled`/`url`(http(s))/`content`/`only_online`/`format(auto|dingtalk|feishu|wecom|slack|discord|generic)`/`secret`。`ai` —— `enabled`/`base_url`(http(s)://)/`api_key`(含 `****` 忽略)/`model`/`timeout`/`max_turns`/`consent_mode(auto|normal)`/`agent_concurrency(1-8)`/`download_allowlist[]`。`web` —— `basic_auth_enabled`（开启前必须已有用户名+密码，否则 400 防自锁）/`basic_auth_user`/`new_password`(≥8)/`unauth_mode(disguise|basic)`/`decoy_title`/`allow_cidrs[]`/`stealth_key`（`""` 清除、`"regenerate"` 服务端生成并仅本次回传、自定义 ≥16 位）；GET 只回 `password_set`/`stealth_key_set` 与入口 `/__gate?k=<密钥>`。一个可保存项都没有 → 400 `"没有可保存的配置项"`。保存成功后认证配置立即热替换（新用户名/密码即刻生效），并回调主循环热更新 listener 拟态等。
+**其它段**：`listener` —— `enabled`/`host`/`public_host` 热生效，`port`/`protocol`/`tls_enabled` 需重启，`mimicry_profile` 须为已知模板名，`front_domain` 须为合法域名，`mimicry_site` 须为 http(s) URL。`implant` —— `interval`/`jitter`(≤100)/`retry_wait`/`kill_date`/`working_hours`/`startup_delay_min|max`(≥0) 是**后续构建载荷的缺省值**。`notifications` —— `enabled`/`url`(http(s))/`content`/`only_online`/`format(auto|dingtalk|feishu|wecom|slack|discord|generic)`/`secret`（**只写不回显**：GET 只给 `secret_set: true/false`，不返回明文；`POST /settings/webhook/test` 省略 secret 时服务端自动用已保存的密钥）。`ai` —— `enabled`/`base_url`(http(s)://)/`api_key`(含 `****` 忽略)/`model`/`timeout`/`max_turns`/`consent_mode(auto|normal)`/`agent_concurrency(1-8)`/`download_allowlist[]`。`web` —— `basic_auth_enabled`（开启前必须已有用户名+密码，否则 400 防自锁）/`basic_auth_user`/`new_password`(≥8)/`unauth_mode(disguise|basic)`/`decoy_title`/`allow_cidrs[]`/`stealth_key`（`""` 清除、`"regenerate"` 服务端生成并仅本次回传、自定义 ≥16 位）；GET 只回 `password_set`/`stealth_key_set` 与入口 `/__gate?k=<密钥>`。一个可保存项都没有 → 400 `"没有可保存的配置项"`。保存成功后认证配置立即热替换（新用户名/密码即刻生效），并回调主循环热更新 listener 拟态等。
 
 ## 10. 常见任务（curl / PowerShell）
 
-本机默认开发环境 `http://127.0.0.1:18081`；`configs/server.yaml` 的开发 API Key 为 `Qingshan@2026`（**部署前必须更换**）。`BASE=http://127.0.0.1:18081/api/v1`，`JSON='Content-Type: application/json'`。
+本机默认开发环境 `http://127.0.0.1:18081`；下文示例中的 API Key 一律写成 `change-me`（**示例值不可直接使用**，真实 key 见 `auth.api_keys`，部署前务必更换）。`BASE=http://127.0.0.1:18081/api/v1`，`JSON='Content-Type: application/json'`。
 
 ```bash
 # ① 健康 + 登录取 JWT
@@ -258,7 +267,7 @@ curl -s -X POST "$BASE/sessions/<SID>/fileless-exec" -H "X-API-Key: $KEY" -H "$J
 
 ```powershell
 $BASE = 'http://127.0.0.1:18081/api/v1'
-$h = @{ 'X-API-Key' = 'Qingshan@2026' }
+$h = @{ 'X-API-Key' = 'change-me' }
 Invoke-RestMethod "$BASE/sessions" -Headers $h
 $b = @{ name='ps-exe'; format='exe'; os='windows'; arch='amd64'; sign_enabled=$true } | ConvertTo-Json
 Invoke-RestMethod -Method Post -Uri "$BASE/builders" -Headers $h -ContentType 'application/json' -Body $b

@@ -110,3 +110,7 @@ vshell/
 # Rust 体积探针的构建产物（源码入库，产物不入库）
 docs/rust-probe/out/
 docs/rust-probe/cargo-tls/target/
+
+# 第三方安全审计原始报告：内含逐步可复制的 PoC 与真实测试机地址，不入库；
+# 对外只发布脱敏后的「修复说明 + 验证证据」（见 docs/SECURITY-FIXES-1.4.2.md）。
+Toshell_AUDIT_*.md

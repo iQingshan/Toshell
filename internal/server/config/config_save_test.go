@@ -27,8 +27,8 @@ auth:
     enabled: true
     admin_username: admin
     admin_password: "$2a$10$abcdefghijklmnopqrstuv"
-    api_keys: Qingshan@2026
-    jwt_key: 1Fa9FroKzPaD6Bpn2t53ICRyhMBScAho7RJE9AkCFFw=
+    api_keys: test-api-key-not-real
+    jwt_key: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ai:
     enabled: true
     consent_mode: auto

@@ -39,9 +39,9 @@ type WSHub struct {
 }
 
 var wsUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+	// 审计 M8：与 shell WS 共用同一套 Origin 判定（空 Origin 放行、
+	// 同 host 放行、外站拒绝），不再无条件返回 true。
+	CheckOrigin:     originAllowed,
 	ReadBufferSize:  1024,
 	WriteBufferSize: 4096,
 }

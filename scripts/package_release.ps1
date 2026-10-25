@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $base = Split-Path -Parent $PSScriptRoot
 Set-Location $base
 
-$version = '1.4.1'
+$version = '1.4.2'
 $commit = (git rev-parse --short HEAD)
 $buildTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ldflags = "-s -w -X main.version=$version -X main.commit=$commit -X main.buildTime=$buildTime"

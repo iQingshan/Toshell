@@ -104,6 +104,18 @@ listener:
     mqtt_broker_url: ""
     mqtt_topic_prefix: toshell
     mqtt_embedded_broker: false
+    # ── 内嵌 MQTT broker 的安全边界（审计 M5）─────────────────────────────
+    # mqtt_embedded_bind：内嵌 broker 的绑定主机（端口仍用 listener.port）。
+    #   默认 "127.0.0.1"，**只允许本机连接**。内嵌 broker 没有 TLS，未配账号
+    #   密码时任何能访问该端口的人都能匿名订阅/注入 toshell/<session_id>/up|down
+    #   主题。所以：不要把 broker 暴露到公网；确需跨机使用时，先配
+    #   mqtt_username/mqtt_password，并用防火墙限制来源地址。
+    mqtt_embedded_bind: "127.0.0.1"
+    # mqtt_username / mqtt_password：内嵌 broker 的可选账号密码。
+    #   两者留空 = 匿名放行（此时仍强制只绑回环）；配了就启用 auth.Hook 校验，
+    #   服务端自身的 MQTT 客户端也会带上同一组凭据。
+    mqtt_username: ""
+    mqtt_password: ""
     # ── WebSocket 主动探测面（v1.4.0 S5 第 0 步）────────────────────────────
     # ws_path：WS 监听器**唯一**允许升级的请求路径，其它路径一律返回普通 404
     #   （与"这个路径没有处理器"逐字节不可区分），主动探测者拿不到

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -522,6 +523,11 @@ func (l *Listener) handleMessage(conn *transport.Conn, data []byte) {
 	decompressed, err := decompressData(decrypted)
 	if err != nil {
 		fmt.Printf("[ERROR] [listener] Failed to decompress data: %v\n", err)
+		// 解压超限（压缩炸弹）属于协议级攻击：断开连接而不是丢掉这一帧后
+		// 继续在同一连接上读下一帧，避免攻击者反复触发。
+		if errors.Is(err, errDecompressedTooLarge) {
+			_ = conn.Close()
+		}
 		return
 	}
 
@@ -1057,6 +1063,21 @@ func compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// maxDecompressed 单帧解压后的最大字节数（32 MiB）。
+//
+// 为什么不复用 16 MiB 的线上帧上限（maxFrameSize，见 tcp_listener.go）：
+// 那个 16 MiB 约束的是**压缩后**的帧，而 gzip 是放大体积的方向 —— 正常业务帧
+// （10 MB 协议负载 + TSHL 头 + JSON 包装）压缩后可能只有几 MB，解压后仍可能
+// 合法地超过 16 MiB。取 32 MiB（= 2 × 帧上限）既给正常大帧留出余量，又把
+// "压缩炸弹"的膨胀上限从 GB 级压到 32 MiB；16 MiB 输入最多解出 32 MiB。
+const maxDecompressed = 32 << 20 // 32 MiB
+
+// errDecompressedTooLarge 解压结果超过 maxDecompressed。
+//
+// 单独定义成哨兵错误：调用方要能区分"帧内容坏了"（可以跳过这一帧）与
+// "这是压缩炸弹"（必须按协议错误断开连接 / 回 413），不能静默截断。
+var errDecompressedTooLarge = errors.New("decompressed data exceeds limit")
+
 func decompressData(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return data, nil
@@ -1073,9 +1094,16 @@ func decompressData(data []byte) ([]byte, error) {
 	}
 	defer gr.Close()
 
-	decompressed, err := io.ReadAll(gr)
+	// 多读 1 字节：读满 maxDecompressed+1 即可判定超限，不需要等 gzip 流结束
+	// （攻击者可以构造一个解压后几乎无限长的流）。超限返回明确错误，由上层
+	// 按协议错误处理 —— 绝不把截断后的前 32 MiB 当正常数据继续解析。
+	limited := io.LimitReader(gr, maxDecompressed+1)
+	decompressed, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, err
+	}
+	if len(decompressed) > maxDecompressed {
+		return nil, fmt.Errorf("%w: limit %d bytes", errDecompressedTooLarge, maxDecompressed)
 	}
 
 	return decompressed, nil

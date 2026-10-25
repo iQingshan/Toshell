@@ -2,7 +2,10 @@
 # =====================================================================
 #  ToShell 核心链路冒烟回归（发版门禁）
 #  用法:  ./scripts/smoke.sh [SERVER_URL] [API_KEY]
-#  默认 SERVER_URL=http://127.0.0.1:18081  API_KEY=Qingshan@2026
+#  默认 SERVER_URL=http://127.0.0.1:18081
+#  API Key 取值顺序：第 2 个参数 > 环境变量 TOSHELL_API_KEY > 占位值 change-me-smoke-key。
+#  ⚠️ 必须传入你自己的 key（参数或 TOSHELL_API_KEY）：默认占位值不是可用凭据，
+#     仓库不内置任何真实密钥。示例：TOSHELL_API_KEY=xxx ./scripts/smoke.sh
 #
 #  覆盖（不依赖真实植入端，服务端自闭环）：
 #    1. /health                      服务在线
@@ -14,7 +17,7 @@
 # =====================================================================
 set -u
 BASE="${1:-http://127.0.0.1:18081/api/v1}"
-KEY="${2:-Qingshan@2026}"
+KEY="${2:-${TOSHELL_API_KEY:-change-me-smoke-key}}"
 H="X-API-Key: $KEY"
 PASS=0; FAIL=0
 

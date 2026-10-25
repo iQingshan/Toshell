@@ -2,7 +2,11 @@ package task
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -601,6 +605,11 @@ func (m *Manager) lookupLocked(id uint64) (*types.TaskInfo, bool) {
 	return task, true
 }
 
+// Complete 把任务置为 completed。
+//
+// 内部用，不要直接接外部输入：调用方必须已经确认任务归属（监听器帧 / ForSession
+// 系列）。审计 H1 的根因就是把 HTTP 请求里的 TaskID 直接接到了这里；外部入口
+// 请用 CompleteForSession。
 func (m *Manager) Complete(id uint64, exitCode int32, output, errorMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -659,6 +668,8 @@ func (m *Manager) Complete(id uint64, exitCode int32, output, errorMsg string) e
 }
 
 // Fail 把任务置为失败终态（调用方没有输出可回传时用；ExitCode 保持原值）。
+//
+// 内部用，不要直接接外部输入：外部入口请用 FailForSession / FailWithResultForSession。
 func (m *Manager) Fail(id uint64, errorMsg string) error {
 	return m.fail(id, nil, "", errorMsg)
 }
@@ -669,8 +680,140 @@ func (m *Manager) Fail(id uint64, errorMsg string) error {
 // 正是排障最需要的东西 —— 例如内存执行的工具退出码 1，而 stdout 里写着失败原因。
 // 旧路径只调 Fail(errMsg)、把 result.Output 丢掉，结果就是"失败任务只剩一句
 // exit code 7"，与"截断/丢失必须显式可见"的既定口径相悖。
+//
+// 内部用，不要直接接外部输入：外部入口请用 FailWithResultForSession。
 func (m *Manager) FailWithResult(id uint64, exitCode int32, output, errorMsg string) error {
 	return m.fail(id, &exitCode, output, errorMsg)
+}
+
+// ─── 归属校验（审计 H1）──────────────────────────────────────────────────────
+//
+// 背景：任务 id 是进程内全局递增计数器（重启后由 DB 最大值校准），非常容易预测。
+// 2026-10-24 审计的 H1 正是：/api/v1/implant/result 只按 TaskID 调 Complete/Fail，
+// 不校验任务属于哪个会话，于是任何能打这个端点的人都能伪造/终止任意任务，并把
+// 可控文本送进内置 Agent 的上下文（prompt injection）与情报库（投毒）。
+//
+// 下面这组方法把“归属校验”做成终结的前置条件：task.SessionID 必须等于上报会话，
+// 否则返回 ErrTaskNotOwnedBySession（错误文本含 "task not owned by session"），
+// 且任务状态一点不改。老的 Complete/Fail 保持原签名与行为，仅供已确认归属的
+// 内部调用方（监听器帧、测试）使用。
+
+// ErrTaskNotOwnedBySession 结果上报的会话与任务归属不一致（审计 H1）。
+var ErrTaskNotOwnedBySession = errors.New("task not owned by session")
+
+// ErrTaskNotFound 任务不存在（供 ForSession 系列与 API 层统一判定 404）。
+var ErrTaskNotFound = errors.New("task not found")
+
+// normalizeTaskID 把外部传入的任务 id 归一成 uint64。
+//
+// 参数声明为 interface{} 是为了兼容历史调用方可能传 int/uint64/float64/json.Number/
+// string；拒绝 0、负数、小数与无法解析的字符串（任务 id 由 Create 从 1 开始分配）。
+// float64 超过 2^53 时已丢失精度，直接拒绝而不是静默截断成错误的 id。
+func normalizeTaskID(v interface{}) (uint64, error) {
+	switch n := v.(type) {
+	case uint64:
+		if n != 0 {
+			return n, nil
+		}
+	case uint:
+		if n != 0 {
+			return uint64(n), nil
+		}
+	case uint32:
+		if n != 0 {
+			return uint64(n), nil
+		}
+	case int:
+		if n > 0 {
+			return uint64(n), nil
+		}
+	case int64:
+		if n > 0 {
+			return uint64(n), nil
+		}
+	case int32:
+		if n > 0 {
+			return uint64(n), nil
+		}
+	case float64:
+		if n > 0 && n == math.Trunc(n) && n <= 1<<53 {
+			return uint64(n), nil
+		}
+	case json.Number:
+		if u, err := strconv.ParseUint(string(n), 10, 64); err == nil && u != 0 {
+			return u, nil
+		}
+	case string:
+		if u, err := strconv.ParseUint(strings.TrimSpace(n), 10, 64); err == nil && u != 0 {
+			return u, nil
+		}
+	}
+	return 0, fmt.Errorf("invalid task id: %v", v)
+}
+
+// assertTaskOwnership 校验任务存在且属于 sessionID。
+//
+// 放在终结之前单独校验（而不是在 Complete/Fail 里加参数）有两个好处：
+//   - 老方法签名零改动，其它调用方（监听器/测试）不受影响；
+//   - 归属校验与状态改写之间的窗口只依赖“SessionID 创建后不可变”这一事实，
+//     不存在“先校验、再被另一个请求改归属”的 TOCTOU（SessionID 没有写入路径）。
+func (m *Manager) assertTaskOwnership(taskID uint64, sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("%w: empty session id", ErrTaskNotOwnedBySession)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.lookupLocked(taskID)
+	if !ok {
+		return fmt.Errorf("%w: %d", ErrTaskNotFound, taskID)
+	}
+	if task.SessionID != sessionID {
+		return fmt.Errorf("%w: task %d belongs to session %q, not %q",
+			ErrTaskNotOwnedBySession, taskID, task.SessionID, sessionID)
+	}
+	return nil
+}
+
+// CompleteForSession 仅当任务归属 sessionID 时才置为 completed。
+//
+// 为什么需要（审计 H1）：TaskID 是进程内全局递增、极易预测；不校验归属时，任何
+// 能打 /api/v1/implant/result 的人都能伪造/终止任意任务，并把可控文本送进 Agent
+// 的上下文。归属不符返回 ErrTaskNotOwnedBySession，任务保持原状态。
+func (m *Manager) CompleteForSession(taskID interface{}, sessionID string, exitCode int32, output string) error {
+	id, err := normalizeTaskID(taskID)
+	if err != nil {
+		return err
+	}
+	if err := m.assertTaskOwnership(id, sessionID); err != nil {
+		return err
+	}
+	return m.Complete(id, exitCode, output, "")
+}
+
+// FailForSession 仅当任务归属 sessionID 时才置为失败终态（不携带输出/退出码）。
+func (m *Manager) FailForSession(taskID interface{}, sessionID string, errMsg string) error {
+	id, err := normalizeTaskID(taskID)
+	if err != nil {
+		return err
+	}
+	if err := m.assertTaskOwnership(id, sessionID); err != nil {
+		return err
+	}
+	return m.Fail(id, errMsg)
+}
+
+// FailWithResultForSession 是 FailForSession 的“带输出”版本：归属校验完全一致，
+// 但保留植入端回传的 Output 与 ExitCode（v1.4.0 S6 P0-2 的既定语义）。
+// 兼容端点 /result 走这条路径，避免为了安全把“失败任务也要留下输出”修回去。
+func (m *Manager) FailWithResultForSession(taskID interface{}, sessionID string, exitCode int32, output, errMsg string) error {
+	id, err := normalizeTaskID(taskID)
+	if err != nil {
+		return err
+	}
+	if err := m.assertTaskOwnership(id, sessionID); err != nil {
+		return err
+	}
+	return m.FailWithResult(id, exitCode, output, errMsg)
 }
 
 func (m *Manager) fail(id uint64, exitCode *int32, output, errorMsg string) error {

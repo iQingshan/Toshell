@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -90,7 +91,15 @@ func (s *Server) mcpToolInvokeHandler(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.invokeTool(name, params)
 	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
+		// 参数非法（如 plugin_upload 的插件名不合法）返回 4xx，其它执行错误保持 404。
+		// 用 JSON 编码而不是拼接字符串：错误消息里可能带引号/反斜杠（来自用户输入）。
+		status := http.StatusNotFound
+		if errors.Is(err, plugin.ErrInvalidName) {
+			status = http.StatusBadRequest
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	json.NewEncoder(w).Encode(result)
@@ -390,7 +399,13 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		}
 		name := params["name"]
 		if name == "" {
-			name = src
+			// 默认用 source 的纯文件名（source 允许是 data/tools 下的相对子路径）。
+			name = filepath.Base(src)
+		}
+		// 先校验 name、再解析/读取 source：非法名字直接 4xx，绝不先落盘再报错。
+		// 这里与 Manager.Add 用同一个校验函数（Add 内部还会再校验一次，纵深防御）。
+		if verr := plugin.ValidatePluginName(name); verr != nil {
+			return nil, verr
 		}
 		toolPath, terr := resolveToolPath(src)
 		if terr != nil {
@@ -400,7 +415,11 @@ func (s *Server) invokeTool(name string, params map[string]string) (interface{},
 		if rerr != nil {
 			return nil, fmt.Errorf("read tool failed: %w", rerr)
 		}
-		p, perr := plugin.GetManager().Add(name, data, params["description"])
+		mgr := plugin.GetManager()
+		if mgr == nil {
+			return nil, fmt.Errorf("插件管理器未初始化")
+		}
+		p, perr := mgr.Add(name, data, params["description"])
 		if perr != nil {
 			return nil, perr
 		}

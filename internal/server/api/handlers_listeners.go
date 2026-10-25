@@ -434,6 +434,12 @@ func (s *Server) startListenerByID(id string) error {
 		lc.MQTTBrokerURL = rec.Options.MQTTBrokerURL
 		lc.MQTTTopicPrefix = rec.Options.MQTTTopicPrefix
 		lc.MQTTEmbeddedBroker = rec.Options.MQTTEmbeddedBroker
+		// 审计 M5：内嵌 broker 的绑定地址/账号密码是全局安全口径（默认只绑
+		// 回环），与 encryption_key 一样从当前生效配置继承，而不是每个监听器
+		// 各配一份 —— 分散配置必然出现"漏配 = 又暴露回 0.0.0.0"。
+		lc.MQTTEmbeddedBind = live.Listener.MQTTEmbeddedBind
+		lc.MQTTUsername = live.Listener.MQTTUsername
+		lc.MQTTPassword = live.Listener.MQTTPassword
 		ml, err := listener.NewMQTTListener(lc, s.sessionMgr, s.taskMgr)
 		if err != nil {
 			return err

@@ -137,6 +137,31 @@ func (a *Auth) ValidateAPIKey(apiKey string) bool {
 	return false
 }
 
+// tokenQueryAllowed 判断该请求路径是否允许用 `?token=<JWT>` 认证。
+//
+// 只对浏览器发起的 WebSocket 放行，因为浏览器的 WebSocket API **无法自定义请求头**
+// （不能带 Authorization / X-API-Key），`?token=` 是前端唯一可用的传参方式；
+// 事件流（含实时屏幕帧）统一走 /api/v1/ws/events，交互式 shell 走
+// /api/v1/sessions/{id}/shell。除此之外的管理 API 一律必须走 Authorization: Bearer，
+// 避免 JWT 落进 Nginx/代理访问日志、浏览器历史与 Referer（审计 M6）。
+//
+// 注意：这里做的是**纯函数**，不读配置、不发请求，便于单测覆盖（回归测试见 auth_test.go）。
+func tokenQueryAllowed(path string) bool {
+	if path == "/api/v1/ws/events" {
+		return true
+	}
+	// /api/v1/sessions/{id}/shell 及其子路径（如将来新增 /shell/xxx），id 不能为空。
+	const prefix = "/api/v1/sessions/"
+	if strings.HasPrefix(path, prefix) {
+		rest := strings.TrimPrefix(path, prefix)
+		if i := strings.IndexByte(rest, '/'); i > 0 {
+			tail := rest[i:]
+			return tail == "/shell" || strings.HasPrefix(tail, "/shell/")
+		}
+	}
+	return false
+}
+
 func (a *Auth) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -167,8 +192,12 @@ func (a *Auth) Middleware() func(http.Handler) http.Handler {
 				}
 			}
 
+			// `?token=` 仅对 WebSocket 路径放行（浏览器 WS API 不能自定义请求头）。
+			// 其它路径一律忽略查询串里的 token —— 即使 JWT 本身有效也按未认证处理，
+			// 并在响应里给出可辨识原因，避免「以为是 token 过期」这类误判。
 			token := r.URL.Query().Get("token")
-			if token != "" && a.Config.JWTEnabled {
+			queryTokenAllowed := tokenQueryAllowed(r.URL.Path)
+			if token != "" && a.Config.JWTEnabled && queryTokenAllowed {
 				claims, err := a.ValidateToken(token)
 				if err == nil && claims != nil {
 					r.Header.Set("X-Username", claims.Username)
@@ -183,6 +212,11 @@ func (a *Auth) Middleware() func(http.Handler) http.Handler {
 				return
 			}
 
+			if token != "" && a.Config.JWTEnabled && !queryTokenAllowed {
+				// 401 而不是 403：语义上仍是「未认证」；文本里点名正确用法，便于排障。
+				http.Error(w, "Unauthorized: token must be sent via Authorization header (query token is only accepted for WebSocket endpoints)", http.StatusUnauthorized)
+				return
+			}
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		})
 	}

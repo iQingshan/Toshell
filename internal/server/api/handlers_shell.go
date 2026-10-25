@@ -3,6 +3,8 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,10 +12,48 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
+// originAllowed 校验 WebSocket 握手的 Origin（审计 M8）。
+//
+// 允许：
+//   - Origin 为空：非浏览器客户端（CLI、自动化脚本、植入端）不发 Origin；
+//   - Origin 的 host（含端口时逐字一致）与本次请求的 Host 相同：同源页面；
+//   - Origin 的 host 与 `X-Forwarded-Host` 相同：控制台部署在反代后面、且反代把
+//     Host 改写成后端地址时（例如 nginx `proxy_set_header Host 127.0.0.1:8081;`），
+//     浏览器发的 Origin 是外部域名，与 r.Host 永远不相等 —— 不放行这条会让
+//     "按文档挂 TLS 反代"的部署直接连不上 WS。
+//     安全性：`X-Forwarded-Host` 由反代写入，浏览器无法伪造；非浏览器客户端
+//     本来就不发 Origin（走第一条）。因此这条不构成 CSWSH 面的放宽。
+//
+// 其余一律拒绝。此前两个 upgrader 都写死 CheckOrigin=true，等于放弃浏览器
+// 同源这层纵深防御 —— 一旦 token 通过 URL 泄露（M6）并叠加 XSS，攻击者
+// 就能从任意站点跨站建立 shell/事件流。
+func originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
 		return true
-	},
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
+		// 反代可能写成逗号分隔的链（client, proxy1, proxy2），取最左一跳，
+		// 与 Host 比较时忽略大小写。
+		if i := strings.Index(fwd, ","); i >= 0 {
+			fwd = strings.TrimSpace(fwd[:i])
+		}
+		if strings.EqualFold(u.Host, fwd) {
+			return true
+		}
+	}
+	return false
+}
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: originAllowed,
 }
 
 type ShellController interface {
@@ -41,6 +81,12 @@ func (s *Server) shellWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+
+	// 审计 M8：限制**单个** WebSocket 消息的读取上限。认证用户（或泄露的
+	// token）原本可以发任意大帧把服务端内存打满；shell 输入是人工键入/粘贴，
+	// 1 MiB 远高于正常单条指令，又小于 16 MiB 的协议帧上限。
+	// 注意：既有 SetReadDeadline / pong 逻辑保持不变（此处不涉及）。
+	conn.SetReadLimit(1 << 20)
 
 	fmt.Printf("[INFO] [shell] WebSocket connected for session: %s\n", sessionID)
 

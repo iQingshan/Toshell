@@ -487,14 +487,30 @@ func (s *Server) setupRoutes() {
 	// （运维监控请携带 X-API-Key 或 Basic 凭据）
 	s.router.Handle("/api/v1/health", s.webGate(http.HandlerFunc(s.healthHandler))).Methods("GET")
 
-	implant := s.router.PathPrefix("/api/v1/implant").Subrouter()
-	implant.HandleFunc("/register", s.implantRegisterHandler).Methods("POST")
-	implant.HandleFunc("/heartbeat", s.implantHeartbeatHandler).Methods("POST")
-	implant.HandleFunc("/result", s.implantResultHandler).Methods("POST")
+	// ─── 植入端协议兼容端点（审计 H1/M1）─────────────────────────────────────
+	// 这三条历史上完全未认证，且直接按 TaskID/全局会话表操作状态。现在与其它
+	// 管理 API 同层保护：先 auth.Middleware（未认证明确 401），再 webGate
+	// （防测绘；不再命中 implantExemptPrefixes）。
+	//
+	// 顺序说明：auth 在前，所以无论 webGate 是 disguise 还是 basic 模式，
+	// 未认证请求都会得到 401 而不是 404 —— 这是审计验证要求的可判定状态码。
+	implantAuthed := s.router.PathPrefix("/api/v1/implant").Subrouter()
+	if s.auth != nil {
+		implantAuthed.Use(s.auth.Middleware())
+	}
+	implantAuthed.Use(s.webGate)
+	implantAuthed.HandleFunc("/register", s.implantRegisterHandler).Methods("POST")
+	implantAuthed.HandleFunc("/heartbeat", s.implantHeartbeatHandler).Methods("POST")
+	implantAuthed.HandleFunc("/result", s.implantResultHandler).Methods("POST")
+
 	// 免认证载荷下载端点：供"一条命令上线"在目标机上直接拉取 exe（无 token 可用）。
-	implant.HandleFunc("/payload/{id}", s.downloadStoredImplantHandler).Methods("GET")
+	// 单独注册在**不挂 auth** 的子路由上；webGate 靠 implantExemptPrefixes 放行，
+	// 两层都明确表达“这两个前缀是产品有意免认证的”。
+	implantPublic := s.router.PathPrefix("/api/v1/implant").Subrouter()
+	implantPublic.Use(s.webGate)
+	implantPublic.HandleFunc("/payload/{id}", s.downloadStoredImplantHandler).Methods("GET")
 	// 免认证一次性 UAC 提权载荷（fodhelper 拉起的高完整性进程无 token）。
-	implant.HandleFunc("/uac/{token}", s.uacPayloadHandler).Methods("GET")
+	implantPublic.HandleFunc("/uac/{token}", s.uacPayloadHandler).Methods("GET")
 
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 
@@ -658,10 +674,16 @@ func (s *Server) setupRoutes() {
 	s.router.PathPrefix("/").Handler(s.webGate(s.serveSPA()))
 }
 
-// implantExemptPrefixes Web 防护豁免前缀：植入端协议与免认证载荷下载。
-// 这些路径由植入端在不具备浏览器认证凭据的情况下访问，一旦被拦住会话会直接失联。
+// implantExemptPrefixes Web 防护豁免前缀：**只有**两个产品有意免认证的载荷下载端点。
+// 审计 H1/M1 修复：旧值是整个 "/api/v1/implant/"，把 register/heartbeat/result
+// 这三个会改全局状态的历史兼容端点也一起豁免了 webGate。现在收窄到：
+//   - /api/v1/implant/payload/：免认证载荷下载（一条命令上线，目标机无凭据）；
+//   - /api/v1/implant/uac/：一次性 UAC 提权载荷（高完整性进程无凭据）。
+//
+// 其余 /api/v1/implant/ 子路径不再豁免；协议端点另由 auth.Middleware 保护。
 var implantExemptPrefixes = []string{
-	"/api/v1/implant/",
+	"/api/v1/implant/payload/",
+	"/api/v1/implant/uac/",
 }
 
 // webConfig Web 防护配置：**每次请求读取**实时配置（config.Get()），

@@ -248,7 +248,9 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			"content":     cfg.Webhook.Content,
 			"only_online": cfg.Webhook.OnlyOnline,
 			"format":      cfg.Webhook.Format,
-			"secret":      cfg.Webhook.Secret,
+			// 加签 secret 只回传"是否已设置"，绝不回传明文（审计 L5）；
+			// PUT 仍可写：传空串=清除，传非空=覆盖。
+			"secret_set": strings.TrimSpace(cfg.Webhook.Secret) != "",
 		},
 		Security: map[string]interface{}{
 			"auth_enabled":    cfg.Auth.Enabled,
@@ -1148,7 +1150,17 @@ func (s *Server) testWebhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := webhook.SendTest(req.URL, req.Content, req.Format, req.Secret)
+	// GET /settings 不再回传 webhook secret 明文（审计 L5），因此设置页的
+	// 「发送测试通知」按钮拿不到已保存的加签密钥。这里在请求未显式提供 secret 时
+	// 回退到服务端当前配置的密钥：密钥不回到浏览器，签名校验仍能照常测试。
+	secret := req.Secret
+	if secret == "" {
+		if cur := config.Get(); cur != nil {
+			secret = cur.Webhook.Secret
+		}
+	}
+
+	result, err := webhook.SendTest(req.URL, req.Content, req.Format, secret)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"发送失败: %v"}`, err), http.StatusBadGateway)
 		return
