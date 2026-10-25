@@ -457,39 +457,39 @@ func taskTimeUnixOf(v interface{}) int64 {
 	return 0
 }
 
-func (d *Database) GetTask(id uint64) (*types.TaskInfo, error) {
-	d.lock.RLock()
-	defer d.lock.RUnlock()
-
+// scanTask 按固定列顺序读一行 tasks（Get/List 共用），时间列走兼容解析。
+func scanTask(scan func(dest ...interface{}) error) (*types.TaskInfo, error) {
 	var task types.TaskInfo
 	var argsJSON string
 	var createdAt int64
 	var sentAtRaw, completedAtRaw interface{}
 
-	err := d.db.QueryRow(`
-		SELECT id, session_id, command, args, execute_type, status, created_at, sent_at, completed_at, output, error, exit_code, timeout
-		FROM tasks WHERE id = ?
-	`, id).Scan(&task.ID, &task.SessionID, &task.Command, &argsJSON, &task.ExecuteType, &task.Status, &createdAt, &sentAtRaw, &completedAtRaw, &task.Output, &task.Error, &task.ExitCode, &task.Timeout)
-
-	if err != nil {
+	if err := scan(&task.ID, &task.SessionID, &task.Command, &argsJSON, &task.ExecuteType, &task.Status,
+		&createdAt, &sentAtRaw, &completedAtRaw, &task.Output, &task.Error, &task.ExitCode, &task.Timeout); err != nil {
 		return nil, err
 	}
 
-	sentAt := taskTimeUnixOf(sentAtRaw)
-	completedAt := taskTimeUnixOf(completedAtRaw)
-
 	json.Unmarshal([]byte(argsJSON), &task.Args)
 	task.CreatedAt = time.Unix(createdAt, 0)
-	if sentAt > 0 {
+	if sentAt := taskTimeUnixOf(sentAtRaw); sentAt > 0 {
 		task.SentAt = new(time.Time)
 		*task.SentAt = time.Unix(sentAt, 0)
 	}
-	if completedAt > 0 {
+	if completedAt := taskTimeUnixOf(completedAtRaw); completedAt > 0 {
 		task.CompletedAt = new(time.Time)
 		*task.CompletedAt = time.Unix(completedAt, 0)
 	}
-
 	return &task, nil
+}
+
+func (d *Database) GetTask(id uint64) (*types.TaskInfo, error) {
+	d.lock.RLock()
+	defer d.lock.RUnlock()
+
+	return scanTask(d.db.QueryRow(`
+		SELECT id, session_id, command, args, execute_type, status, created_at, sent_at, completed_at, output, error, exit_code, timeout
+		FROM tasks WHERE id = ?
+	`, id).Scan)
 }
 
 func (d *Database) UpdateTask(task *types.TaskInfo) error {
@@ -519,27 +519,11 @@ func (d *Database) ListTasks() ([]*types.TaskInfo, error) {
 
 	var tasks []*types.TaskInfo
 	for rows.Next() {
-		var task types.TaskInfo
-		var argsJSON string
-		var createdAt, sentAt, completedAt int64
-
-		err := rows.Scan(&task.ID, &task.SessionID, &task.Command, &argsJSON, &task.ExecuteType, &task.Status, &createdAt, &sentAt, &completedAt, &task.Output, &task.Error, &task.ExitCode, &task.Timeout)
+		task, err := scanTask(rows.Scan)
 		if err != nil {
 			continue
 		}
-
-		json.Unmarshal([]byte(argsJSON), &task.Args)
-		task.CreatedAt = time.Unix(createdAt, 0)
-		if sentAt > 0 {
-			task.SentAt = new(time.Time)
-			*task.SentAt = time.Unix(sentAt, 0)
-		}
-		if completedAt > 0 {
-			task.CompletedAt = new(time.Time)
-			*task.CompletedAt = time.Unix(completedAt, 0)
-		}
-
-		tasks = append(tasks, &task)
+		tasks = append(tasks, task)
 	}
 
 	return tasks, nil
@@ -582,27 +566,11 @@ func (d *Database) ListTasksBySession(sessionID string) ([]*types.TaskInfo, erro
 
 	var tasks []*types.TaskInfo
 	for rows.Next() {
-		var task types.TaskInfo
-		var argsJSON string
-		var createdAt, sentAt, completedAt int64
-
-		err := rows.Scan(&task.ID, &task.SessionID, &task.Command, &argsJSON, &task.ExecuteType, &task.Status, &createdAt, &sentAt, &completedAt, &task.Output, &task.Error, &task.ExitCode, &task.Timeout)
+		task, err := scanTask(rows.Scan)
 		if err != nil {
 			continue
 		}
-
-		json.Unmarshal([]byte(argsJSON), &task.Args)
-		task.CreatedAt = time.Unix(createdAt, 0)
-		if sentAt > 0 {
-			task.SentAt = new(time.Time)
-			*task.SentAt = time.Unix(sentAt, 0)
-		}
-		if completedAt > 0 {
-			task.CompletedAt = new(time.Time)
-			*task.CompletedAt = time.Unix(completedAt, 0)
-		}
-
-		tasks = append(tasks, &task)
+		tasks = append(tasks, task)
 	}
 
 	return tasks, nil

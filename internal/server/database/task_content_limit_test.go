@@ -111,37 +111,84 @@ func TestTaskOutputSurvivesBeyondLegacy500Bytes(t *testing.T) {
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
-	// 直接读列（不用 ListTasks/GetTask：它们把可空的 sent_at/completed_at 扫进 int64，
-	// 未发送任务会扫失败并 continue —— 那是既有行为，与本用例无关）。
-	readOutput := func() string {
-		t.Helper()
-		var stored string
-		if err := db.SQL().QueryRow("SELECT output FROM tasks ORDER BY id DESC LIMIT 1").Scan(&stored); err != nil {
-			t.Fatalf("读取入库 output 失败：%v", err)
-		}
-		return stored
+	// 通过 GetTask/ListTasks 读回（它们走 scanTask）——同时验证"重启后按 id 回读"
+	// 这条路径没有因为时间列扫描失败而把任务判成 not found。
+	tasks, err := db.ListTasks()
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("ListTasks: %v len=%d", err, len(tasks))
 	}
-	if stored := readOutput(); stored != big {
-		t.Fatalf("默认上限下 4 KiB 结果被截断成 %d 字节（旧 500 字节回归）", len(stored))
+	if tasks[0].Output != big {
+		t.Fatalf("默认上限下 4 KiB 结果被截断成 %d 字节（旧 500 字节回归）", len(tasks[0].Output))
 	}
+	task.ID = tasks[0].ID
 
 	// 小阈值：入库内容被显式截断，且能解析出原始字节数。
 	SetTaskContentMaxBytes(256)
-	// CreateTask 不填 task.ID（自增列），UpdateTask 按 id 更新，所以先取回自增 id。
-	if err := db.SQL().QueryRow("SELECT id FROM tasks ORDER BY id DESC LIMIT 1").Scan(&task.ID); err != nil {
-		t.Fatalf("读取自增 id 失败：%v", err)
-	}
 	task.Output = big
 	if err := db.UpdateTask(task); err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
-	stored := readOutput()
-	truncated, original := TaskContentTruncated(stored)
+	got, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v（回读路径不能因 sent_at/completed_at 扫描失败而丢任务）", err)
+	}
+	truncated, original := TaskContentTruncated(got.Output)
 	if !truncated || original != len(big) {
 		t.Fatalf("小阈值入库未显式标注 truncated：truncated=%v original=%d want %d",
 			truncated, original, len(big))
 	}
-	if len(stored) <= 256 {
-		t.Fatalf("标注太短（%d 字节），应保留 256 字节原文 + 标注", len(stored))
+	if len(got.Output) <= 256 {
+		t.Fatalf("标注太短（%d 字节），应保留 256 字节原文 + 标注", len(got.Output))
+	}
+}
+
+// TestTaskTimesRoundTripAfterRestart 时间列写读一致 + 兼容历史 TEXT 行。
+//
+// 既有缺陷：UpdateTask 曾把 *time.Time 直接交给驱动（写成 TEXT），读取侧却按 int64
+// 扫描 → 进程重启后按 id 回读任务会报 "converting string to int64"，任务看着"丢了"。
+func TestTaskTimesRoundTripAfterRestart(t *testing.T) {
+	resetTaskContentLimit(t)
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "task-time.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	sent := time.Unix(1792900000, 0)
+	done := time.Unix(1792900010, 0)
+	task := &types.TaskInfo{
+		SessionID: "sess-time", TaskType: "command", Status: "completed",
+		Output: "ok", CreatedAt: time.Unix(1792899990, 0),
+		SentAt: &sent, CompletedAt: &done,
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	tasks, err := db.ListTasks()
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("ListTasks: %v len=%d", err, len(tasks))
+	}
+	id := tasks[0].ID
+	got, err := db.GetTask(id)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.SentAt == nil || got.SentAt.Unix() != sent.Unix() {
+		t.Fatalf("sent_at 往返丢失：%v want %d", got.SentAt, sent.Unix())
+	}
+	if got.CompletedAt == nil || got.CompletedAt.Unix() != done.Unix() {
+		t.Fatalf("completed_at 往返丢失：%v want %d", got.CompletedAt, done.Unix())
+	}
+
+	// 老库里的行可能被历史代码写成 TEXT：读取侧必须容忍，不能整行扫失败。
+	if _, err := db.SQL().Exec(`UPDATE tasks SET sent_at = '2026-10-25 12:00:00+08:00' WHERE id = ?`, id); err != nil {
+		t.Fatalf("模拟历史 TEXT 行失败：%v", err)
+	}
+	legacy, err := db.GetTask(id)
+	if err != nil {
+		t.Fatalf("GetTask(历史 TEXT 行)：%v", err)
+	}
+	if legacy.SentAt == nil {
+		t.Fatal("历史 TEXT 行的时间应能被解析出来（而不是被当成 0/丢失）")
 	}
 }

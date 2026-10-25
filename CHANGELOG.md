@@ -19,7 +19,11 @@
 
 **同版追加：凭据链路与标签页体验（现场反馈）**
 
-- **凭据不再"卡死其他任务"**：根因不在植入端队列（`credentials` 本来就是重活、独立 goroutine + 180s 超时），而是 ① 任务结果入库曾被硬截断到 **500 字节**（凭据 dump 远超）② 单写循环被超大结果占住 ③ 重活任务**没有并发闸**、超时后 goroutine 无法取消并在重连时拖住 `heavyWg`。现在：截断阈值可配（`task.output_max_bytes`，默认 **256 KiB**，超限标 `truncated` + 原始字节数并走既有外置回读）、凭据结果按 action **分段**（browser/wifi/rdp/lsa/sam/dpapi，每段 64 KiB 封顶，LSA 无权限时明确写"需要管理员权限"）、重活任务加**并发闸（默认 2）**且 `heavyWg` 等待带上限、结果带 `duration_ms`。前端凭据面板加总超时与阶段提示，分段渲染。
+- **凭据获取：真机一跑就把植入进程打崩**（这是"卡死其他任务"的直接原因）。`dumpRDPCredentials` 把 `CredEnumerateW` 返回的**指针数组槽位地址**当成 `CREDENTIAL_W` 解引用 —— 目标机上一旦有已保存凭据就访问违例，**整进程退出**；服务端只看到 3 个 `credentials` 任务永远停在 `sent` + `forcibly closed`。已改为先取槽位指针再解引用，`ERROR_NOT_FOUND` 视为 0 条。
+- **凭据结果不是合法 JSON**（这是"没完善"的观感来源）：非管理员时旧代码 `return string(jsonData) + privNote`，前端 `JSON.parse` 必失败 → 面板只显示"结果解析失败"。现在提示进 `notes` 字段，返回纯 JSON。
+- **500 字节硬截断**：真正写死在 `database.go`（不是 bridge 层）。改为可配 `task.output_max_bytes`（默认 **256 KiB**），入库超限保留前缀 + 可反解的 `truncated` 标注；Agent 回读层超限**外置成句柄**，`result_read` 可分页拼回原文（单测逐字节比对）。顺带修了"重启后 `GET /tasks/{id}` 报 not found"（`sent_at/completed_at` 写 TEXT、读 int64）。
+- **凭据结果按 action 分段**（browser/wifi/rdp/lsa/sam/dpapi，每段 64 KiB、按整条二分回退不切断 JSON），LSA/SAM 非管理员明确返回"需要管理员权限 + 底层错误"，不再是空串。
+- **重活任务加并发闸**（默认 2，轻任务不排队）+ `waitHeavyTasks(5s)` 超时等待（不再卡重连）+ 结果带 `duration_ms/queued_ms`；前端凭据面板 200s 总超时 + 阶段提示 + 分段表格 + `truncated/omitted` 标注。
 - **切换标签页不再丢状态**：`SessionDetail` 之前只渲染当前 tab（切走即卸载），文件目录、Shell 滚屏、进程搜索词、填了一半的表单全丢。现在"**挂载即保留、切换只隐藏**"（只挂载访问过的 tab，首屏仍只有 1 个；切会话清空；aria/tabpanel 语义保持正确）；屏幕流隐藏时停流但保留最后一帧。
 - **如实记一条能力边界**：本机虽装了 `garble v0.15.0` 且构建页有开关，但它**默认关闭、发布包不自带**；配置块的 4 字节 XOR 混淆**可逆**。所以"能逆向 ≈ 能拿到通道身份"这个前提仍在 —— 抗逆向的正确解法是 **v1.5 的每植入端密钥**（被逆了也只影响那一台），其次才是 garble 默认开。已写进 ROADMAP 的 P6 与 T13。
 **关键实测**
