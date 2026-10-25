@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"log"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"toshell/internal/server/api"
 )
 
 // TestBootstrapAdminPasswordWritesFileWithoutLoggingPlaintext 守护审计 L2：
@@ -35,7 +36,8 @@ func TestBootstrapAdminPasswordWritesFileWithoutLoggingPlaintext(t *testing.T) {
 		t.Fatalf("returned hash %q does not look like bcrypt ($2a$...)", hash)
 	}
 
-	path := filepath.Join(dir, initialAdminPasswordFile)
+	// 路径统一由 api.InitialAdminPasswordPath 生成（与登录成功后的清理共用）。
+	path := api.InitialAdminPasswordPath(dir)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("initial password file not written: %v", err)
@@ -50,7 +52,7 @@ func TestBootstrapAdminPasswordWritesFileWithoutLoggingPlaintext(t *testing.T) {
 	if strings.Contains(buf.String(), plain) {
 		t.Fatalf("log leaked the generated plaintext password (audit L2 regression)")
 	}
-	if !strings.Contains(buf.String(), initialAdminPasswordFile) {
+	if !strings.Contains(buf.String(), path) {
 		t.Errorf("log should tell the operator the file path, got %q", buf.String())
 	}
 

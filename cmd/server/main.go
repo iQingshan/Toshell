@@ -109,7 +109,7 @@ func NewServer(cfgPath string) (*Server, error) {
 	var configChanged bool
 
 	if cfg.Auth.AdminPassword == "" {
-		hashedPassword, err := bootstrapAdminPassword("data")
+		hashedPassword, err := bootstrapAdminPassword(api.DataDir)
 		if err != nil {
 			return nil, err
 		}
@@ -663,14 +663,11 @@ func registerDefaultListener(cfg *config.Config, db *database.Database) {
 	logging.Info("server", "Default listener registered: %s:%d (%s)", cfg.Listener.Host, cfg.Listener.Port, protocol)
 }
 
-// initialAdminPasswordFile 首次启动自动生成的管理员明文口令落盘文件名（位于数据目录）。
-// 固定约定：data/initial-admin-password.txt；管理员首次登录后应立即修改口令并删除该文件。
-// data/* 已被 .gitignore 覆盖，不会误提交。
-const initialAdminPasswordFile = "initial-admin-password.txt"
-
 // bootstrapAdminPassword 首次启动（配置中没有显式口令）时生成随机管理员口令：
 //   - 明文**只**写入 0600 的独立文件，绝不打印到 stdout/日志（审计 L2）：
 //     stdout 常被 systemd/journald、容器日志、CI 采集并长期留存；
+//   - 文件路径由 api.InitialAdminPasswordPath 统一生成；管理员首次登录成功后
+//     服务端会自动删除该文件（审计 N4），不依赖用户手工清理；
 //   - 返回 bcrypt 哈希，由调用方写回配置；
 //   - 落盘失败按致命错误处理：否则管理员拿不到口令，服务等于被锁死。
 func bootstrapAdminPassword(dataDir string) (string, error) {
@@ -682,12 +679,12 @@ func bootstrapAdminPassword(dataDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to hash admin password: %w", err)
 	}
-	path := filepath.Join(dataDir, initialAdminPasswordFile)
+	path := api.InitialAdminPasswordPath(dataDir)
 	if err := writeInitialAdminPassword(path, plain); err != nil {
 		return "", fmt.Errorf("failed to write initial admin password to %s: %w", path, err)
 	}
 	// 只报路径，不报口令本身（日志会被采集、转发、留存）。
-	log.Printf("[SECURITY] 已生成初始管理员口令，见 %s（首次登录后请立即修改，并删除该文件）", path)
+	log.Printf("[SECURITY] 已生成初始管理员口令，见 %s（首次登录成功后该文件会被自动删除）", path)
 	return hashed, nil
 }
 

@@ -1,6 +1,9 @@
 package api
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -56,5 +59,70 @@ func TestGuessTool(t *testing.T) {
 	}
 	if guessToolUsage("mimikatz.exe") != "凭据收集" {
 		t.Fatal("mimikatz -> 凭据收集")
+	}
+}
+
+// ─── 复审计 N1：data/tools 下的 junction 必须让 resolveToolPath fail-closed ──
+
+// TestResolveToolPathRejectsJunction 覆盖 N1 的第四条实测（data/tools 下 junction
+// 让 plugin_upload 读到 %WINDIR%\win.ini）。旧实现把 EvalSymlinks 报错当作
+// "不存在"放行，本用例在旧实现下会变红。
+func TestResolveToolPathRejectsJunction(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("junction 仅 Windows")
+	}
+	windir := os.Getenv("WINDIR")
+	if windir == "" {
+		windir = `C:\Windows`
+	}
+	if _, err := os.Stat(filepath.Join(windir, "win.ini")); err != nil {
+		t.Skipf("%%WINDIR%% 下没有 win.ini，跳过: %v", err)
+	}
+
+	root := t.TempDir()
+	tools := filepath.Join(root, "data", "tools")
+	if err := os.MkdirAll(tools, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root) // resolveToolPath 以进程 CWD 为基准拼 data/tools
+
+	link := filepath.Join(tools, "link")
+	makeJunctionOrSkip(t, link, windir)
+
+	// 1) 已存在的外部文件（正/反斜杠两种写法）必须拒绝。
+	for _, src := range []string{`link\win.ini`, "link/win.ini", "link"} {
+		if got, err := resolveToolPath(src); err == nil {
+			t.Errorf("resolveToolPath(%q) 应拒绝（junction 逃逸），却返回 %q", src, got)
+		}
+	}
+	// 2) 对照：data/tools 内的正常工具文件仍可通过。
+	ok := filepath.Join(tools, "tool.bin")
+	if err := os.WriteFile(ok, []byte("MZ"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveToolPath("tool.bin")
+	if err != nil {
+		t.Fatalf("正常工具文件被拒绝: %v", err)
+	}
+	if got != ok {
+		t.Fatalf("resolveToolPath = %q, want %q", got, ok)
+	}
+	// 3) 对照：子目录内的正常工具仍可通过（resolveToolPath 允许子路径）。
+	subDir := filepath.Join(tools, "sub")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	subTool := filepath.Join(subDir, "tool2.bin")
+	if err := os.WriteFile(subTool, []byte("MZ"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveToolPath(filepath.Join("sub", "tool2.bin")); err != nil {
+		t.Fatalf("子目录内正常工具被拒绝: %v", err)
+	}
+	// 4) 穿越写法仍然拒绝。
+	for _, src := range []string{"../x", `..\x`, "sub/../../x"} {
+		if _, err := resolveToolPath(src); err == nil {
+			t.Errorf("resolveToolPath(%q) 应拒绝穿越", src)
+		}
 	}
 }

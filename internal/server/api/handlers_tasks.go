@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 	"unicode/utf8"
@@ -49,11 +48,16 @@ func (s *Server) taskStatsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// taskCreateMaxBodyBytes 创建任务端点（POST /api/v1/tasks）的请求体上限（审计 N2/M4 收口）。
+//
+// 1 MiB：command/args 是操作员手输的命令行，正常请求几百字节；1 MiB 已经比任何
+// 正常任务大三个数量级。任务输出走监听器通道回传，不经过这个端点。超限 413。
+const taskCreateMaxBodyBytes = 1 << 20
+
 func (s *Server) createTaskHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
+	body, ok := readBodyLimited(w, r, taskCreateMaxBodyBytes, "创建任务")
+	if !ok {
 		return
 	}
 

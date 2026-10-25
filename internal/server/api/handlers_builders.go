@@ -859,6 +859,12 @@ func (s *Server) serveStoredImplant(w http.ResponseWriter, r *http.Request, imp 
 		if cand == "" {
 			continue
 		}
+		// 复审计 N1：候选由 DB 的 Name/Filename 拼出（历史脏行可能含 ../ 或
+		// 子目录），先强制单段文件名，再交给 resolveInDir 做词法+物理断言。
+		if serr := requireSingleSegmentName(cand); serr != nil {
+			logging.Warn("builder", "跳过非单段的载荷候选 %q（记录 %s）: %v", cand, imp.ID, serr)
+			continue
+		}
 		p, err := resolveInDir(implantDir, cand)
 		if err != nil {
 			logging.Warn("builder", "跳过越界的载荷候选 %q（记录 %s）: %v", cand, imp.ID, err)
@@ -900,7 +906,16 @@ func (s *Server) downloadStoredImplantHandler(w http.ResponseWriter, r *http.Req
 	if strings.HasPrefix(id, "file:") {
 		// 审计加固：合成 ID 的后半段来自文件名/URL，必须限制在 implantDir 内。
 		// 注意本 handler 同时挂在**未认证**的 /api/v1/implant/payload/{id} 上。
-		filePath, err := resolveInDir(implantDir, strings.TrimPrefix(id, "file:"))
+		// 复审计 N1：只允许**单段文件名**。旧实现允许 "file:子目录/文件"，那正是
+		// "中间某段是 junction" 的入口（反斜杠在 Windows 的 {id} 里是合法分隔符），
+		// 产物目录本来就是平的，因此这里不再支持子路径。
+		name := strings.TrimPrefix(id, "file:")
+		if err := requireSingleSegmentName(name); err != nil {
+			logging.Warn("builder", "拒绝非单段的 file: 载荷下载 %q: %v", id, err)
+			http.Error(w, `{"error":"非法载荷文件路径"}`, http.StatusBadRequest)
+			return
+		}
+		filePath, err := resolveInDir(implantDir, name)
 		if err != nil {
 			logging.Warn("builder", "拒绝越界的 file: 载荷下载 %q: %v", id, err)
 			http.Error(w, `{"error":"非法载荷文件路径"}`, http.StatusBadRequest)
@@ -1020,7 +1035,14 @@ func (s *Server) deleteStoredImplantHandler(w http.ResponseWriter, r *http.Reque
 	// file on disk is removed, there is no DB record to clean up.
 	if strings.HasPrefix(id, "file:") {
 		// 审计加固：删除是不可逆写操作，合成 ID 的后半段必须严格限制在 implantDir 内。
-		filePath, err := resolveInDir(implantDir, strings.TrimPrefix(id, "file:"))
+		// 复审计 N1：同样只允许单段文件名（junction 中间段 + 子路径可越界删除）。
+		name := strings.TrimPrefix(id, "file:")
+		if err := requireSingleSegmentName(name); err != nil {
+			logging.Warn("builder", "拒绝非单段的 file: 载荷删除 %q: %v", id, err)
+			http.Error(w, `{"error":"非法载荷文件路径"}`, http.StatusBadRequest)
+			return
+		}
+		filePath, err := resolveInDir(implantDir, name)
 		if err != nil {
 			logging.Warn("builder", "拒绝越界的 file: 载荷删除 %q: %v", id, err)
 			http.Error(w, `{"error":"非法载荷文件路径"}`, http.StatusBadRequest)
@@ -1053,7 +1075,10 @@ func (s *Server) deleteStoredImplantHandler(w http.ResponseWriter, r *http.Reque
 	// 审计加固：imp.Filename 虽然由服务端生成，但历史/手工库行不可信 ——
 	// 只允许删除 implantDir 内的文件；越界时跳过删除并记 warn（DB 记录仍按
 	// 用户意图删除，避免留下永远删不掉的脏行）。
-	if filePath, err := resolveInDir(implantDir, imp.Filename); err != nil {
+	// 复审计 N1：DB 候选同样先强制单段文件名，再走 resolveInDir 的物理断言。
+	if err := requireSingleSegmentName(imp.Filename); err != nil {
+		logging.Warn("builder", "跳过非单段的载荷删除 %q（记录 %s）: %v", imp.Filename, id, err)
+	} else if filePath, err := resolveInDir(implantDir, imp.Filename); err != nil {
 		logging.Warn("builder", "跳过越界的载荷删除 %q（记录 %s）: %v", imp.Filename, id, err)
 	} else {
 		os.Remove(filePath)

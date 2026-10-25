@@ -183,22 +183,29 @@ func TestManagerAddValid(t *testing.T) {
 	}
 }
 
-// TestManagerAddRejectsSymlinkTarget 审计 H4 的核心攻击链：
-// plugins/evil.exe 预先是符号链接 → Add 必须拒绝，且链接目标文件内容不变。
-// Windows 上创建符号链接需要开发者模式/管理员权限，失败则跳过并注明。
-func TestManagerAddRejectsSymlinkTarget(t *testing.T) {
-	m := newTestManager(t)
-	victim := filepath.Join(m.pluginDir, "victim.txt")
+// TestManagerAddReplacesSymlinkWithoutFollowingIt 审计 H4 的符号链接攻击链：
+// plugins/evil.exe 预先是符号链接时，Add 用 rename **替换掉链接目录项**而不是
+// 跟随链接写穿；链接目标文件内容必须保持原样。
+func TestManagerAddReplacesSymlinkWithoutFollowingIt(t *testing.T) {
+	base := t.TempDir()
+	pluginDir := filepath.Join(base, "plugins")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("创建临时插件目录失败: %v", err)
+	}
+	m := &Manager{pluginDir: pluginDir, plugins: make(map[string]*Plugin)}
+
+	victim := filepath.Join(base, "victim.bin")
 	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
 		t.Fatalf("写入 victim 失败: %v", err)
 	}
-	link := filepath.Join(m.pluginDir, "evil.exe")
+	link := filepath.Join(pluginDir, "evil.exe")
 	if err := os.Symlink(victim, link); err != nil {
 		t.Skipf("当前环境无法创建符号链接（Windows 通常需要开发者模式/管理员权限），跳过: %v", err)
 	}
 
-	if _, err := m.Add("evil.exe", []byte("pwned-by-root"), ""); err == nil {
-		t.Fatal("Add(符号链接目标) 未被拒绝")
+	data := []byte("pwned-by-target-file")
+	if _, err := m.Add("evil.exe", data, ""); err != nil {
+		t.Fatalf("Add(符号链接目标) 应替换目录项并成功，实际失败: %v", err)
 	}
 	got, rerr := os.ReadFile(victim)
 	if rerr != nil {
@@ -207,37 +214,127 @@ func TestManagerAddRejectsSymlinkTarget(t *testing.T) {
 	if string(got) != "original" {
 		t.Fatalf("符号链接目标被写入！内容 = %q", got)
 	}
-	if fi, lerr := os.Lstat(link); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("符号链接被替换/删除: err=%v", lerr)
+	fi, lerr := os.Lstat(link)
+	if lerr != nil {
+		t.Fatalf("Lstat 插件目标失败: %v", lerr)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("符号链接未被 rename 替换，仍然是符号链接")
+	}
+	if b, _ := os.ReadFile(link); string(b) != string(data) {
+		t.Fatalf("插件文件内容 = %q，期望 %q", b, data)
 	}
 }
 
-// TestWritePluginFileNoFollow 直接验证 O_NOFOLLOW 写盘原语（不经过 Lstat 预检），
-// 确保即使 Add 的预检被绕过，内核也不会跟随符号链接写入。
-func TestWritePluginFileNoFollow(t *testing.T) {
-	if oNoFollowFlag() == 0 {
-		t.Skip("当前平台没有 O_NOFOLLOW（由 Add 的 Lstat 预检兜底）")
+// TestManagerAddDoesNotWriteThroughHardlink 复现复审计 N3：
+// 插件目录内 hard.exe 是指向目录外 victim.bin 的**硬链接**（同一 inode 的另一个
+// 目录项，O_NOFOLLOW 挡不住）。Add 必须用 rename 替换目录项：victim.bin 内容不变，
+// plugins/hard.exe 变成新内容且不再是 victim 的硬链接。
+func TestManagerAddDoesNotWriteThroughHardlink(t *testing.T) {
+	base := t.TempDir()
+	pluginDir := filepath.Join(base, "plugins")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("创建临时插件目录失败: %v", err)
 	}
-	dir := t.TempDir()
-	victim := filepath.Join(dir, "victim.txt")
-	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+	m := &Manager{pluginDir: pluginDir, plugins: make(map[string]*Plugin)}
+
+	original := []byte("original-victim-content")
+	victim := filepath.Join(base, "victim.bin") // 插件目录之外
+	if err := os.WriteFile(victim, original, 0o644); err != nil {
 		t.Fatalf("写入 victim 失败: %v", err)
 	}
-	link := filepath.Join(dir, "evil.exe")
-	if err := os.Symlink(victim, link); err != nil {
-		t.Skipf("当前环境无法创建符号链接，跳过: %v", err)
+	link := filepath.Join(pluginDir, "hard.exe")
+	if err := os.Link(victim, link); err != nil {
+		t.Skipf("当前环境无法创建硬链接（Windows 普通用户在同卷上通常可以；跨卷/权限不足会失败），跳过: %v", err)
+	}
+	if a, b := mustStat(t, victim), mustStat(t, link); !os.SameFile(a, b) {
+		t.Fatal("前置条件不成立：os.Link 后两者不是同一文件")
 	}
 
-	err := writePluginFile(link, []byte("pwned"))
-	if err == nil {
-		t.Fatal("writePluginFile 跟随符号链接写入了")
+	newData := []byte("hardlink-replaced-by-rename")
+	if _, err := m.Add("hard.exe", newData, ""); err != nil {
+		t.Fatalf("Add(硬链接目标) 失败: %v", err)
 	}
-	if !isSymlinkWriteError(err) {
-		t.Fatalf("错误未被识别为符号链接错误: %v", err)
+
+	got, rerr := os.ReadFile(victim)
+	if rerr != nil {
+		t.Fatalf("读取目录外 victim 失败: %v", rerr)
 	}
-	if got, _ := os.ReadFile(victim); string(got) != "original" {
-		t.Fatalf("符号链接目标被写入！内容 = %q", got)
+	if string(got) != string(original) {
+		t.Fatalf("目录外 victim 被写穿！内容 = %q（期望 %q）", got, original)
 	}
+	if b, _ := os.ReadFile(link); string(b) != string(newData) {
+		t.Fatalf("plugins/hard.exe 内容 = %q，期望 %q", b, newData)
+	}
+	if a, b := mustStat(t, victim), mustStat(t, link); os.SameFile(a, b) {
+		t.Fatal("plugins/hard.exe 仍是 victim 的硬链接目录项，说明没有替换目录项")
+	}
+}
+
+// mustStat 是 os.Stat 的测试辅助：失败即终止用例。
+func mustStat(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s) 失败: %v", path, err)
+	}
+	return fi
+}
+
+// TestWritePluginFileAtomicCleansTempOnRenameFailure 原子写的失败路径：
+// rename 覆盖失败（目标是目录）时必须删除临时文件，插件目录里不能残留
+// .tsh-plugin-*。Windows 上难以制造"目录只读"，用"目标是目录"同样能让 rename
+// 稳定失败，且不依赖权限/注入。
+func TestWritePluginFileAtomicCleansTempOnRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "blocked.exe"), 0o755); err != nil {
+		t.Fatalf("创建阻塞目录失败: %v", err)
+	}
+	if _, err := writePluginFileAtomic(dir, "blocked.exe", []byte("x")); err == nil {
+		t.Fatal("rename 覆盖目录本应失败，实际成功")
+	}
+	if leftovers := tempPluginFiles(t, dir); len(leftovers) != 0 {
+		t.Fatalf("失败路径残留临时文件: %v", leftovers)
+	}
+}
+
+// TestWritePluginFileAtomicReplacesAndLeavesNoTemp 成功路径：覆盖已有文件，
+// 内容正确、插件目录内没有 .tsh-plugin-* 残留。
+func TestWritePluginFileAtomicReplacesAndLeavesNoTemp(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "a.exe")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatalf("写入旧文件失败: %v", err)
+	}
+	got, err := writePluginFileAtomic(dir, "a.exe", []byte("new-content"))
+	if err != nil {
+		t.Fatalf("writePluginFileAtomic 失败: %v", err)
+	}
+	if got != target {
+		t.Fatalf("返回路径 = %q，期望 %q", got, target)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "new-content" {
+		t.Fatalf("覆盖后内容 = %q，期望 new-content", b)
+	}
+	if leftovers := tempPluginFiles(t, dir); len(leftovers) != 0 {
+		t.Fatalf("成功路径残留临时文件: %v", leftovers)
+	}
+}
+
+// tempPluginFiles 列出插件目录内以 .tsh-plugin- 开头的临时文件。
+func tempPluginFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("读取目录失败: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tsh-plugin-") {
+			names = append(names, e.Name())
+		}
+	}
+	return names
 }
 
 // TestManagerAddSymlinkedPluginDir 防回归：pluginDir 本身是符号链接（合法部署形态）

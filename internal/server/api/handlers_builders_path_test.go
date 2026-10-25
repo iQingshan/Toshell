@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -328,5 +329,134 @@ func TestDownloadImplantHandlerRejectsEscape(t *testing.T) {
 	s.downloadImplantHandler(okRec, okReq)
 	if okRec.Code != http.StatusOK || okRec.Body.String() != "EXE-OK" {
 		t.Fatalf("合法下载失败: %d %q", okRec.Code, okRec.Body.String())
+	}
+}
+
+// ─── 复审计 N1：file: 合成 ID 只允许单段文件名 ─────────────────────────────
+
+// TestFilePrefixIDRequiresSingleSegment 守护 N1 的修复面：旧实现允许
+// "file:子目录/文件"（反斜杠在 Windows 的 {id} 里是合法分隔符），这让
+// "中间某段是 junction" 有了入口。现在含 / 或 \ 一律 400。
+func TestFilePrefixIDRequiresSingleSegment(t *testing.T) {
+	s, root, _ := newBuildersPathServer(t)
+	victim := filepath.Join(root, "victim.txt")
+	if err := os.WriteFile(victim, []byte("SECRET-VICTIM"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	badIDs := []string{
+		"file:../victim.txt",  // 父目录穿越（旧用例，保持不回归）
+		"file:sub/victim.txt", // 正斜杠子路径
+		`file:sub\victim.txt`, // 反斜杠子路径（Windows）
+		`file:..\victim.txt`,
+		"file:a/b/c",
+		"file:",
+	}
+	for _, id := range badIDs {
+		// GET 下载
+		req := mux.SetURLVars(
+			httptest.NewRequest(http.MethodGet, "/api/v1/implant/payload/x", nil),
+			map[string]string{"id": id})
+		rec := httptest.NewRecorder()
+		s.downloadStoredImplantHandler(rec, req)
+		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
+			t.Errorf("GET %q 应 400/404，实际 %d: %s", id, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "SECRET-VICTIM") {
+			t.Errorf("GET %q 回传了目录外内容", id)
+		}
+
+		// DELETE 删除（不可逆操作）
+		dreq := mux.SetURLVars(
+			httptest.NewRequest(http.MethodDelete, "/api/v1/implants/x", nil),
+			map[string]string{"id": id})
+		drec := httptest.NewRecorder()
+		s.deleteStoredImplantHandler(drec, dreq)
+		if drec.Code != http.StatusBadRequest && drec.Code != http.StatusNotFound {
+			t.Errorf("DELETE %q 应 400/404，实际 %d: %s", id, drec.Code, drec.Body.String())
+		}
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("目录外文件被删除！N1 回归: %v", err)
+	}
+}
+
+// TestFilePrefixIDLegitDownloadStillWorks 对照：合法的 "file:<单段名>" 仍可下载/删除。
+func TestFilePrefixIDLegitDownloadStillWorks(t *testing.T) {
+	s, _, implantDir := newBuildersPathServer(t)
+	payload := filepath.Join(implantDir, "build-1792.bin")
+	if err := os.WriteFile(payload, []byte("BIN-OK"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	req := mux.SetURLVars(
+		httptest.NewRequest(http.MethodGet, "/api/v1/implant/payload/file:build-1792.bin", nil),
+		map[string]string{"id": "file:build-1792.bin"})
+	rec := httptest.NewRecorder()
+	s.downloadStoredImplantHandler(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "BIN-OK" {
+		t.Fatalf("合法 file: 下载失败: %d %q", rec.Code, rec.Body.String())
+	}
+
+	// 删除合法单段文件仍生效。
+	del := filepath.Join(implantDir, "build-1793.bin")
+	if err := os.WriteFile(del, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dreq := mux.SetURLVars(
+		httptest.NewRequest(http.MethodDelete, "/api/v1/implants/file:build-1793.bin", nil),
+		map[string]string{"id": "file:build-1793.bin"})
+	drec := httptest.NewRecorder()
+	s.deleteStoredImplantHandler(drec, dreq)
+	if drec.Code != http.StatusOK {
+		t.Fatalf("合法 file: 删除失败: %d %s", drec.Code, drec.Body.String())
+	}
+	if _, err := os.Stat(del); !os.IsNotExist(err) {
+		t.Fatalf("合法文件应被删除，Stat err=%v", err)
+	}
+}
+
+// TestFilePrefixIDRejectsJunctionSubpath 是 N1 在 HTTP handler 层的复现：
+// implants/ 下放一个指向目录外的 junction，file:<junction>\<文件> 必须 400，
+// 且 DELETE 不得删掉目录外文件。
+func TestFilePrefixIDRejectsJunctionSubpath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("junction 仅 Windows")
+	}
+	s, root, implantDir := newBuildersPathServer(t)
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outsideDir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("SECRET-VICTIM"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(implantDir, "link")
+	makeJunctionOrSkip(t, link, outsideDir)
+
+	for _, id := range []string{`file:link\victim.txt`, "file:link/victim.txt"} {
+		req := mux.SetURLVars(
+			httptest.NewRequest(http.MethodGet, "/api/v1/implant/payload/x", nil),
+			map[string]string{"id": id})
+		rec := httptest.NewRecorder()
+		s.downloadStoredImplantHandler(rec, req)
+		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
+			t.Errorf("GET %q 应 400/404，实际 %d: %s", id, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "SECRET-VICTIM") {
+			t.Errorf("GET %q 读到了 junction 目标内容", id)
+		}
+
+		dreq := mux.SetURLVars(
+			httptest.NewRequest(http.MethodDelete, "/api/v1/implants/x", nil),
+			map[string]string{"id": id})
+		drec := httptest.NewRecorder()
+		s.deleteStoredImplantHandler(drec, dreq)
+		if drec.Code != http.StatusBadRequest && drec.Code != http.StatusNotFound {
+			t.Errorf("DELETE %q 应 400/404，实际 %d: %s", id, drec.Code, drec.Body.String())
+		}
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("junction 目标文件被删除！N1 回归: %v", err)
 	}
 }

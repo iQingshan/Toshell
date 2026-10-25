@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -148,12 +147,17 @@ func bulkTaskErrorCode(err error) string {
 // 一次请求把同一条任务下发给多个会话，逐项返回结果。
 // HTTP 200 = "批量已处理"（哪怕全部失败）；400 只用于请求本身不合法
 // （body 不是合法 JSON / session_ids 为空 / 超过 bulkTasksMaxSessions）。
+// bulkTasksMaxBodyBytes 批量任务端点（POST /api/v1/tasks/bulk）的请求体上限（审计 N2/M4 收口）。
+//
+// 1 MiB：body 是 1~bulkTasksMaxSessions 条“会话 ID + 同一条命令”。上限 100 个
+// 会话 ID + 一条命令行，正常远小于 1 MiB；超限 413，不把超大 body 读进内存。
+const bulkTasksMaxBodyBytes = 1 << 20
+
 func (s *Server) bulkTasksHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
+	body, ok := readBodyLimited(w, r, bulkTasksMaxBodyBytes, "批量下发任务")
+	if !ok {
 		return
 	}
 

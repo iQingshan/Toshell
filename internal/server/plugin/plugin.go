@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -249,65 +248,70 @@ func assertWithinDir(dir, target string) error {
 	return nil
 }
 
-// oNoFollowFlag 返回 O_NOFOLLOW 的平台取值。
+// writePluginFileAtomic 以"同目录临时文件 + rename"的方式写入 pluginDir/name，
+// 返回最终落盘路径。
 //
-// Go 的 os/syscall 在 Windows 上不导出 O_NOFOLLOW（该平台没有这个语义），
-// 因此这里不能直接写 os.O_NOFOLLOW（GOOS=windows 会编译失败）。取值：
-//   - Linux 全架构统一为 0x20000（asm-generic/fcntl.h 的 0400000）；
-//   - Darwin/BSD 为 0x100；
-//   - 其它平台返回 0，由 Add 里的 Lstat 预检拒绝符号链接兜底。
-func oNoFollowFlag() int {
-	switch runtime.GOOS {
-	case "linux":
-		return 0x20000
-	case "darwin", "freebsd", "netbsd", "openbsd", "dragonfly":
-		return 0x100
-	default:
-		return 0
-	}
-}
+// 为什么不用 O_NOFOLLOW 直接写目标：**硬链接不是 symlink**，它是同一个 inode 的
+// 另一个目录项；O_NOFOLLOW 只能阻止"跟随符号链接"，对硬链接完全无效（打开硬链接
+// 就是打开原文件）。Linux 的 fs.protected_hardlinks 只在特定条件下缓解，Windows
+// 上更是没有 O_NOFOLLOW 这个语义。唯一与链接类型无关的可靠写法是**替换目录项**：
+// 先把内容写进同目录临时文件，再用 rename 覆盖目标名。rename 改的是"目标名 →
+// inode"的目录项映射，被替换掉的是链接本身，绝不会顺着链接写进它指向的文件。
+//
+// 临时文件必须与目标同目录（同一文件系统），否则 rename 会因跨设备（EXDEV）失败。
+// 任一步失败都删除临时文件；rename 成功后临时名已不存在，无需再删。
+func writePluginFileAtomic(pluginDir, name string, data []byte) (string, error) {
+	target := filepath.Join(pluginDir, name)
 
-// writePluginFile 以"不跟随末级符号链接"的方式覆盖写插件文件。
-//
-// O_CREATE 与 O_NOFOLLOW 同用时，若末级路径已是符号链接，Linux 返回 ELOOP，
-// 绝不会打开链接目标。它配合 Add 里的 Lstat 预检构成双重防护：
-// 预检失败/被并发替换时，仍由内核拒绝跟随。
-func writePluginFile(target string, data []byte) error {
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollowFlag(), 0o644)
+	tmp, err := os.CreateTemp(pluginDir, ".tsh-plugin-*")
 	if err != nil {
-		return err
+		return "", fmt.Errorf("创建插件临时文件失败: %w", err)
 	}
-	if _, werr := f.Write(data); werr != nil {
-		_ = f.Close()
-		return werr
-	}
-	return f.Close()
-}
+	tmpName := tmp.Name()
 
-// isSymlinkWriteError 判断写盘错误是否来自"目标是符号链接"（ELOOP/EMLINK）。
-func isSymlinkWriteError(err error) bool {
-	if err == nil {
-		return false
+	// committed=false 时（写入/同步/chmod/rename 任一步失败）清掉临时文件，
+	// 避免插件目录里残留半截 .tsh-plugin-*。
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("写入插件临时文件失败: %w", err)
 	}
-	var pe *os.PathError
-	if errors.As(err, &pe) {
-		err = pe.Err
+	// Sync：rename 只保证目录项原子替换，不保证内容已经落盘。
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("同步插件临时文件失败: %w", err)
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "symbolic link") ||
-		strings.Contains(msg, "too many levels") ||
-		strings.Contains(msg, "too many links")
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("关闭插件临时文件失败: %w", err)
+	}
+	// CreateTemp 默认 0600，插件文件沿用历史 0644（Windows 上只影响只读位）。
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return "", fmt.Errorf("设置插件文件权限失败: %w", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return "", fmt.Errorf("替换插件文件失败: %w", err)
+	}
+	committed = true
+	return target, nil
 }
 
 // Add 把插件字节写入插件目录并登记到内存索引。
 //
-// name 完全来自不可信输入，因此这里**不依赖调用方校验**，自带四道防线：
+// name 完全来自不可信输入，因此这里**不依赖调用方校验**，自带三道防线：
 //  1. ValidatePluginName：纯 basename + 字符/长度白名单 + 扩展名白名单；
 //  2. filepath.Join + Clean 后做 Rel 前缀断言（必须在 pluginDir 内）；
-//  3. EvalSymlinks(pluginDir) 得到真实根后再断言一次（防 pluginDir 自身是软链），
-//     并用 Lstat 拒绝"末级已是符号链接"的目标；
-//  4. 真正写盘用 O_NOFOLLOW（见 writePluginFile），即使预检与写入之间被并发替换
-//     成符号链接，内核也不会跟随链接写入（不会写到链接目标）。
+//  3. EvalSymlinks(pluginDir) 得到真实根后再断言一次（防 pluginDir 自身是软链）；
+//  4. 真正写盘走 writePluginFileAtomic：同目录临时文件 + rename 替换目录项。
+//
+// 第 4 道防线是"硬链接/符号链接"这一面的根因修复：rename 只替换目标目录项，
+// 不跟随任何链接，因此无论 target 事先是普通文件、硬链接还是符号链接，链接
+// 指向的文件都不会被写入（符号链接/硬链接本身被替换掉）。
 func (m *Manager) Add(name string, data []byte, description string) (*Plugin, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -332,7 +336,7 @@ func (m *Manager) Add(name string, data []byte, description string) (*Plugin, er
 		return nil, err
 	}
 
-	// 防线三：pluginDir 可能是符号链接，用真实根再断言一次；并拒绝末级符号链接。
+	// 防线三：pluginDir 可能是符号链接，用真实根再断言一次（防 pluginDir 自身被换掉）。
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, fmt.Errorf("解析插件目录真实路径失败（插件目录不可用）: %w", err)
@@ -340,19 +344,9 @@ func (m *Manager) Add(name string, data []byte, description string) (*Plugin, er
 	if err := assertWithinDir(realRoot, filepath.Join(realRoot, name)); err != nil {
 		return nil, err
 	}
-	if fi, lerr := os.Lstat(target); lerr == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("拒绝写入插件 %q：目标是符号链接，已阻止跟随链接写盘", name)
-		}
-	} else if !os.IsNotExist(lerr) {
-		return nil, fmt.Errorf("检查插件目标失败: %w", lerr)
-	}
 
-	// 防线四：O_NOFOLLOW 写入。
-	if werr := writePluginFile(target, data); werr != nil {
-		if isSymlinkWriteError(werr) {
-			return nil, fmt.Errorf("拒绝写入插件 %q：目标是符号链接（或被并发替换为符号链接），已阻止跟随链接写盘", name)
-		}
+	// 防线四：临时文件 + rename（见 writePluginFileAtomic）。
+	if _, werr := writePluginFileAtomic(root, name, data); werr != nil {
 		return nil, fmt.Errorf("failed to write plugin file: %w", werr)
 	}
 

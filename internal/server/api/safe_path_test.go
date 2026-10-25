@@ -8,6 +8,7 @@ package api
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -58,10 +59,61 @@ func TestSafePayloadNameRejectsUnsafeNames(t *testing.T) {
 		{"中文/非 ASCII", "载荷"},
 		{"折叠型多段", "x/y/../../etc/passwd"},
 		{"UNC 风格", `\\server\share`},
+		// ── 复审计 N5：Windows 保留设备名与尾点/尾空格 ──────────────────────
+		{"保留设备名 CON", "CON"},
+		{"保留设备名小写 con", "con"},
+		{"设备名带扩展名 NUL.raw", "NUL.raw"},
+		{"设备名带扩展名 con.exe", "con.exe"},
+		{"设备名 COM1", "COM1"},
+		{"设备名 LPT9.dll", "LPT9.dll"},
+		{"设备名 PRN", "PRN"},
+		{"设备名 AUX.log", "AUX.log"},
+		{"尾点 a.", "a."},
+		{"尾点 build-1.exe.", "build-1.exe."},
+		{"尾空格 a 空格", "a "},
+		{"尾点+尾空格", "a. "},
 	}
 	for _, tc := range cases {
 		if got, err := safePayloadName(tc.name); err == nil {
 			t.Errorf("%s: safePayloadName(%q) 应被拒绝，却返回 %q", tc.desc, tc.name, got)
+		}
+	}
+}
+
+// TestSafePayloadNameN5LegitNamesStillPass 保证 N5 的加严不误伤服务端命名与
+// 常见的合法文件名（点/下划线/连字符都在中间）。
+func TestSafePayloadNameN5LegitNamesStillPass(t *testing.T) {
+	for _, name := range []string{
+		"build-1792",
+		"build-1792144113714300000",
+		"implant-x",
+		"implant-1792",
+		"a.b-c_d",
+		"console",
+		"nulled",
+		"com10", // 只保留 COM1-9，COM10 不是设备名
+		"lpt0",  // 同理 LPT0
+		"a.raw",
+		"payload_2026.10.24",
+	} {
+		if _, err := safePayloadName(name); err != nil {
+			t.Errorf("合法名 %q 被 N5 加严误伤: %v", name, err)
+		}
+	}
+}
+
+// TestRequireSingleSegmentName 覆盖复审计 N1 要求的「file:/DB 候选强制单段名」。
+func TestRequireSingleSegmentName(t *testing.T) {
+	bad := []string{"", ".", "..", "a/b", `a\b`, "../x", `..\x`, "sub\\..\\x", "x/"}
+	for _, name := range bad {
+		if err := requireSingleSegmentName(name); err == nil {
+			t.Errorf("requireSingleSegmentName(%q) 应被拒绝", name)
+		}
+	}
+	// 目录内正常文件名（含空格/中文）必须仍然通过。
+	for _, name := range []string{"build-1.exe", "a b.txt", "中文.exe", "build-1792.raw"} {
+		if err := requireSingleSegmentName(name); err != nil {
+			t.Errorf("合法单段名 %q 被拒: %v", name, err)
 		}
 	}
 }
@@ -185,5 +237,114 @@ func TestPayloadDownloadExtsWhitelist(t *testing.T) {
 	// format="raw" 应优先命中 raw（保留旧行为）
 	if got := payloadDownloadExts("raw"); len(got) == 0 || got[0] != "raw" {
 		t.Fatalf("payloadDownloadExts(\"raw\") = %v, want raw first", got)
+	}
+}
+
+// ─── 复审计 N1：Windows 目录 junction（mount point）────────────────────────
+
+// makeJunctionOrSkip 创建目录 junction。Windows 上 mklink /J 不需要管理员权限
+// （只需要对 link 的父目录有写权限），因此测试里用 os/exec 直接调用；
+// 若当前环境不允许（或非 Windows），跳过并注明原因。
+func makeJunctionOrSkip(t *testing.T, link, target string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("仅 Windows 有目录 junction（mount point）语义")
+	}
+	out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
+	if err != nil {
+		t.Skipf("当前环境无法创建目录 junction（cmd mklink /J 失败: %v; 输出: %q）", err, strings.TrimSpace(string(out)))
+	}
+	// 只删 junction 本身（删除 reparse point 不会递归目标目录）。
+	t.Cleanup(func() {
+		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+			t.Logf("清理 junction %q 失败: %v", link, err)
+		}
+	})
+}
+
+// TestResolveInDirRejectsJunctionEscape 是复审计 N1 的核心回归用例。
+//
+// 旧实现：EvalSymlinks("base/link/win.ini") 报错 → 当作"目标不存在"跳过物理断言
+// → 只做词法断言 → 放行 → 随后 os.Open 由操作系统跟随 junction，读到 %WINDIR%
+// 下的文件。本用例在旧实现下必须失败（变红），在当前 fail-closed 实现下通过。
+func TestResolveInDirRejectsJunctionEscape(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("junction 仅 Windows")
+	}
+	windir := os.Getenv("WINDIR")
+	if windir == "" {
+		windir = `C:\Windows`
+	}
+	if _, err := os.Stat(filepath.Join(windir, "win.ini")); err != nil {
+		t.Skipf("%%WINDIR%% 下没有 win.ini，跳过 junction 用例: %v", err)
+	}
+
+	base := t.TempDir()
+	link := filepath.Join(base, "link")
+	makeJunctionOrSkip(t, link, windir)
+
+	// 前置事实：junction 在 Lstat 下**不是** symlink（Go 在 Windows 上把它标记为
+	// ModeIrregular）；EvalSymlinks 对 "junction\子项" 直接报错。这正是 N1 的根因，
+	// 也是"只检查 ModeSymlink"或"EvalSymlinks 失败就放行"都会漏掉它的原因。
+	if fi, err := os.Lstat(link); err != nil {
+		t.Fatalf("Lstat(junction) 失败: %v", err)
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		t.Skipf("当前 Go/Windows 把 junction 标记成 ModeSymlink（%v），该环境语义不同", fi.Mode())
+	}
+	if _, err := filepath.EvalSymlinks(filepath.Join(link, "win.ini")); err == nil {
+		t.Logf("提示：当前环境 EvalSymlinks 能解析 junction 子项；本用例仍要求严格拒绝")
+	}
+
+	// 1) 已存在的外部文件（正斜杠写法）：必须拒绝。
+	if got, err := resolveInDir(base, filepath.Join("link", "win.ini")); err == nil {
+		t.Fatalf("junction 逃逸应被拒绝，却放行 %q（复审计 N1 回归）", got)
+	}
+	// 2) 反斜杠写法（未认证 {id} 里正是这种形态）：必须拒绝。
+	if got, err := resolveInDir(base, `link\win.ini`); err == nil {
+		t.Fatalf("junction 逃逸（反斜杠）应被拒绝，却放行 %q", got)
+	}
+	// 3) junction 下的不存在目标：不能因为"目标不存在"就放行。
+	if got, err := resolveInDir(base, `link\nope.txt`); err == nil {
+		t.Fatalf("junction 下的不存在目标应被拒绝，却放行 %q", got)
+	}
+	// 4) junction 本身作为目标：EvalSymlinks 会"成功"返回它自己，只有逐段 Lstat
+	//    的 ModeIrregular 检查能拦住。
+	if got, err := resolveInDir(base, "link"); err == nil {
+		t.Fatalf("junction 本身作为目标应被拒绝，却放行 %q", got)
+	}
+
+	// 对照：同目录下的普通文件仍必须通过（fail-closed ≠ 全拒绝）。
+	ok := filepath.Join(base, "build-1.raw")
+	if err := os.WriteFile(ok, []byte("ok"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveInDir(base, "build-1.raw"); err != nil {
+		t.Fatalf("junction 存在时目录内普通文件仍应通过: %v", err)
+	}
+}
+
+// TestResolveInDirRejectsMissingParent 复审计 N1：父目录必须能被解析，
+// 不允许"目标不存在"成为跳过物理断言的理由。
+func TestResolveInDirRejectsMissingParent(t *testing.T) {
+	dir := t.TempDir()
+
+	// 父目录不存在（多段名）：拒绝。
+	if got, err := resolveInDir(dir, "nope/x.txt"); err == nil {
+		t.Fatalf("父目录不存在时应拒绝，却放行 %q", got)
+	}
+	// 父目录不存在（反斜杠写法）：同样拒绝。
+	if runtime.GOOS == "windows" {
+		if got, err := resolveInDir(dir, `nope\x.txt`); err == nil {
+			t.Fatalf("父目录不存在（反斜杠）时应拒绝，却放行 %q", got)
+		}
+	}
+	// 对照：父目录存在、目标不存在的**单段**名字属于合法"创建/删除"意图，放行。
+	got, err := resolveInDir(dir, "future.txt")
+	if err != nil {
+		t.Fatalf("父目录存在时，不存在的单段目标应通过: %v", err)
+	}
+	want, _ := filepath.Abs(filepath.Join(dir, "future.txt"))
+	if got != want {
+		t.Fatalf("resolveInDir = %q, want %q", got, want)
 	}
 }

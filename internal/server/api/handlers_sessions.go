@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -33,14 +32,25 @@ func (s *Server) getSessionHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(session.Info)
 }
 
+// sessionUpdateMaxBodyBytes 会话备注更新端点（PATCH /api/v1/sessions/{id}）的请求体上限。
+//
+// 256 KiB：body 里只有一个 comment 字段（操作员备注，正常几十字节）；256 KiB 对
+// 备注来说已经非常宽松，同时把“认证后的大 body”挡在内存之外（审计 N2/M4 收口）。
+const sessionUpdateMaxBodyBytes = 256 << 10
+
+// sessionInteractMaxBodyBytes 会话交互端点（POST /api/v1/sessions/{id}/interact）的上限。
+//
+// 1 MiB，与创建任务同量级：它本质上就是“对指定会话创建一条任务”，字段是
+// command + args，和 POST /api/v1/tasks 一致。
+const sessionInteractMaxBodyBytes = 1 << 20
+
 func (s *Server) updateSessionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	vars := mux.Vars(r)
 	id := vars["id"]
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
+	body, ok := readBodyLimited(w, r, sessionUpdateMaxBodyBytes, "更新会话")
+	if !ok {
 		return
 	}
 
@@ -103,9 +113,8 @@ func (s *Server) interactSessionHandler(w http.ResponseWriter, r *http.Request) 
 	vars := mux.Vars(r)
 	id := vars["id"]
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
+	body, ok := readBodyLimited(w, r, sessionInteractMaxBodyBytes, "会话交互")
+	if !ok {
 		return
 	}
 
@@ -122,7 +131,7 @@ func (s *Server) interactSessionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	_, err = s.sessionMgr.Get(id)
+	_, err := s.sessionMgr.Get(id)
 	if err != nil {
 		http.Error(w, `{"error":"Session not found"}`, http.StatusNotFound)
 		return

@@ -24,9 +24,22 @@
 | **M8** | WS `CheckOrigin=true` + shell WS 无读上限 | `originAllowed`：空 Origin / 同 Host / 同 `X-Forwarded-Host`（反代改写 Host 的部署）放行，其余拒绝；shell WS `SetReadLimit(1 MiB)` | 外站 Origin 403 且无 `Sec-WebSocket-Accept`；同源/无 Origin 101 |
 | **M9** | 未认证 `/payload/{id}` 用 DB 里的 `name` 拼候选 → 读任意 `*.txt` | `serveStoredImplant` 五个候选全部 `resolveInDir`，越界跳过；脏 `name` 不再进 `Content-Disposition` | 合成 DB 行 `Name=../secret-outside` → 404，无泄漏 |
 | **L2** | 首次启动把生成的明文管理员口令打进日志 | 改为写 `data/initial-admin-password.txt`（0600），日志只给路径与"登录后请修改并删除" | 启动日志无明文；文件存在 |
-| **L4** | 文档/脚本内置开发密钥 `Qingshan@2026`、测试里疑似真实 JWT key | `smoke.sh` 改环境变量/参数、文档示例改 `change-me`、测试 fixture 换假值 | grep 归零 |
+| **L4** | 文档/脚本内置开发用 API Key、测试里疑似真实 JWT key | `smoke.sh` 改环境变量/参数、全部文档示例改 `change-me`、测试 fixture 换假值 | tracked 文件里已无该 key（`git grep` 归零；`configs/server.yaml` 本就 gitignore） |
 | **L5** | 设置接口明文回显 webhook secret | GET 只回 `secret_set`；PUT 仍可写；"发送测试通知"在服务端回退用已存密钥（密钥不回浏览器） | GET 响应无 secret 明文 |
 
+**同版追加：复审计后的第二轮修复（N1~N5）**
+
+第三方独立复审计（结论：**10 条已关闭 / 5 条部分关闭 / 0 条未关闭**，但新挖出 7 项）后，同版本内再修 5 项：
+
+| 编号 | 复审计发现 | 修法 | 复验 |
+|---|---|---|---|
+| **N1** | `resolveInDir` 对 **Windows 目录 junction** 失效（`EvalSymlinks` 报错时回落只做词法断言）→ 未认证可经 `file:` 合成 ID 读到目录外文件、认证可删外部文件 | 改为 **fail-closed**：`EvalSymlinks` 失败即拒；父目录先解析再断言；目标不存在只允许单段名；**逐段 Lstat 拒绝 `ModeIrregular`**（junction 在 Lstat 下不是 symlink） | `file:jl\win.ini` → 400、`file:jl/win.ini` → 404、深层穿越 → 400；目录内 `file:ok.txt` 仍 200 |
+| **N2** | 未认证 `/api/v1/login` 无请求体上限（32 MiB 完整解析，RSS 66→172 MB） | 登录限 **8 KiB**，超限 **413**（原先回 401，会被误读成"口令错"）；其余裸读入口一并收口 | 40 KB 合法 JSON → 413「登录请求体超过 8192 字节上限」；正常登录 200 |
+| **N3** | 插件**硬链接**写穿（`O_NOFOLLOW` 只防软链） | 改 **同目录临时文件 + rename** 替换目录项，与链接类型无关 | 单测覆盖（硬链接用例在 Windows 上建不了时 skip） |
+| **N4** | 初始口令文件登录后不删 | **首次登录成功后删除**，失败只记 warn | 登录后文件消失，错口令不删 |
+| **N5** | 载荷名未拒绝 Windows 设备名与尾点（`CON`/`NUL.raw`/`a.`） | 与插件名规则对齐 | 单测覆盖 |
+
+> 复审计仍判"部分关闭"的 5 条里，**内置 TLS**、**WS 一次性 ticket**、**MQTT 每会话主题 ACL**、**M3 每植入端密钥** 都属设计/部署层，已列入 v1.5/v1.6（见 ROADMAP）。
 **破坏性变更（升级必看）**
 1. `/api/v1/implant/{register,heartbeat,result}` 现在**必须带凭据**（`X-API-Key`/`Bearer`）并在请求体里显式给 `SessionID`；`result` 的 `SessionID` 必须等于任务归属会话，否则 403。**真实植入端不使用这 3 个端点**（只用 `payload/`、`uac/`），正常上线不受影响；受影响的是自己写脚本打这 3 个端点的同学。
 2. 仍使用 `GET /task?session_id=…` 拉任务的旧/自研客户端会收到 **403**（缺会话令牌）。仓库内的 implant 模板走心跳响应领任务，**不需要**重新下发；自研客户端需按 `session_token` 改造。

@@ -781,8 +781,13 @@ func guessToolUsage(name string) string {
 // 这是一条完整的**路径穿越 → 任意文件读取/执行**链。这里做四道校验：
 //  1. 非空、非绝对路径（Unix `/` 与 Windows `\`、盘符 `C:` 都拒）；
 //  2. `filepath.Clean` 后不得为 `.`/`..`/以 `..` 开头；
-//  3. 拼接后 `Abs` 结果必须仍在 `data/tools` 内（防编码/分隔符花招）；
-//  4. 若文件存在，`EvalSymlinks` 后仍须在目录内（防符号链接逃逸）。
+//  3. 拼接后 `Abs`/`Rel` 结果必须仍在 `data/tools` 内（防编码/分隔符花招）；
+//  4. 物理断言（复审计 N1，fail-closed）：委托 resolveInDir —— 父目录与已存在的
+//     目标必须能被 `EvalSymlinks` 解析（**报错即拒绝**，绝不回落词法），并对真实
+//     路径重做 Rel 断言；同时逐段 `Lstat` 拒绝 junction/mount point
+//     （junction 在 Lstat 下不是 symlink，只能靠 ModeIrregular 识别）。
+//     旧实现把「EvalSymlinks 报错」当作「不存在」放行，于是 data/tools 下一个
+//     指向 %WINDIR% 的 junction 就能让 plugin_upload 读到 win.ini。
 func resolveToolPath(src string) (string, error) {
 	name := strings.TrimSpace(src)
 	if name == "" {
@@ -810,14 +815,12 @@ func resolveToolPath(src string) (string, error) {
 	if full != base && !strings.HasPrefix(full, base+sep) {
 		return "", fmt.Errorf("source escapes data/tools")
 	}
-	if real, rerr := filepath.EvalSymlinks(full); rerr == nil {
-		if rbase, berr := filepath.EvalSymlinks(base); berr == nil {
-			if real != rbase && !strings.HasPrefix(real, rbase+sep) {
-				return "", fmt.Errorf("source escapes data/tools (symlink)")
-			}
-		}
+	// 唯一物理校验入口：与载荷路径共用同一套 fail-closed 实现，避免两处逻辑漂移。
+	resolved, err := resolveInDir(base, clean)
+	if err != nil {
+		return "", fmt.Errorf("source escapes data/tools: %w", err)
 	}
-	return full, nil
+	return resolved, nil
 }
 
 func guessToolKind(src string) string {

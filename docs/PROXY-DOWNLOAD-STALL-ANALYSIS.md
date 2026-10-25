@@ -218,7 +218,9 @@ curl.exe -s -o NUL --max-time 60 -x socks5h://127.0.0.1:1080 -w "http=%{http_cod
 curl.exe -s -o NUL --max-time 60 -x socks5h://127.0.0.1:1080 -X POST --data-binary "@$env:TEMP\up5mb.bin" -w "sent=%{size_upload} speed=%{speed_upload}`n" "https://speed.cloudflare.com/__up"
 
 # 卡死时看隧道计数（bytes_out 零增长 = 服务端没收到下行帧）
-Invoke-WebRequest -Uri 'http://127.0.0.1:18081/api/v1/tunnels' -Headers @{'X-API-Key'='Qingshan@2026'} -UseBasicParsing
+> 注：本文示例里的 `change-me-api-key` 是占位符，请换成你自己的 API Key（不要提交真实 key）。
+
+Invoke-WebRequest -Uri 'http://127.0.0.1:18081/api/v1/tunnels' -Headers @{'X-API-Key'='change-me-api-key'} -UseBasicParsing
 ```
 
 ---

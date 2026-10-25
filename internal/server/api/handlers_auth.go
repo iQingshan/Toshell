@@ -2,10 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -122,6 +125,43 @@ func (s *Server) listLogsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxLoginBodyBytes 登录端点（POST /api/v1/login）的请求体上限（审计 N2）。
+//
+// 登录请求只有 username/password 两个短字段，8 KiB 足够（即使用户名/口令里全是
+// 多字节字符也绰绰有余）。/api/v1/login 是**未认证**可达的（auth 中间件对它放行），
+// 所以必须最先限体：不设上限时一个 32 MiB 的 body 会被完整读进内存
+// （审计实测 RSS 66 MB → 172 MB），构成未认证内存 DoS。
+//
+// 超限必须回 413；回 401 会被操作员误读成“口令错”，掩盖真正的原因。
+const maxLoginBodyBytes = 8 << 10
+
+// writeBodyTooLarge 统一写“请求体超限”的 413 中文原因。
+func writeBodyTooLarge(w http.ResponseWriter, limit int64, scope string) {
+	writeJSONError(w, http.StatusRequestEntityTooLarge,
+		fmt.Sprintf("%s请求体超过 %d 字节上限", scope, limit))
+}
+
+// readBodyLimited 在 http.MaxBytesReader 闸门之后读取整个请求体，超限统一回 413。
+//
+// 为什么不直接用 json.Decoder.Decode：Decoder 解析完第一个 JSON 值就可能返回，
+// 后面的超大尾部不会被计入上限（"合法 JSON + 32 MiB 垃圾"照样能走完流程）。
+// 这里先整体读入再 Unmarshal，保证任何超过 limit 的 body 都会被明确拒绝。
+// scope 只用于中文错误原因（如“创建任务”）。
+func readBodyLimited(w http.ResponseWriter, r *http.Request, limit int64, scope string) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) || strings.Contains(err.Error(), "request body too large") {
+			writeBodyTooLarge(w, limit, scope)
+			return nil, false
+		}
+		writeJSONError(w, http.StatusBadRequest, "读取请求体失败")
+		return nil, false
+	}
+	return body, true
+}
+
 func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -130,9 +170,29 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 未认证端点：先限体，再解码；不要把超大 body 读进内存。
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBodyBytes)
+
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) || strings.Contains(err.Error(), "request body too large") {
+			writeBodyTooLarge(w, maxLoginBodyBytes, "登录")
+			return
+		}
 		http.Error(w, `{"error":"Invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+	// Decode 解析完第一个 JSON 值就可能提前返回；把剩余 body 读干净并要求整体
+	// 仍在 8 KiB 内，否则“合法 JSON + 超大尾部”会绕过上面的闸门（也就绕过了
+	// 未认证端点的内存边界）。读取错误在响应写出之前处理，不影响正常登录。
+	if _, err := io.Copy(io.Discard, r.Body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) || strings.Contains(err.Error(), "request body too large") {
+			writeBodyTooLarge(w, maxLoginBodyBytes, "登录")
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "读取请求体失败")
 		return
 	}
 
@@ -155,6 +215,9 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	if s.auth.ValidateCredentials(req.Username, req.Password) {
 		loginReset(key)
+		// 认证成功 = 初始明文口令已经用过一次：立即删除落盘文件（审计 N4）。
+		// 删除失败只告警，不影响本次登录。
+		clearInitialAdminPasswordFile()
 		token, err := s.auth.GenerateToken(req.Username, "admin")
 		if err != nil {
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
@@ -167,6 +230,54 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeLoginLog(s, req.Username, clientIP, false, "invalid credentials")
 		http.Error(w, `{"error":"Invalid credentials"}`, http.StatusUnauthorized)
 	}
+}
+
+// ─── 初始管理员明文口令文件（审计 L2/N4） ──────────────────────────
+//
+// 首次启动（配置里没有显式 admin_password）时，cmd/server/main.go 生成随机口令，
+// 把明文写进 data/initial-admin-password.txt，只在日志里给路径。该文件是明文
+// 凭据：首次成功登录后必须删除，不能长期留在 data/（备份、卷快照、任意文件读
+// 都会放大影响）。
+
+// DataDir 运行时数据目录名（相对进程工作目录）。
+// 抽成常量与 cmd/server/main.go 共用，避免“写入用一处、删除用另一处”导致路径漂移。
+const DataDir = "data"
+
+// initialAdminPasswordFileName 初始管理员明文口令文件名。
+const initialAdminPasswordFileName = "initial-admin-password.txt"
+
+// InitialAdminPasswordPath 返回初始管理员明文口令文件的完整路径。
+// cmd/server/main.go 写入与登录成功后的清理都走这里，保证两处完全一致。
+func InitialAdminPasswordPath(dataDir string) string {
+	return filepath.Join(dataDir, initialAdminPasswordFileName)
+}
+
+// initialAdminPasswordPath 是登录成功后要清理的路径。
+// 抽成变量是为了让测试注入临时目录，不碰真实的 data/ 目录；生产运行时固定为
+// data/initial-admin-password.txt。
+var initialAdminPasswordPath = func() string {
+	return InitialAdminPasswordPath(DataDir)
+}
+
+// clearInitialAdminPasswordFile 在管理员首次认证成功后删除明文口令文件。
+//
+// 取舍：为什么不是“改密后删”——ToShell 的管理员口令写在配置文件里，改密必须改
+// 配置 + 重启；而启动时若配置里已有显式口令，本来就不会写这个文件；若走的是
+// 自动生成，重启后配置里也已是哈希。也就是说“首登删文件”覆盖了明文真正被使用的
+// 唯一时刻，窗口最小，且不依赖用户是否记得改密。
+//
+// 失败不影响登录：文件可能早已被手工删除（ErrNotExist 直接忽略），也可能因
+// 权限/占用删不掉——那只是残留风险，不能反过来把已通过认证的管理员挡在门外。
+func clearInitialAdminPasswordFile() {
+	path := initialAdminPasswordPath()
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return // 显式配置口令时启动本就不写文件，或管理员已手工删除。
+		}
+		logging.Warn("auth", "登录成功但删除初始管理员口令文件失败（%s）：%v；请手工删除", path, err)
+		return
+	}
+	logging.Info("auth", "管理员首次登录成功，已删除初始明文口令文件 %s", path)
 }
 
 // ─── 登录限速 / 锁定 ───────────────────────────────────────────────

@@ -579,12 +579,60 @@ func (l *MQTTListener) embeddedBrokerClientHost() string {
 	return host
 }
 
+// isLoopbackBindHost 判断内嵌 broker 的绑定主机是否只在本机可达。
+//
+// 空值 = 未配置 = 默认回环（embeddedBrokerBindHost 会回落 127.0.0.1）；
+// localhost 以及 127.0.0.0/8、::1 等都算回环。其它任何值（0.0.0.0、::、
+// 具体网卡地址、主机名）一律按"非回环"处理（fail-closed，不做 DNS 解析猜测）。
+func isLoopbackBindHost(host string) bool {
+	h := strings.TrimSpace(host)
+	h = strings.TrimPrefix(h, "[")
+	h = strings.TrimSuffix(h, "]")
+	if h == "" || strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// embeddedBrokerBindAllowed 判定内嵌 broker 在当前绑定地址/凭据下是否允许启动。
+//
+// 审计 M5 的 fail-closed 规则：
+//   - 回环 + 无凭据：允许（只有本机可达，维持历史行为）；
+//   - 回环 + 有凭据：允许（挂 auth.Hook 校验）；
+//   - 非回环 + 凭据完整：允许（挂 auth.Hook 校验）；
+//   - 非回环 + 缺少用户名或口令：**拒绝启动** —— 否则等于把 C2 控制通道
+//     匿名暴露给任何能访问该端口的人（可枚举 toshell/<sid>/up|down、
+//     投递垃圾帧、拖走加密控制帧）。
+//
+// 抽成纯函数（不碰网络状态），便于单测覆盖判定矩阵。
+func embeddedBrokerBindAllowed(bind, user, pass string) error {
+	if isLoopbackBindHost(bind) {
+		return nil
+	}
+	if strings.TrimSpace(user) == "" || strings.TrimSpace(pass) == "" {
+		return fmt.Errorf("内嵌 broker 绑定到非回环地址时必须配置 listener.mqtt_username/password，否则等于把控制通道匿名暴露（bind=%q）", bind)
+	}
+	return nil
+}
+
 // startEmbeddedBroker 启动内嵌 mochi-mqtt broker（监听 mqtt_embedded_bind:port）。
 func (l *MQTTListener) startEmbeddedBroker() error {
+	bind := l.embeddedBrokerBindHost()
+	// 审计 M5（fail-closed）：非回环且缺凭据时，**在任何监听动作之前**拒绝启动。
+	if err := embeddedBrokerBindAllowed(bind, l.cfg.MQTTUsername, l.cfg.MQTTPassword); err != nil {
+		return err
+	}
+
 	srv := mochi.New(nil)
 	// 审计 M5：配置了 mqtt_username/mqtt_password 就挂真正的 auth.Hook 做校验；
-	// 没配时仍匿名放行（主题里是 AEAD 加密帧），但**只绑回环**，不再对外。
+	// 没配时仍匿名放行（主题里是 AEAD 加密帧），但只能绑回环（上面已强制）。
 	authEnabled := l.cfg.MQTTUsername != "" || l.cfg.MQTTPassword != ""
+	if !authEnabled {
+		logging.Warn("listener", "MQTT embedded broker 未配置 mqtt_username/password：仅本机（%s）可连；生产建议配 listener.mqtt_username/password", bind)
+	}
 	if authEnabled {
 		ledger := &auth.Ledger{
 			Auth: auth.AuthRules{
