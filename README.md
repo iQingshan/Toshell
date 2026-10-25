@@ -22,7 +22,7 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 | [docs/LOADERS.md](docs/LOADERS.md) | **不落地未签名 PE 怎么上线**：白加黑、计划任务、rundll32/mshta/certutil、内存加载链的前置条件与取舍 |
 | [docs/DEPLOY-DOMAIN-CDN.md](docs/DEPLOY-DOMAIN-CDN.md) | 用**域名 + CDN / Nginx 反代 / 域前置**上线时的配置与排错 |
 | [docs/PROTOCOL-HARDENING.md](docs/PROTOCOL-HARDENING.md) | **通讯为什么能被逆向、怎么根治**：每植入端密钥 + 前向保密 + 帧绑定 + 证书 pin，含验收标准 |
-| [docs/SECURITY-FIXES-1.4.2.md](docs/SECURITY-FIXES-1.4.2.md) | **v1.4.2 安全修复说明**：本轮审计修了什么、升级的破坏性变更、以及**残余风险（样本 ≈ 协议身份）** |
+| [docs/SECURITY-FIXES-1.4.2.md](docs/SECURITY-FIXES-1.4.2.md) | **v1.4.2 安全修复说明**：本轮审计修了什么、升级的破坏性变更、逐条复现验证结果 |
 | [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么 |
 | [ROADMAP.md](ROADMAP.md) | 已做 / 待做的路线与优先级 |
 | [SECURITY.md](SECURITY.md) · [DISCLAIMER.md](DISCLAIMER.md) | 漏洞披露流程 · 授权与合规边界 |
@@ -117,8 +117,6 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 | 密钥卫生（**L2/L4/L5**） | 初始口令不进日志（写 0600 文件）；清掉文档/脚本里的开发密钥；设置接口不再回显 webhook secret |
 
 > ⚠️ **三条破坏性变更**：① 那 3 个兼容端点要凭据 + `SessionID`；② 仍走 `GET /task` 的自研客户端会 403（需带上注册响应里的 `session_token`；**仓库内模板不受影响，不需要重新下发**）；③ 管理 API 不再接受 `?token=`。
->
-> ⚠️ **残余风险（未修，属设计层）**：载荷里的协议密钥是**全局同一把**且可逆，"拿到一个样本 ≈ 拿到协议层身份"。请把载荷 ID/URL 与样本当敏感信息、每场演练独立 `listener.encryption_key`。修复方向在 ROADMAP（每植入端密钥 / 帧重放防护 / 一次性短 TTL 下载 URL）。
 
 ## v1.4.1 重点变化（补丁版）
 
