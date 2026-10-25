@@ -17,6 +17,12 @@
 - **密钥卫生**（L2/L4/L5）：初始口令不进日志（写 0600 文件、**首次登录后自动删除**）；清掉文档/脚本里的开发密钥；设置接口不再回显 webhook secret。
 - **复审计二轮**（N1~N5）：Windows **目录 junction** 绕过改为 fail-closed（`EvalSymlinks` 失败即拒 + 逐段 `Lstat` 拒 `ModeIrregular` + `file:` 强制单段名）；登录超大 body 从 401 改 **413**；插件**硬链接**写穿改 rename；载荷名拒绝 `CON`/尾点。
 
+**同版追加：修一次"白屏"打包事故（并加上守卫）**
+
+- 现象：`release/toserver.exe`（commit `fafbe3b`）启动后**页面全白**。
+- 根因：同步内嵌前端时用了 `Copy-Item web\dist\* cmd\server\webdist\ -Recurse`，而该目标目录**当时不存在** → PowerShell 把 `assets/` 里的文件**摊平**到 `webdist` 根目录。`index.html` 仍引用 `assets/index-*.js`，于是所有 JS 404 → SPA 回退把 HTML 当模块返回 → 浏览器报 *"Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of text/html"* → 白屏。**编译期完全看不出来**（`go:embed` 不校验引用）。
+- 修法：`webdist` 改成"先建目录再拷内容"，结构恢复为 `webdist/index.html` + `webdist/assets/*`；实测 asset 返回 370,439 字节真 JS、登录页正常渲染、控制台零报错。
+- **加守卫**：新增 `cmd/server/webdist_test.go`（`-tags webui`），断言 ① index.html 引用的每个 `assets/*.js|css` 都真实存在且非空 ② `webdist` 根目录**不得**出现被打散的 `.js/.css`（发现就给出正确的同步命令）。同步 webdist 出错时，`go test -tags webui ./cmd/server/` 会直接红。
 **同版追加：凭据"看得懂"与 OPSEC（真机反馈第二轮）**
 
 - **浏览器密码全是垃圾**：`parseSQLiteLoginData` 是"扫字节找 `http` → 猜后面两个串当用户名/密码"的启发式，根本没解 SQLite 记录格式，所以 URL 会吞掉下一条记录的字段名、schema 文本被当密码、加密 blob 被当 ASCII。改用 **Windows 自带 `winsqlite3.dll`** 正经查询 `SELECT origin_url, username_value, password_value FROM logins`（多 profile、只读、副本用完即删）；本机实测 **1109 条假数据 → 78 条真数据**、`duration_ms 47→23`、URL/用户名回到正确字段。
