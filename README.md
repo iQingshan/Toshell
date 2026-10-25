@@ -21,6 +21,7 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 | [docs/VSHELL-ANALYSIS.md](docs/VSHELL-ANALYSIS.md) | **同类项目的设计取舍**：对一份第三方 C2 复刻的架构对比、可借鉴点与**许可证红线**（只吸收设计、不搬代码） |
 | [docs/LOADERS.md](docs/LOADERS.md) | **不落地未签名 PE 怎么上线**：白加黑、计划任务、rundll32/mshta/certutil、内存加载链的前置条件与取舍 |
 | [docs/DEPLOY-DOMAIN-CDN.md](docs/DEPLOY-DOMAIN-CDN.md) | 用**域名 + CDN / Nginx 反代 / 域前置**上线时的配置与排错 |
+| [docs/PROTOCOL-HARDENING.md](docs/PROTOCOL-HARDENING.md) | **通讯为什么能被逆向、怎么根治**：每植入端密钥 + 前向保密 + 帧绑定 + 证书 pin，含验收标准 |
 | [docs/SECURITY-FIXES-1.4.2.md](docs/SECURITY-FIXES-1.4.2.md) | **v1.4.2 安全修复说明**：本轮审计修了什么、升级的破坏性变更、以及**残余风险（样本 ≈ 协议身份）** |
 | [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么 |
 | [ROADMAP.md](ROADMAP.md) | 已做 / 待做的路线与优先级 |

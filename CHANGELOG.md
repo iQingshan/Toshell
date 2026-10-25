@@ -3,63 +3,42 @@
 本项目采用 [语义化版本](https://semver.org/lang/zh-CN/)。所有值得注意的改动都会记录在本文件。
 后续优化方向（含驱动能力分档、内存执行加固、屏幕流跨平台、平台工具库与远程加载型红队能力等）见 [ROADMAP.md](ROADMAP.md)。
 
-## [v1.4.2] - 2026-10-25（安全修复版）
+## [v1.4.2] - 2026-10-25（安全修复 + 可用性）
 
-**一句话定位**：按第三方安全审计修复 **4 High + 9 Medium + 3 Low**，随后独立复审计又修 5 项残留；不改协议帧格式、不加新功能，但有 **3 处破坏性变更**。
+**一句话**：按第三方审计修掉 **4 High + 9 Medium + 3 Low**（复审计后再修 5 项），同版把"凭据采集"整条链路重做。有 **3 处破坏性变更**。
 
-**修了什么**（一行一条；逐条判定见 `docs/SECURITY-FIXES-1.4.2.md`、复审计见 `docs/SECURITY-REAUDIT-1.4.2.md`）
+**安全（审计 + 复审计）**
+- **路径穿越**（H2/H3/H4/M9）：载荷名/插件名收敛为"纯文件名 + 后缀白名单 + 目录边界断言"，插件写盘改"临时文件 + rename"；修前**认证后可读任意文件（含 `jwt_key`、协议密钥）或删/写任意文件**。
+- **未认证伪造**（H1/M1）：`/api/v1/implant/{register,heartbeat,result}` 加认证、结果**校验归属**；心跳只写自己那条，dead 会话 409 不复活。
+- **任务被抢**（M2）：轮询 `/task` 改为**每次上线一个会话令牌**，先验令牌再取任务。
+- **资源与面收敛**（M4~M8）：请求体上限（登录 8 KiB / 小 JSON 64 KiB / 大块 16 MiB）、gzip 解压 32 MiB；内嵌 MQTT 默认只绑回环且**非回环无凭据拒绝启动**；`?token=` 仅两条 WS 路径；WS 校验 Origin + shell 读上限。
+- **密钥卫生**（L2/L4/L5）：初始口令不进日志（0600 文件、**首登自动删**）；清掉文档/脚本里的开发密钥；设置接口不再回显 webhook secret。
+- **复审计二轮**（N1~N5）：Windows **目录 junction** 绕过改 fail-closed（`EvalSymlinks` 失败即拒 + 逐段 `Lstat` 拒 `ModeIrregular` + `file:` 单段名）；登录超大 body 从 401 改 **413**；插件**硬链接**写穿改 rename；载荷名拒绝 `CON`/尾点。
 
-- **路径穿越**（H2/H3/H4/M9）：载荷名/插件名收敛成"纯文件名 + 后缀白名单 + 目录边界断言"，插件写盘改"临时文件 + rename"。此前**认证后可读任意文件（含 `jwt_key` / 协议密钥）或删/写任意文件**。
-- **未认证伪造**（H1/M1）：`/api/v1/implant/{register,heartbeat,result}` 加认证；任务结果**校验归属**；心跳只写自己那条，dead 会话 409 不复活。
-- **任务被抢**（M2）：HTTP 轮询 `/task` 改成**每次上线一个会话令牌**，先验令牌再取任务。
-- **资源耗尽**（M4/M7）：请求体上限（登录 8 KiB / 小 JSON 64 KiB / 大块 16 MiB）、gzip 解压上限 32 MiB。
-- **面收敛**（M5/M6/M8）：内嵌 MQTT 默认只绑回环、**非回环且无凭据拒绝启动**；`?token=` 仅两条 WS 路径可用；WS 校验 Origin + shell 读上限 1 MiB。
-- **密钥卫生**（L2/L4/L5）：初始口令不进日志（写 0600 文件、**首次登录后自动删除**）；清掉文档/脚本里的开发密钥；设置接口不再回显 webhook secret。
-- **复审计二轮**（N1~N5）：Windows **目录 junction** 绕过改为 fail-closed（`EvalSymlinks` 失败即拒 + 逐段 `Lstat` 拒 `ModeIrregular` + `file:` 强制单段名）；登录超大 body 从 401 改 **413**；插件**硬链接**写穿改 rename；载荷名拒绝 `CON`/尾点。
+**凭据采集（真机反馈，本轮重做）**
+- **曾把植入进程打崩**：`CredEnumerateW` 返回**指针数组**，旧代码把槽位地址当结构体解引用 → 有已保存凭据就访问违例、进程退出（服务端只看到任务永远 `sent`）。已改为先取指针再解引用。
+- **浏览器密码是垃圾**：旧解析只"扫字节找 `http` 再猜两个串"，没解 SQLite 记录格式。改用 **系统自带 `winsqlite3.dll`** 正经查 `logins`（多 profile、只读副本）：**1109 条假记录 → 78 条真记录**。
+- **解密三路**：`v10/v11` 用**各自浏览器**的 `Local State` key 走 AES-256-GCM；`v20`（应用绑定加密）**明确标"无法解密"**并留空、计数；无前缀走老 DPAPI；解出必须过 UTF-8/控制字符校验，**绝不把密文当密码**。
+- **结果曾不是合法 JSON**（提示文本拼在 JSON 后）→ 前端必报解析失败；改到 `notes` 字段。
+- **500 字节硬截断**（真位置在 `database.go`）→ 可配 `task.output_max_bytes`（默认 **256 KiB**），超限标 `truncated`，更大走外置句柄回读。
+- **重活任务并发闸**（默认 2，轻任务不排队）+ 超时等待带上限（不再卡重连）+ `duration_ms/queued_ms`。
+- **黑框**：`netsh/reg/schtasks/sc/powershell` 全部走 `execHidden`（`HideWindow` + `CREATE_NO_WINDOW`），`getSysProcAttr()` 同步补 `CREATE_NO_WINDOW`（只 `HideWindow` 仍会分配控制台，闪一帧且是 EDR 高信号）。
+- "**RDP 200 过长**"是误读：`CredEnumerateW` ≈ 0.1ms、RDP 段 1–4ms；那 ~200ms 来自 **WiFi**（`netsh` 两次进程启动）。前端已把「本次耗时」与「等待上限 200s」拆开。
 
-**同版追加：修一次"白屏"打包事故（并加上守卫）**
+**前端**
+- **凭据面板**重做：分段标签 + 内滚动表格 + 密码默认打码/复制 + `v20`/`needs_admin`/`truncated` 显式标注 + 统计行；隐藏不轮询、切回不重复下发。
+- **标签页回归**：为"切换不卸载"加的那层 div 打掉了面板 `height:100%` 参照 → 内容框变矮。包装层改透传布局，实测撑满内容区。
+- **白屏事故**：打包时 `Copy-Item web\dist\*` 在目标目录不存在时把 `assets/` **摊平**到根 → JS 全 404 → 白屏。改为先建目录再拷，并加 `cmd/server/webdist_test.go`（`-tags webui`）守卫"引用 ↔ 实际文件"。
 
-- 现象：`release/toserver.exe`（commit `fafbe3b`）启动后**页面全白**。
-- 根因：同步内嵌前端时用了 `Copy-Item web\dist\* cmd\server\webdist\ -Recurse`，而该目标目录**当时不存在** → PowerShell 把 `assets/` 里的文件**摊平**到 `webdist` 根目录。`index.html` 仍引用 `assets/index-*.js`，于是所有 JS 404 → SPA 回退把 HTML 当模块返回 → 浏览器报 *"Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of text/html"* → 白屏。**编译期完全看不出来**（`go:embed` 不校验引用）。
-- 修法：`webdist` 改成"先建目录再拷内容"，结构恢复为 `webdist/index.html` + `webdist/assets/*`；实测 asset 返回 370,439 字节真 JS、登录页正常渲染、控制台零报错。
-- **加守卫**：新增 `cmd/server/webdist_test.go`（`-tags webui`），断言 ① index.html 引用的每个 `assets/*.js|css` 都真实存在且非空 ② `webdist` 根目录**不得**出现被打散的 `.js/.css`（发现就给出正确的同步命令）。同步 webdist 出错时，`go test -tags webui ./cmd/server/` 会直接红。
-**同版追加：凭据"看得懂"与 OPSEC（真机反馈第二轮）**
-
-- **浏览器密码全是垃圾**：`parseSQLiteLoginData` 是"扫字节找 `http` → 猜后面两个串当用户名/密码"的启发式，根本没解 SQLite 记录格式，所以 URL 会吞掉下一条记录的字段名、schema 文本被当密码、加密 blob 被当 ASCII。改用 **Windows 自带 `winsqlite3.dll`** 正经查询 `SELECT origin_url, username_value, password_value FROM logins`（多 profile、只读、副本用完即删）；本机实测 **1109 条假数据 → 78 条真数据**、`duration_ms 47→23`、URL/用户名回到正确字段。
-- **密码解密分三路**：`v10/v11` 用**各自浏览器**的 `Local State` key 走 AES-256-GCM（旧实现拿 Chrome 的 key 去解 Edge）；`v20`（Chrome 127+ 应用绑定加密）**明确标"无法解密"并留空**、计入 `undecryptable_v20`，**绝不把密文当密码**；无前缀走老 DPAPI。解出字节必须过 UTF-8/控制字符校验，否则丢弃并计数。
-- **WiFi 弹黑框**：所有 `netsh` 改走 `execHidden`（`HideWindow` + `CREATE_NO_WINDOW`）；并把 `getSysProcAttr()` 统一加上 `CREATE_NO_WINDOW`（只 `HideWindow` 仍会分配控制台，闪一帧黑框且是 EDR 高信号）；顺手修 `netsh` 的 GBK 输出解码与 SSID/密码字段解析。
-- **"RDP 200 过长"是误读**：分段加了 `duration_ms`/`timings` 后实测 `CredEnumerateW` ≈ 0.1ms、RDP 段 1–4ms；真正的 200ms 来自 **WiFi 段**（`netsh` 每次进程启动 100–180ms × 2 次 ≈ 209ms，旧实现 362ms）。前端把「本次取值耗时」与「等待上限 200s（前端轮询上限，非耗时）」拆成两个独立徽标。
-- **凭据面板太小**：改成分段标签（全部/浏览器/WiFi/RDP/LSA/SAM/DPAPI，各自 `count/returned`）+ 内滚动表格（`max-height: min(52vh,520px)`、sticky 表头）+ 密码默认打码/单条显示/复制 + `v20`、`needs_admin`、`truncated` 显式标注 + 统计行。隐藏标签页时**不轮询**，切回**不重复下发**。
-- **标签页内容框变小（回归）**：`v1.4.2` 为"切换不卸载"给每个面板加了一层包装 div，打掉了面板 `height:100%` 的参照 → 各 tab 内容框塌成内容高度。改为包装层透传布局（`display:flex; flex-direction:column; min-height:100%` + 子项 `flex:1 0 auto`），实测面板与子元素均撑满内容区内框（594×686 @1600×900），切走再切回是同一 DOM 节点。
-- 顺带：`persistence_windows.go` 里 14 处裸 `exec.Command`（reg/schtasks/sc/powershell）也改走 `execHidden`——它们同样会在目标机闪黑框；镜像一致性守卫测试改为"不写死文件数 + 下界哨兵"（模板文件从 62 增至 65）。
-**同版追加：凭据链路与标签页体验（现场反馈）**
-
-- **凭据获取：真机一跑就把植入进程打崩**（这是"卡死其他任务"的直接原因）。`dumpRDPCredentials` 把 `CredEnumerateW` 返回的**指针数组槽位地址**当成 `CREDENTIAL_W` 解引用 —— 目标机上一旦有已保存凭据就访问违例，**整进程退出**；服务端只看到 3 个 `credentials` 任务永远停在 `sent` + `forcibly closed`。已改为先取槽位指针再解引用，`ERROR_NOT_FOUND` 视为 0 条。
-- **凭据结果不是合法 JSON**（这是"没完善"的观感来源）：非管理员时旧代码 `return string(jsonData) + privNote`，前端 `JSON.parse` 必失败 → 面板只显示"结果解析失败"。现在提示进 `notes` 字段，返回纯 JSON。
-- **500 字节硬截断**：真正写死在 `database.go`（不是 bridge 层）。改为可配 `task.output_max_bytes`（默认 **256 KiB**），入库超限保留前缀 + 可反解的 `truncated` 标注；Agent 回读层超限**外置成句柄**，`result_read` 可分页拼回原文（单测逐字节比对）。顺带修了"重启后 `GET /tasks/{id}` 报 not found"（`sent_at/completed_at` 写 TEXT、读 int64）。
-- **凭据结果按 action 分段**（browser/wifi/rdp/lsa/sam/dpapi，每段 64 KiB、按整条二分回退不切断 JSON），LSA/SAM 非管理员明确返回"需要管理员权限 + 底层错误"，不再是空串。
-- **重活任务加并发闸**（默认 2，轻任务不排队）+ `waitHeavyTasks(5s)` 超时等待（不再卡重连）+ 结果带 `duration_ms/queued_ms`；前端凭据面板 200s 总超时 + 阶段提示 + 分段表格 + `truncated/omitted` 标注。
-- **切换标签页不再丢状态**：`SessionDetail` 之前只渲染当前 tab（切走即卸载），文件目录、Shell 滚屏、进程搜索词、填了一半的表单全丢。现在"**挂载即保留、切换只隐藏**"（只挂载访问过的 tab，首屏仍只有 1 个；切会话清空；aria/tabpanel 语义保持正确）；屏幕流隐藏时停流但保留最后一帧。
-- **如实记一条能力边界**：本机虽装了 `garble v0.15.0` 且构建页有开关，但它**默认关闭、发布包不自带**；配置块的 4 字节 XOR 混淆**可逆**。所以"能逆向 ≈ 能拿到通道身份"这个前提仍在 —— 抗逆向的正确解法是 **v1.5 的每植入端密钥**（被逆了也只影响那一台），其次才是 garble 默认开。已写进 ROADMAP 的 P6 与 T13。
-**关键实测**
-
-- 审计 PoC 回放：**21 条用例全部被拒**；复审计判 **10 关闭 / 5 部分关闭 / 0 未关闭**（新增 7 项已修 5 项）。
-- junction：`file:jl\win.ini` → 400、`file:jl/win.ini` → 404，而目录内 `file:ok.txt` → 200（正向未破）。
-- 登录 40 KB 合法 JSON → 413「登录请求体超过 8192 字节上限」；正常登录 200。
-- 门禁：`go test ./...` **25 包全绿**；`e2e_smoke` 19 项 ❌0（真实载荷上线 + whoami）；`mcp_smoke` 18/18；两份植入端镜像 62 文件 SHA-256 一致。
-
-**升级必看（破坏性变更）**
-
-1. 那 3 个兼容端点需凭据 + `SessionID`（真实植入端不使用它们，正常上线不受影响）。
-2. 仍走 `GET /task` 的自研客户端会 403（需带注册响应里的 `session_token`；**仓库内模板不受影响，不用重新下发**）。
-3. 管理 API 不再接受 `?token=`（仅 WS 两条路径例外）；构建 `name` / 插件名收严。
+**升级必看**
+1. 那 3 个兼容端点需凭据 + `SessionID`（真实植入端不使用，正常上线不受影响）。
+2. 仍走 `GET /task` 的自研客户端会 403（需带注册响应里的 `session_token`；**仓库内模板不受影响**）。
+3. 管理 API 不再接受 `?token=`（仅两条 WS 路径例外）；构建 `name`/插件名收严。
 
 **如实边界**
-
-- **M3（协议密钥全局同一把且可逆）未修**：**拿到一个样本 ≈ 拿到协议层身份**。已写进 `docs/SECURITY-FIXES-1.4.2.md` §4.1，修复排 v1.5 第一位。
-- 内置 TLS、WS 一次性 ticket、MQTT 每会话主题 ACL、AV-Ops L2+ 真机 —— 均未做，已列 ROADMAP。
-- L1（植入端 TLS `InsecureSkipVerify`）保留：靠应用层 AEAD 兜底，严格校验会让自签证书部署不可用。
-- 软链/硬链接安全用例在 Windows 上无权限时 `t.Skip`（Linux CI 会真跑）。
+- **协议密钥仍是全局同一把且可逆 → "拿到一个样本 ≈ 拿到协议层身份"**。这是下一版第一优先，方案见 [`docs/PROTOCOL-HARDENING.md`](docs/PROTOCOL-HARDENING.md)。
+- 内置 TLS、WS 一次性 ticket、MQTT 每会话主题 ACL、AV-Ops L2+ 真机：未做。
+- 本机凭据全是 `v20` → `v10` 解出只能靠单测证明；"黑框消失"只能代码断言（无法程序化抓闪烁）。
 
 ## [v1.4.1] - 2026-10-24（补丁版）
 
