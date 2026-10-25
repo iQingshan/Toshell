@@ -126,6 +126,9 @@ jobs:
           # docs/LOADERS.md、docs/DEPLOY-DOMAIN-CDN.md，不打包就是一堆死链
           # （README 里的截图也在 docs/screenshots/ 下）。
           cp -r docs "$STAGE/docs"
+          # 发布包不带探针构建产物与模板单测（v1.4.2 起）
+          rm -rf "$STAGE/docs/rust-probe/out"
+          rm -f "$STAGE/implant"/*_test.go
           # 许可与第三方声明：包里捆绑了 UPX(GPL) 与第三方签名驱动，必须随包分发
           cp LICENSE "$STAGE/LICENSE"
           cp DISCLAIMER.md "$STAGE/DISCLAIMER.md"

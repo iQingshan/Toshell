@@ -93,6 +93,8 @@ cmd/server/webdist/
 web/*.tsbuildinfo
 # 多系统发布二进制（仅作为 GitHub Release 资产，不提交）
 release/bin/
+# 本地打包产物（6 平台 zip + checksums.txt 由 scripts/package_release.ps1 生成）
+release/release-zips/
 # release 发布包 USAGE 说明含真实默认凭据示例，开源不提交（release 内容保留不动）
 release/USAGE.md
 

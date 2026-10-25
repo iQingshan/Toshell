@@ -1,5 +1,5 @@
 # =====================================================================
-#  ToShell v1.4.1 local packaging: mirrors .github/workflows/release.yml
+#  ToShell v1.4.2 local packaging: mirrors .github/workflows/release.yml
 #  Output: release/release-zips/toshell-server-<os>-<arch>.zip (6 targets)
 # =====================================================================
 $ErrorActionPreference = 'Stop'
@@ -50,6 +50,11 @@ foreach ($m in $matrix) {
   # docs\LOADERS.md、docs\DEPLOY-DOMAIN-CDN.md（截图也在 docs\screenshots 下），
   # 不打包就是一堆死链。与 .github\workflows\release.yml 保持一致。
   Copy-Item -Recurse (Join-Path $base 'docs') (Join-Path $pkg 'docs')
+# 发布包里不该带的东西（v1.4.2 起）：
+#   1) docs\rust-probe\out：那是探针的**构建产物**（.exe），源码保留即可；
+#   2) implant\*_test.go：模板单测，服务端构建载荷不需要。
+if (Test-Path (Join-Path $pkg 'docs\rust-probe\out')) { Remove-Item -Recurse -Force (Join-Path $pkg 'docs\rust-probe\out') }
+Get-ChildItem (Join-Path $pkg 'implant') -Filter '*_test.go' -ErrorAction SilentlyContinue | Remove-Item -Force
   # 许可与第三方声明（包内含 UPX(GPL) 与第三方签名驱动，需随包分发）
   Copy-Item (Join-Path $base 'LICENSE') (Join-Path $pkg 'LICENSE')
   Copy-Item (Join-Path $base 'DISCLAIMER.md') (Join-Path $pkg 'DISCLAIMER.md')
