@@ -3,7 +3,7 @@
 > 自托管的 C2（命令与控制）远程管理平台，用于**授权红队演练、渗透测试与安全研究**。
 > **仅限获得授权后使用。** 严禁未授权的入侵 / 攻击 / 数据窃取。
 
-**v1.4.0**（2026-09-28 已发布） · [MIT License](LICENSE) · [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) · 作者：青山 / Q1lintu / c0ffee · 联系：[qingshan@88.com](mailto:qingshan@88.com)
+**v1.4.2**（2026-10-25 已发布） · [MIT License](LICENSE) · [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) · 作者：青山 / Q1lintu / c0ffee · 联系：[qingshan@88.com](mailto:qingshan@88.com)
 
 ---
 
@@ -166,7 +166,8 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 
 ## 功能部分截图
 
-> 下面 17 张图是**亮色主题下的真机实拍**：直接用 `v1.4.1` 服务端起站，接了两个**真实回连的会话**
+> 下面 17 张图是**亮色主题下的真机实拍**：用 `v1.4.1` 服务端起站（`v1.4.2` 只修安全与可用性问题，界面无变化，
+> 所以没有重新拍照——「关于」页里显示的版本号就是拍摄时的版本），接了两个**真实回连的会话**
 > （Windows/amd64 与 Linux/amd64 各一台），**分辨率按截图机器的原生显示 2560×1440**，
 > 不是设计稿、不是占位图，也没有做任何"摆拍"式修饰。
 >
