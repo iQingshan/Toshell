@@ -24,7 +24,7 @@
   - `resolveInDir`：`Join` → `Abs` → `Rel(dir, p)` 前缀断言；目标存在时再做一次 `EvalSymlinks` 后断言（软链逃逸）。
 - 载荷下载的后缀只来自固定白名单（`exe/dll/bin/txt/raw/so`），`format` 不再直接当后缀用。
 - `serveStoredImplant` 的每个候选路径都过 `resolveInDir`；历史脏数据不再能把下载导向目录外。
-- 插件（MCP `plugin_upload` 与 multipart 上传）增加四道防线：名字白名单 → `Rel` 断言 → `EvalSymlinks(pluginDir)` 真实根 + `Lstat` 拒软链 → `O_NOFOLLOW` 写盘。
+- 插件（MCP `plugin_upload` 与 multipart 上传）增加四道防线：名字白名单 → `Rel` 断言 → `EvalSymlinks(pluginDir)` 真实根 + `Lstat` 拒同名软链（fail-closed）→ 同目录临时文件 + `rename` 覆盖（与链接类型无关，硬链接也只会被替换、不会被写穿）。`scanPlugins` 同步只登记普通文件。
   - multipart 上传**自行**从 `Content-Disposition` 取原始文件名：Go 标准库的 `Part.FileName()` 会先做 `filepath.Base`，会把 `../x.exe` 静默归一成 `x.exe`，丢失穿越信号。
 
 ### 2.2 未认证可操纵会话与任务（H1 / M1 / M2）

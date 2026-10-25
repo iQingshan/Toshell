@@ -85,6 +85,11 @@ func (m *Manager) scanPlugins() error {
 		if err != nil {
 			continue
 		}
+		// 只登记普通文件：插件目录里出现的符号链接 / 设备 / junction 一律跳过，
+		// 避免「扫描时跟随链接把目录外的东西登记成插件」（与 Add 的拒软链策略一致）。
+		if !info.Mode().IsRegular() {
+			continue
+		}
 
 		pluginType := m.detectPluginType(entry.Name())
 		if pluginType == "" {
@@ -303,15 +308,16 @@ func writePluginFileAtomic(pluginDir, name string, data []byte) (string, error) 
 
 // Add 把插件字节写入插件目录并登记到内存索引。
 //
-// name 完全来自不可信输入，因此这里**不依赖调用方校验**，自带三道防线：
+// name 完全来自不可信输入，因此这里**不依赖调用方校验**，自带四道防线：
 //  1. ValidatePluginName：纯 basename + 字符/长度白名单 + 扩展名白名单；
 //  2. filepath.Join + Clean 后做 Rel 前缀断言（必须在 pluginDir 内）；
-//  3. EvalSymlinks(pluginDir) 得到真实根后再断言一次（防 pluginDir 自身是软链）；
+//  3. EvalSymlinks(pluginDir) 得到真实根后再断言一次（防 pluginDir 自身是软链），
+//     并 Lstat 真实目标：同名目标已是符号链接时直接拒绝（fail-closed，不静默替换）；
 //  4. 真正写盘走 writePluginFileAtomic：同目录临时文件 + rename 替换目录项。
 //
-// 第 4 道防线是"硬链接/符号链接"这一面的根因修复：rename 只替换目标目录项，
-// 不跟随任何链接，因此无论 target 事先是普通文件、硬链接还是符号链接，链接
-// 指向的文件都不会被写入（符号链接/硬链接本身被替换掉）。
+// 第 4 道防线是"硬链接"这一面的根因修复：rename 只替换目标目录项，不跟随任何链接，
+// 因此硬链接指向的文件不会被写入（链接本身被替换掉）。软链在第 3 道就被拒了，
+// 属于"有人往插件目录塞链接"这一异常本身就要暴露给操作员的情况。
 func (m *Manager) Add(name string, data []byte, description string) (*Plugin, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -343,6 +349,18 @@ func (m *Manager) Add(name string, data []byte, description string) (*Plugin, er
 	}
 	if err := assertWithinDir(realRoot, filepath.Join(realRoot, name)); err != nil {
 		return nil, err
+	}
+
+	// 防线三.五：目标名已存在时用 Lstat 拒软链（fail-closed）。
+	// rename 本身不跟随链接，写盘是安全的；显式拒绝是为了把「有人往插件目录里塞
+	// 符号链接」这件事暴露给操作员，而不是悄悄把链接替换掉再报成功。
+	realTarget := filepath.Join(realRoot, name)
+	if fi, lerr := os.Lstat(realTarget); lerr == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w：插件目录里已存在同名符号链接 %q，拒绝覆盖（请先删除该链接）", ErrInvalidName, name)
+		}
+	} else if !os.IsNotExist(lerr) {
+		return nil, fmt.Errorf("%w：检查插件目标路径失败: %v", ErrInvalidName, lerr)
 	}
 
 	// 防线四：临时文件 + rename（见 writePluginFileAtomic）。
