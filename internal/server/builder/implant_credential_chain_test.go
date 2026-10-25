@@ -19,7 +19,10 @@ import (
 
 // TestImplantMirrorParity 两份模板镜像逐文件一致，且都是 62 个 .go 文件。
 func TestImplantMirrorParity(t *testing.T) {
-	const wantFiles = 62
+	// 不再写死文件数：每加一个模板文件都要改常量是自找的维护负担，
+	// 真正要守住的是"两边不一致/缺文件"，不是"数量恰好是某个数"。
+	// 这里只留一个下界哨兵，防止有人误删大半个模板目录却"空对空"通过。
+	const minFiles = 40
 	primary := "implant"
 	mirror := filepath.Join("..", "..", "..", "release", "implant")
 
@@ -46,8 +49,9 @@ func TestImplantMirrorParity(t *testing.T) {
 
 	a := sums(primary)
 	b := sums(mirror)
-	if len(a) != wantFiles {
-		t.Fatalf("%s 下 .go 文件数 = %d, want %d", primary, len(a), wantFiles)
+	t.Logf("模板文件数：%s=%d, %s=%d", primary, len(a), mirror, len(b))
+	if len(a) < minFiles {
+		t.Fatalf("%s 下 .go 文件数 = %d，少于哨兵下限 %d（模板目录疑似被误删）", primary, len(a), minFiles)
 	}
 	if len(b) != len(a) {
 		t.Fatalf("%s 下 .go 文件数 = %d, %s = %d（镜像缺文件）", mirror, len(b), primary, len(a))

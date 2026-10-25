@@ -17,6 +17,15 @@
 - **密钥卫生**（L2/L4/L5）：初始口令不进日志（写 0600 文件、**首次登录后自动删除**）；清掉文档/脚本里的开发密钥；设置接口不再回显 webhook secret。
 - **复审计二轮**（N1~N5）：Windows **目录 junction** 绕过改为 fail-closed（`EvalSymlinks` 失败即拒 + 逐段 `Lstat` 拒 `ModeIrregular` + `file:` 强制单段名）；登录超大 body 从 401 改 **413**；插件**硬链接**写穿改 rename；载荷名拒绝 `CON`/尾点。
 
+**同版追加：凭据"看得懂"与 OPSEC（真机反馈第二轮）**
+
+- **浏览器密码全是垃圾**：`parseSQLiteLoginData` 是"扫字节找 `http` → 猜后面两个串当用户名/密码"的启发式，根本没解 SQLite 记录格式，所以 URL 会吞掉下一条记录的字段名、schema 文本被当密码、加密 blob 被当 ASCII。改用 **Windows 自带 `winsqlite3.dll`** 正经查询 `SELECT origin_url, username_value, password_value FROM logins`（多 profile、只读、副本用完即删）；本机实测 **1109 条假数据 → 78 条真数据**、`duration_ms 47→23`、URL/用户名回到正确字段。
+- **密码解密分三路**：`v10/v11` 用**各自浏览器**的 `Local State` key 走 AES-256-GCM（旧实现拿 Chrome 的 key 去解 Edge）；`v20`（Chrome 127+ 应用绑定加密）**明确标"无法解密"并留空**、计入 `undecryptable_v20`，**绝不把密文当密码**；无前缀走老 DPAPI。解出字节必须过 UTF-8/控制字符校验，否则丢弃并计数。
+- **WiFi 弹黑框**：所有 `netsh` 改走 `execHidden`（`HideWindow` + `CREATE_NO_WINDOW`）；并把 `getSysProcAttr()` 统一加上 `CREATE_NO_WINDOW`（只 `HideWindow` 仍会分配控制台，闪一帧黑框且是 EDR 高信号）；顺手修 `netsh` 的 GBK 输出解码与 SSID/密码字段解析。
+- **"RDP 200 过长"是误读**：分段加了 `duration_ms`/`timings` 后实测 `CredEnumerateW` ≈ 0.1ms、RDP 段 1–4ms；真正的 200ms 来自 **WiFi 段**（`netsh` 每次进程启动 100–180ms × 2 次 ≈ 209ms，旧实现 362ms）。前端把「本次取值耗时」与「等待上限 200s（前端轮询上限，非耗时）」拆成两个独立徽标。
+- **凭据面板太小**：改成分段标签（全部/浏览器/WiFi/RDP/LSA/SAM/DPAPI，各自 `count/returned`）+ 内滚动表格（`max-height: min(52vh,520px)`、sticky 表头）+ 密码默认打码/单条显示/复制 + `v20`、`needs_admin`、`truncated` 显式标注 + 统计行。隐藏标签页时**不轮询**，切回**不重复下发**。
+- **标签页内容框变小（回归）**：`v1.4.2` 为"切换不卸载"给每个面板加了一层包装 div，打掉了面板 `height:100%` 的参照 → 各 tab 内容框塌成内容高度。改为包装层透传布局（`display:flex; flex-direction:column; min-height:100%` + 子项 `flex:1 0 auto`），实测面板与子元素均撑满内容区内框（594×686 @1600×900），切走再切回是同一 DOM 节点。
+- 顺带：`persistence_windows.go` 里 14 处裸 `exec.Command`（reg/schtasks/sc/powershell）也改走 `execHidden`——它们同样会在目标机闪黑框；镜像一致性守卫测试改为"不写死文件数 + 下界哨兵"（模板文件从 62 增至 65）。
 **同版追加：凭据链路与标签页体验（现场反馈）**
 
 - **凭据获取：真机一跑就把植入进程打崩**（这是"卡死其他任务"的直接原因）。`dumpRDPCredentials` 把 `CredEnumerateW` 返回的**指针数组槽位地址**当成 `CREDENTIAL_W` 解引用 —— 目标机上一旦有已保存凭据就访问违例，**整进程退出**；服务端只看到 3 个 `credentials` 任务永远停在 `sent` + `forcibly closed`。已改为先取槽位指针再解引用，`ERROR_NOT_FOUND` 视为 0 条。

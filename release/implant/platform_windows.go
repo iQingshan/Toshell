@@ -33,8 +33,18 @@ func getDefaultDir() string {
 	return os.Getenv("USERPROFILE")
 }
 
+// createNoWindowFlag 对应 CREATE_NO_WINDOW（0x08000000）：不为控制台程序分配控制台。
+//
+// 为什么同时要 HideWindow + CREATE_NO_WINDOW：只设 HideWindow 时 Windows 仍会为子进程
+// **分配一个控制台**（只是随后隐藏），在目标机桌面上可能闪一帧黑框，且"GUI 进程创建控制台
+// 子进程"本身就是 EDR/HIDS 的高信号行为。CREATE_NO_WINDOW 才是彻底不建控制台。
+const createNoWindowFlag = 0x08000000
+
 func getSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{HideWindow: true}
+	return &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: createNoWindowFlag,
+	}
 }
 
 // systemRoot 返回 Windows 系统根目录（如 C:\Windows），不依赖 PATH。
