@@ -5,56 +5,37 @@
 
 ## [v1.4.2] - 2026-10-25（安全修复版）
 
-**一句话定位**：按第三方安全审计报告修复 **4 个 High + 9 个 Medium**，全部有回归用例与真机复验；不改协议帧格式、不加新功能，但有 **3 处必要的破坏性变更**（见下）。
+**一句话定位**：按第三方安全审计修复 **4 High + 9 Medium + 3 Low**，随后独立复审计又修 5 项残留；不改协议帧格式、不加新功能，但有 **3 处破坏性变更**。
 
-**结论**：修复后逐条回放审计 PoC，**21 条用例全部被拒（0 通过）**。审计本身也确认"未发现未认证 RCE 或认证绕过" —— 本轮修的是"认证后能读到密钥 / 写到系统目录""未认证能伪造任务结果"这类**边界塌陷**。
+**修了什么**（一行一条；逐条判定见 `docs/SECURITY-FIXES-1.4.2.md`、复审计见 `docs/SECURITY-REAUDIT-1.4.2.md`）
 
-| ID | 原问题 | 修法 | 复验 |
-|---|---|---|---|
-| **H1** | 未认证可伪造/终止任意任务结果（影响 Agent 决策与情报库） | `/api/v1/implant/{register,heartbeat,result}` 挂 `auth.Middleware`；新增 `task.CompleteForSession/FailForSession` 做**归属校验**；请求体 64 KiB 上限 | 未认证 401、跨会话 403 且任务不变、本会话 200 正常 |
-| **H2** | 构建请求 `name` 路径穿越 → 认证后任意文件删 | `safePayloadName`（仅 `[A-Za-z0-9._-]`、`Base(s)==s`）+ 删除前 `resolveInDir` 断言 | `name:"../victim.txt"` → 400，目录外文件**仍在** |
-| **H3** | 载荷下载 `name`/`format` 拼接 → 认证后任意文件读（含 `jwt_key`/`encryption_key`/`/etc/shadow`） | 同上 + `format` 只允许 `exe/dll/bin/txt/raw/so` 白名单 + 每个候选 `resolveInDir` | 4 条穿越 PoC 全部 400，无内容回传 |
-| **H4** | MCP `plugin_upload` 的 `name` 穿越 + 跟随软链 → 认证后任意文件写（root 运行时写 sudoers） | `ValidatePluginName` + `Rel` 前缀断言 + `EvalSymlinks` 真实根 + `Lstat` 拒软链 + `O_NOFOLLOW` 写盘；multipart 上传自行取原始文件名（Go 的 `Part.FileName()` 会先 Base，会丢掉穿越信号） | 穿越名 400 且无文件写出；中文/空格名 200 正常 |
-| **M1** | 未认证伪造会话 + 心跳覆盖**所有**会话、把 dead 会话复活 | 同上认证；心跳必须带 `SessionID` 且只写自己那条；dead/离线会话 409 且零写入（`LastSeen` 是判活唯一依据，刷新它等于复活）；注册通知同 IP 60s 限频 | 未认证 401；错误 SessionID 404 且目标会话指标不变 |
-| **M2** | HTTP 轮询 `/task` 未认证即可抢走任务 | 注册（AEAD 已认证）时下发 32 字节随机 `session_token`，`/task` **先验令牌再 `GetNext`**；令牌随会话清理、重注册即轮换；植入端存内存并随请求带上 | 无 token → 403 且任务仍 `pending`；带 token → 200 正常领取 |
-| **M4** | 请求体无上限（内存 DoS，32 MiB 直接读入） | 全部入口 `http.MaxBytesReader`：兼容端点 64 KiB、轮询小 JSON 64 KiB、结果/文件/隧道 16 MiB；超限 **413** | 32 MiB → 413 + `Connection: close` |
-| **M5** | 内嵌 MQTT broker 匿名可连、绑 `0.0.0.0` | 新增 `mqtt_embedded_bind`（默认 **127.0.0.1**）+ 可选 `mqtt_username/password`；启动打 WARN 标注实际绑定与是否启用认证 | 匿名订阅失败；绑定实测 `127.0.0.1` |
-| **M6** | JWT 可走 `?token=` 查询串（会落进反代日志/浏览器历史） | `tokenQueryAllowed()`：只对 `/api/v1/ws/events` 与 `/api/v1/sessions/{id}/shell` 生效（浏览器 WS API 不能自定义头）；其余路径 401 并给可辨识原因 | `sessions?token=` → 401；Bearer 仍 200 |
-| **M7** | gzip 解压无上限（压缩炸弹） | `io.LimitReader` 32 MiB + 超限哨兵错误；TCP/WS/HTTP 三通道统一按协议错误断开（HTTP 回 413） | 40 MB 膨胀包 → 报错、`health` 仍 200、未 OOM |
-| **M8** | WS `CheckOrigin=true` + shell WS 无读上限 | `originAllowed`：空 Origin / 同 Host / 同 `X-Forwarded-Host`（反代改写 Host 的部署）放行，其余拒绝；shell WS `SetReadLimit(1 MiB)` | 外站 Origin 403 且无 `Sec-WebSocket-Accept`；同源/无 Origin 101 |
-| **M9** | 未认证 `/payload/{id}` 用 DB 里的 `name` 拼候选 → 读任意 `*.txt` | `serveStoredImplant` 五个候选全部 `resolveInDir`，越界跳过；脏 `name` 不再进 `Content-Disposition` | 合成 DB 行 `Name=../secret-outside` → 404，无泄漏 |
-| **L2** | 首次启动把生成的明文管理员口令打进日志 | 改为写 `data/initial-admin-password.txt`（0600），日志只给路径与"登录后请修改并删除" | 启动日志无明文；文件存在 |
-| **L4** | 文档/脚本内置开发用 API Key、测试里疑似真实 JWT key | `smoke.sh` 改环境变量/参数、全部文档示例改 `change-me`、测试 fixture 换假值 | tracked 文件里已无该 key（`git grep` 归零；`configs/server.yaml` 本就 gitignore） |
-| **L5** | 设置接口明文回显 webhook secret | GET 只回 `secret_set`；PUT 仍可写；"发送测试通知"在服务端回退用已存密钥（密钥不回浏览器） | GET 响应无 secret 明文 |
+- **路径穿越**（H2/H3/H4/M9）：载荷名/插件名收敛成"纯文件名 + 后缀白名单 + 目录边界断言"，插件写盘改"临时文件 + rename"。此前**认证后可读任意文件（含 `jwt_key` / 协议密钥）或删/写任意文件**。
+- **未认证伪造**（H1/M1）：`/api/v1/implant/{register,heartbeat,result}` 加认证；任务结果**校验归属**；心跳只写自己那条，dead 会话 409 不复活。
+- **任务被抢**（M2）：HTTP 轮询 `/task` 改成**每次上线一个会话令牌**，先验令牌再取任务。
+- **资源耗尽**（M4/M7）：请求体上限（登录 8 KiB / 小 JSON 64 KiB / 大块 16 MiB）、gzip 解压上限 32 MiB。
+- **面收敛**（M5/M6/M8）：内嵌 MQTT 默认只绑回环、**非回环且无凭据拒绝启动**；`?token=` 仅两条 WS 路径可用；WS 校验 Origin + shell 读上限 1 MiB。
+- **密钥卫生**（L2/L4/L5）：初始口令不进日志（写 0600 文件、**首次登录后自动删除**）；清掉文档/脚本里的开发密钥；设置接口不再回显 webhook secret。
+- **复审计二轮**（N1~N5）：Windows **目录 junction** 绕过改为 fail-closed（`EvalSymlinks` 失败即拒 + 逐段 `Lstat` 拒 `ModeIrregular` + `file:` 强制单段名）；登录超大 body 从 401 改 **413**；插件**硬链接**写穿改 rename；载荷名拒绝 `CON`/尾点。
 
-**同版追加：复审计后的第二轮修复（N1~N5）**
+**关键实测**
 
-第三方独立复审计（结论：**10 条已关闭 / 5 条部分关闭 / 0 条未关闭**，但新挖出 7 项）后，同版本内再修 5 项：
+- 审计 PoC 回放：**21 条用例全部被拒**；复审计判 **10 关闭 / 5 部分关闭 / 0 未关闭**（新增 7 项已修 5 项）。
+- junction：`file:jl\win.ini` → 400、`file:jl/win.ini` → 404，而目录内 `file:ok.txt` → 200（正向未破）。
+- 登录 40 KB 合法 JSON → 413「登录请求体超过 8192 字节上限」；正常登录 200。
+- 门禁：`go test ./...` **25 包全绿**；`e2e_smoke` 19 项 ❌0（真实载荷上线 + whoami）；`mcp_smoke` 18/18；两份植入端镜像 62 文件 SHA-256 一致。
 
-| 编号 | 复审计发现 | 修法 | 复验 |
-|---|---|---|---|
-| **N1** | `resolveInDir` 对 **Windows 目录 junction** 失效（`EvalSymlinks` 报错时回落只做词法断言）→ 未认证可经 `file:` 合成 ID 读到目录外文件、认证可删外部文件 | 改为 **fail-closed**：`EvalSymlinks` 失败即拒；父目录先解析再断言；目标不存在只允许单段名；**逐段 Lstat 拒绝 `ModeIrregular`**（junction 在 Lstat 下不是 symlink） | `file:jl\win.ini` → 400、`file:jl/win.ini` → 404、深层穿越 → 400；目录内 `file:ok.txt` 仍 200 |
-| **N2** | 未认证 `/api/v1/login` 无请求体上限（32 MiB 完整解析，RSS 66→172 MB） | 登录限 **8 KiB**，超限 **413**（原先回 401，会被误读成"口令错"）；其余裸读入口一并收口 | 40 KB 合法 JSON → 413「登录请求体超过 8192 字节上限」；正常登录 200 |
-| **N3** | 插件**硬链接**写穿（`O_NOFOLLOW` 只防软链） | 改 **同目录临时文件 + rename** 替换目录项，与链接类型无关 | 单测覆盖（硬链接用例在 Windows 上建不了时 skip） |
-| **N4** | 初始口令文件登录后不删 | **首次登录成功后删除**，失败只记 warn | 登录后文件消失，错口令不删 |
-| **N5** | 载荷名未拒绝 Windows 设备名与尾点（`CON`/`NUL.raw`/`a.`） | 与插件名规则对齐 | 单测覆盖 |
+**升级必看（破坏性变更）**
 
-> 复审计仍判"部分关闭"的 5 条里，**内置 TLS**、**WS 一次性 ticket**、**MQTT 每会话主题 ACL**、**M3 每植入端密钥** 都属设计/部署层，已列入 v1.5/v1.6（见 ROADMAP）。
-**破坏性变更（升级必看）**
-1. `/api/v1/implant/{register,heartbeat,result}` 现在**必须带凭据**（`X-API-Key`/`Bearer`）并在请求体里显式给 `SessionID`；`result` 的 `SessionID` 必须等于任务归属会话，否则 403。**真实植入端不使用这 3 个端点**（只用 `payload/`、`uac/`），正常上线不受影响；受影响的是自己写脚本打这 3 个端点的同学。
-2. 仍使用 `GET /task?session_id=…` 拉任务的旧/自研客户端会收到 **403**（缺会话令牌）。仓库内的 implant 模板走心跳响应领任务，**不需要**重新下发；自研客户端需按 `session_token` 改造。
-3. 管理 API 不再接受 `?token=<JWT>`（仅 WS 两条路径例外）；脚本请改用 `Authorization: Bearer` 或 `X-API-Key`。
-4. 构建 `name` / 插件名现在拒绝路径分隔符、`..`、点开头与 Windows 保留设备名。
+1. 那 3 个兼容端点需凭据 + `SessionID`（真实植入端不使用它们，正常上线不受影响）。
+2. 仍走 `GET /task` 的自研客户端会 403（需带注册响应里的 `session_token`；**仓库内模板不受影响，不用重新下发**）。
+3. 管理 API 不再接受 `?token=`（仅 WS 两条路径例外）；构建 `name` / 插件名收严。
 
-**新增回归测试**：`safe_path_test.go`、`handlers_builders_path_test.go`、`handlers_implant_test.go`、`for_session_test.go`、`plugin_test.go`、`handlers_mcp_plugin_upload_test.go`、`decompress_test.go`、`http_polling_test.go`、`mqtt_embedded_test.go`、`ws_origin_test.go`、`auth_test.go`、`main_test.go`、`handlers_settings_secret_test.go` —— `go test ./...` **25 个包全绿**；`e2e_smoke` 19 项 0 失败、`mcp_smoke` 18/18（证明没把正常链路堵死）。
+**如实边界**
 
-**如实边界（本版没做的）**
-- **M3（全局静态协议密钥可从任一载荷提取、无每植入端身份/结果 nonce）是设计层问题，本版未改**。现实含义：**拿到任一样本 ≈ 拿到协议层身份** —— 能解密抓到的帧、冒充服务端向植入端下发任务。已写入 `docs/SECURITY-FIXES-1.4.2.md` 与 README 的边界段：**不要把载荷样本外传**；免认证载荷下载仍是产品有意设计（一条命令上线），但其 URL 应视为敏感信息。
-- **L1（植入端 TLS `InsecureSkipVerify`）** 未改：靠应用层 AEAD 兜底，改成严格校验会让自签证书部署直接不可用。
-- **L6（`mingw_gcc_path`/`sign_signtool_path` 会被当子进程执行）** 属管理员信任边界，未改代码，已在 `docs/skills/toshell-api/SKILL.md` 写明"API Key/JWT 等同 root 凭据"。
-- 软链逃逸类用例在 Windows 上因无 `SeCreateSymbolicLinkPrivilege` **被 skip**（Linux CI 会真跑）；`O_NOFOLLOW` 在 Windows 取 0，仅由 `Lstat` 预检兜底。
-- 内嵌 MQTT 认证后是"单账号全主题放行"，**未做每会话主题 ACL**。
-- 发现但**未修**的既有问题：`mqtt_listener.go` 的 `decodePacket` 注释称会解压、实际不会，MQTT 通道上 >1 KiB 的压缩帧大概率解析异常（与本轮安全项无关，已列入 ROADMAP）。
+- **M3（协议密钥全局同一把且可逆）未修**：**拿到一个样本 ≈ 拿到协议层身份**。已写进 `docs/SECURITY-FIXES-1.4.2.md` §4.1，修复排 v1.5 第一位。
+- 内置 TLS、WS 一次性 ticket、MQTT 每会话主题 ACL、AV-Ops L2+ 真机 —— 均未做，已列 ROADMAP。
+- L1（植入端 TLS `InsecureSkipVerify`）保留：靠应用层 AEAD 兜底，严格校验会让自签证书部署不可用。
+- 软链/硬链接安全用例在 Windows 上无权限时 `t.Skip`（Linux CI 会真跑）。
 
 ## [v1.4.1] - 2026-10-24（补丁版）
 

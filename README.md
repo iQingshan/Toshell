@@ -448,7 +448,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/e2e_smoke.ps1
 ## 开源与授权
 
 - 使用说明：[USAGE.md](USAGE.md)
-- 后续优化路线：[ROADMAP.md](ROADMAP.md)（驱动能力分档与加载前自检、内存执行加固、屏幕流跨平台、动态查杀收敛、平台工具库与远程加载）—— 其中**内存执行加固的 IAT 部分已在 v1.4.0 落地**，原计划的 inline hook 仍未做（风险大于收益，见 CHANGELOG 说明）。
+- 后续优化路线：[ROADMAP.md](ROADMAP.md) —— 按**实战痛点**组织（上线就死 / 掉线 / 批量低效 / 证据导出 / 协作误操作 / 样本=身份），不写空话—— 其中**内存执行加固的 IAT 部分已在 v1.4.0 落地**，原计划的 inline hook 仍未做（风险大于收益，见 CHANGELOG 说明）。
 - 安全披露：[SECURITY.md](SECURITY.md)
 - 一键部署：[release/install.ps1](release/install.ps1) / [release/install.sh](release/install.sh)（发布包内自带，环境检测 + 按需在线安装 + 直接启动）
 - License：**[MIT](LICENSE)**（Copyright © 2026 iQingshan 与 ToShell 贡献者）
