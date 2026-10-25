@@ -1905,6 +1905,131 @@ code, pre {
   animation: spin 1s linear infinite;
 }
 
+/* ─── 凭据面板：阶段 / 进度 / 分段标注（v1.4.2 凭据链路修复） ─── */
+.cred-stage-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cred-stages {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.cred-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+}
+
+.cred-stage-on {
+  color: var(--color-primary);
+  border-color: color-mix(in srgb, var(--color-primary) 40%, var(--color-border));
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+}
+
+.cred-stage-warn {
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 40%, var(--color-border));
+}
+
+.cred-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-bg-tertiary);
+  overflow: hidden;
+}
+
+.cred-progress-bar {
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 0.3s linear;
+}
+
+.cred-status-warn {
+  background: color-mix(in srgb, var(--color-warning) 10%, var(--color-bg-secondary));
+  border-color: color-mix(in srgb, var(--color-warning) 25%, var(--color-border));
+  color: var(--color-warning);
+}
+
+.cred-task-id {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.cred-error-block {
+  align-items: flex-start;
+}
+
+.cred-error-label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-bottom: 2px;
+}
+
+.cred-error-text {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-danger);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.cred-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--color-border);
+  background: var(--color-bg-secondary);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.cred-note svg {
+  color: var(--color-warning);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.cred-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: var(--color-primary-hover);
+}
+
+.cred-badge-muted {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-muted);
+}
+
+.cred-badge-warn {
+  background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+  color: var(--color-warning);
+}
+
+.cred-seg-note {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
 /* ─── Template Add Button ─── */
 .template-add-section {
   display: flex;

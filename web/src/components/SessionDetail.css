@@ -166,6 +166,10 @@
 }
 .session-detail-panel .detail-content > * { min-width: 0; }
 
+/* 访问过但非活动的面板：display:none 隐藏（节点保留在 DOM 里 → 内部 state 不丢）。
+   显式写一条，避免以后给 .detail-tabpanel 加 display 时把隐藏规则顶掉。 */
+.session-detail-panel .detail-tabpanel[hidden] { display: none !important; }
+
 /* 关闭按钮：hover 才显红，避免误点 */
 .session-detail-panel .close-btn {
   display: inline-flex;

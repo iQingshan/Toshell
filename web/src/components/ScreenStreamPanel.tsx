@@ -5,6 +5,13 @@ import { sessionApi } from '../api'
 
 interface ScreenStreamPanelProps {
   session: Session
+  /**
+   * 面板是否可见。详情面板切走后本组件**不会被卸载**（只 display:none），
+   * 所以由这里主动停流：隐藏时停止服务端拉流（省带宽/编码），
+   * 但 frame/zoom/params 都还在，切回来立刻还能看到最近一帧。
+   * 缺省 true（其他调用方不传时行为不变）。
+   */
+  visible?: boolean
 }
 
 interface StreamFrame {
@@ -36,7 +43,7 @@ const paramKeyStyle: CSSProperties = {
   color: 'var(--text-dim, #9a9aab)',
 }
 
-export function ScreenStreamPanel({ session }: ScreenStreamPanelProps) {
+export function ScreenStreamPanel({ session, visible = true }: ScreenStreamPanelProps) {
   const [streaming, setStreaming] = useState(false)
   const [frame, setFrame] = useState<StreamFrame | null>(null)
   const [error, setError] = useState('')
@@ -102,6 +109,14 @@ export function ScreenStreamPanel({ session }: ScreenStreamPanelProps) {
       setStreaming(false)
     }
   }
+
+  // 切到别的 tab（visible=false）就主动停流：服务端不再编码/推帧。
+  // 组件没有卸载，最近一帧（frame）仍在，切回来立刻可见；要恢复实时看画面
+  // 重新点"开始推流"即可（与旧行为一致——旧版切走会整个卸载）。
+  useEffect(() => {
+    if (!visible && streaming) void stop()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, streaming])
 
   const zoomIn = () => setZoom((z) => Math.min(z + 0.25, 4))
   const zoomOut = () => setZoom((z) => Math.max(z - 0.25, 0.5))

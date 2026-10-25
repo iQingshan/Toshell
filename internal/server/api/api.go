@@ -271,6 +271,10 @@ func New(cfg *config.Config, sessMgr *session.Manager, taskMgr *task.Manager) *S
 		socks5Servers: make(map[string]*tunnel.SOCKS5Server),
 		wsHub:         NewWSHub(),
 	}
+	// 任务结果入库上限（task.output_max_bytes）：旧实现把阈值写死成 500 字节，
+	// 凭据等结构化结果入库后几乎不可读。这里在构造期把配置应用到 database 层
+	// （database 不能 import config，接线只能放在同时拿到 cfg 的构造点）。
+	applyTaskOutputLimit(cfg)
 	// AI 副驾驶：executor 为 Server 自身（复用 MCP 工具实现）
 	server.copilot = ai.New(cfg.AI, server)
 	// 工具结果外置（v1.4.0 S2）：超长结果落盘为句柄 + 显式截断说明，配合 result_read 回读。

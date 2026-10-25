@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"toshell/internal/common/types"
 	"toshell/internal/server/agentstore"
 	"toshell/internal/server/ai"
+	"toshell/internal/server/config"
+	"toshell/internal/server/database"
 	"toshell/internal/server/logging"
 )
 
@@ -170,7 +174,8 @@ func (s *Server) resumeEntry(e *taskWaitEntry, timedOut bool) {
 	}
 	if e.recovered {
 		rctx.Note = "服务端在本次工具调用执行期间重启：内存中的对话历史已丢失，" +
-			"工具结果取自数据库副本（超长输出可能已被截断到 500 字节）。"
+			"工具结果取自数据库副本（受 task.output_max_bytes 限制；超限部分会显式标注 " +
+			"truncated=true 与原始字节数，完整内容需按外置句柄用 result_read 回读）。"
 	}
 	if s.copilot != nil {
 		s.copilot.CompleteTaskResume(run, rctx, result, resultErr)
@@ -271,6 +276,7 @@ func (s *Server) snapshotTimeoutResult(taskID uint64, timeoutSec int) map[string
 	}
 	env := taskTimeoutResult(t.SessionID, t)
 	env["timeout_sec"] = timeoutSec
+	s.annotateTaskOutput(env, t)
 	return env
 }
 
@@ -444,6 +450,113 @@ func (s *Server) persistSubmit(req ai.LongTaskRequest, plan toolTaskPlan, correl
 	}
 }
 
+// ─── 任务结果上限：入库阈值可配 + 超限外置（task.output_max_bytes）───────
+//
+// 修的是用户反馈的"凭据获取没有完善"：旧实现把落库/回读的阈值写死成 500 字节
+// （database.truncateTaskContent），凭据分段 JSON 正常几十 KB，入库后只剩开头
+// 几百字节 —— 重启恢复/回读时看起来"几乎没拿到东西"。
+//
+// 现在的策略（分两层，互不冲突）：
+//  1. 落库层（database）：上限由 task.output_max_bytes 决定（默认 256 KiB），
+//     超出时写一条**可解析**的截断标注（原始字节数 + 入库上限），不撑爆数据库；
+//  2. 回读层（本文件）：Agent 长任务拿到的结果信封如果超过同一阈值，**外置**成
+//     句柄（复用 v1.4.0 S2 的 mcp.ResultStore + result_read），信封里显式
+//     truncated=true + output_bytes_original + handle，绝不静默截断。
+
+// defaultTaskOutputMaxBytes 兜底上限（与 config.DefaultTaskOutputMaxBytes /
+// database.DefaultTaskContentMaxBytes 同值：三个包互相不可 import，只能各写一份）。
+const defaultTaskOutputMaxBytes = 256 << 10
+
+// applyTaskOutputLimit 把配置里的任务结果入库上限应用到存储层（进程启动时调用一次）。
+//
+// 放在 api 层做这层接线：database 不能 import config（config → logging → database
+// 是既有方向），而 api.New 是唯一同时拿到 cfg 与 database 的构造点。
+func applyTaskOutputLimit(cfg *config.Config) {
+	limit := 0
+	if cfg != nil {
+		limit = cfg.Task.OutputMaxBytes
+	}
+	database.SetTaskContentMaxBytes(limit)
+	logging.Info("api", "任务结果入库上限生效：task.output_max_bytes=%d 字节（旧实现写死 500 字节）",
+		database.TaskContentMaxBytes())
+}
+
+// taskOutputMaxBytes 当前生效的任务结果上限（字节）。
+func (s *Server) taskOutputMaxBytes() int {
+	if s != nil && s.cfg != nil && s.cfg.Task.OutputMaxBytes > 0 {
+		return s.cfg.Task.OutputMaxBytes
+	}
+	if n := database.TaskContentMaxBytes(); n > 0 {
+		return n
+	}
+	return defaultTaskOutputMaxBytes
+}
+
+// annotateTaskOutput 给结果信封补上"超限"语义：truncated / output_bytes_original /
+// 外置句柄 / 截断说明。未超限时只补齐 output_bytes，不做任何改写。
+//
+// 注意：日志里**只打字节数与句柄**，绝不打结果正文（凭据内容不进日志）。
+func (s *Server) annotateTaskOutput(env map[string]interface{}, t *types.TaskInfo) {
+	if env == nil || t == nil {
+		return
+	}
+	original := len(t.Output)
+	limit := s.taskOutputMaxBytes()
+	env["output_bytes"] = original
+	env["output_max_bytes"] = limit
+	if original <= limit {
+		return
+	}
+
+	env["truncated"] = true
+	env["output_bytes_original"] = original
+
+	// ① 外置优先：完整结果落盘成句柄，模型/界面按 offset/limit 分页回读。
+	if s != nil && s.agentResults != nil {
+		handle, n, putErr := s.agentResults.Put(fmt.Sprintf("task-%d", t.ID), []byte(t.Output))
+		if putErr == nil {
+			env["handle"] = handle
+			env["truncation_note"] = fmt.Sprintf(
+				"结果共 %d 字节，超过内联上限 %d 字节：完整内容已外置为句柄 %s；"+
+					"需要细节请调用 result_read(handle=%q, offset=...)，本信封只保留前 %d 字节。",
+				n, limit, handle, handle, s.inlineHeadBytes(limit))
+			env["output"] = headBytes(t.Output, s.inlineHeadBytes(limit)) +
+				"\n...[已截断 truncated=true：完整结果见外置句柄 result_read]"
+			logging.Info("api", "任务结果超限已外置：task=%d bytes=%d handle=%s（不打印内容）", t.ID, n, handle)
+			return
+		}
+		logging.Warn("api", "任务结果超限但外置失败（退化为显式截断）：task=%d bytes=%d err=%v", t.ID, original, putErr)
+	}
+
+	// ② 外置不可用：显式截断（绝不静默）——说清原始字节数与缺少回读手段。
+	env["truncation_note"] = fmt.Sprintf(
+		"结果共 %d 字节，超过上限 %d 字节；结果外置存储不可用，这里只给出前 %d 字节。",
+		original, limit, s.inlineHeadBytes(limit))
+	env["output"] = headBytes(t.Output, s.inlineHeadBytes(limit)) +
+		"\n...[已截断 truncated=true：外置存储不可用，无法回读剩余内容]"
+}
+
+// inlineHeadBytes 信封里保留多少字节正文（内联上限，与 result_read 页大小同一把尺子）。
+func (s *Server) inlineHeadBytes(limit int) int {
+	head := resultInlineLimit(s.cfg)
+	if head <= 0 || head > limit {
+		head = limit
+	}
+	return head
+}
+
+// headBytes 按字节上限取前缀，并保证切点落在 UTF-8 字符边界上。
+func headBytes(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // LongTaskResult 实现 ai.LongTaskExecutor：读取任务最终结果信封。
 //
 // done=false 表示任务仍在跑（不是错误）；err!=nil 表示任务已丢失（库与内存都没有）。
@@ -457,7 +570,11 @@ func (s *Server) LongTaskResult(taskID uint64) (map[string]interface{}, bool, er
 	if !isTerminalTaskStatus(t.Status) {
 		return nil, false, nil
 	}
-	return taskEnvelopeByStatus(t.SessionID, t), true, nil
+	env := taskEnvelopeByStatus(t.SessionID, t)
+	// 超限结果在**回读层**再收口一次：超过 task.output_max_bytes 时外置成句柄并显式
+	// 标注 truncated，模型看到的是"摘要 + 句柄 + 原文首段"，而不是一段被静默切掉的结果。
+	s.annotateTaskOutput(env, t)
+	return env, true, nil
 }
 
 // isTerminalTaskStatus 任务终态判定（与 task.IsTerminalStatus 同义，这里避免多引一层）。

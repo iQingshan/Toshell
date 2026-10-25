@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -323,9 +326,48 @@ func (d *Database) UpdateSessionComment(id, comment string) error {
 	return err
 }
 
-// truncateTaskContent 将任务输出/错误截断到最大长度，避免大文本撑爆数据库。
+// ─── 任务输出落库上限（task.output_max_bytes）────────────────────────────
+//
+// 历史缺陷：这里曾把任务输出/错误**写死**截断到 500 字节。凭据分段结果
+// （browser/wifi/rdp/lsa 的 JSON，正常几十 KB）入库后只剩开头几百字节，
+// 重启/回读时界面看着"凭据根本没拿到"。现在上限由配置 task.output_max_bytes
+// 决定（默认 256 KiB），并且截断点写一条**可解析**的显式标注（含原始字节数），
+// 不再静默丢内容。
+
+// DefaultTaskContentMaxBytes 任务输出/错误入库的默认上限（256 KiB）。
+//
+// 与 config.DefaultTaskOutputMaxBytes 同值：database 不能 import config
+// （依赖方向是 config → logging → database），因此只能各写一份常量；
+// 两边的注释互相指向，修改时请成对修改。
+const DefaultTaskContentMaxBytes = 256 << 10
+
+var (
+	// taskContentMaxBytes 当前生效的入库上限（字节）。进程启动时由 api 层按
+	// config.task.output_max_bytes 写入（见 api.applyTaskOutputLimit）。
+	taskContentMaxBytes atomic.Int64
+	// taskTruncatedRe 匹配本文件写入的截断标注，供 api/前端判定 truncated 与原始字节数。
+	taskTruncatedRe = regexp.MustCompile(`\[输出已截断 truncated=true：原始 (\d+) 字节`)
+)
+
+func init() { taskContentMaxBytes.Store(DefaultTaskContentMaxBytes) }
+
+// SetTaskContentMaxBytes 设置任务输出/错误入库上限（<=0 回落默认值，而不是"不限制"）。
+func SetTaskContentMaxBytes(n int) {
+	if n <= 0 {
+		n = DefaultTaskContentMaxBytes
+	}
+	taskContentMaxBytes.Store(int64(n))
+}
+
+// TaskContentMaxBytes 返回当前生效的入库上限（字节）。
+func TaskContentMaxBytes() int { return int(taskContentMaxBytes.Load()) }
+
+// truncateTaskContent 将任务输出/错误截断到当前入库上限，避免大文本撑爆数据库。
+//
+// 截断必须**显式**：返回文本末尾带"原始 N 字节 / 入库上限 M 字节"的标注
+// （TaskContentTruncated 可反解），绝不让调用方以为这就是完整结果。
 func truncateTaskContent(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	if maxLen <= 0 || len(s) <= maxLen {
 		return s
 	}
 	// 从末尾逐字节回退，避免截断点落在多字节 UTF-8 字符中间产生乱码
@@ -333,7 +375,22 @@ func truncateTaskContent(s string, maxLen int) string {
 	for len(cut) > 0 && !utf8.ValidString(cut) {
 		cut = cut[:len(cut)-1]
 	}
-	return cut + "\n...[输出已截断]"
+	return cut + fmt.Sprintf("\n...[输出已截断 truncated=true：原始 %d 字节，入库上限 %d 字节（task.output_max_bytes）；"+
+		"完整结果请按结果外置句柄用 result_read 回读]", len(s), maxLen)
+}
+
+// TaskContentTruncated 判断一段入库文本是否被本包截断过，并返回原始字节数。
+// 未被截断返回 (false, 0)；被截断但原始长度解析失败返回 (true, 0)。
+func TaskContentTruncated(s string) (bool, int) {
+	m := taskTruncatedRe.FindStringSubmatch(s)
+	if m == nil {
+		return false, 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n < 0 {
+		return true, 0
+	}
+	return true, n
 }
 
 func (d *Database) CreateTask(task *types.TaskInfo) error {
@@ -345,9 +402,59 @@ func (d *Database) CreateTask(task *types.TaskInfo) error {
 	_, err := d.db.Exec(`
 		INSERT INTO tasks (session_id, command, args, execute_type, status, created_at, sent_at, completed_at, output, error, exit_code, timeout)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, task.SessionID, task.Command, string(argsJSON), task.ExecuteType, task.Status, task.CreatedAt.Unix(), task.SentAt, task.CompletedAt, truncateTaskContent(task.Output, 500), truncateTaskContent(task.Error, 500), task.ExitCode, task.Timeout)
+	`, task.SessionID, task.Command, string(argsJSON), task.ExecuteType, task.Status, task.CreatedAt.Unix(), taskTimeUnix(task.SentAt), taskTimeUnix(task.CompletedAt), truncateTaskContent(task.Output, TaskContentMaxBytes()), truncateTaskContent(task.Error, TaskContentMaxBytes()), task.ExitCode, task.Timeout)
 
 	return err
+}
+
+// taskTimeUnix 把可空时间写成 sqlite INTEGER（Unix 秒），nil 写 NULL。
+//
+// 为什么不能直接把 *time.Time 交给驱动（既有缺陷）：modernc 驱动会把 time.Time
+// 编码成 TEXT，而读取侧一直按 int64 扫描 sent_at/completed_at —— 只要任务被
+// UpdateTask 写过（sent/completed），重启后按 id 回读就会 "converting string to
+// int64" 失败，任务被判成 not found，看着像"结果丢了"。
+func taskTimeUnix(t *time.Time) interface{} {
+	if t == nil {
+		return nil
+	}
+	return t.Unix()
+}
+
+// taskTimeUnixOf 把库里读到的 sent_at/completed_at 归一成 Unix 秒。
+// 同时兼容历史上被写成 TEXT/RFC3339 的老行（不修老库，但也不让它读不出来）。
+func taskTimeUnixOf(v interface{}) int64 {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case int64:
+		return x
+	case float64:
+		return int64(x)
+	case []byte:
+		return taskTimeUnixOf(string(x))
+	case string:
+		s := strings.TrimSpace(x)
+		if s == "" {
+			return 0
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n
+		}
+		for _, layout := range []string{
+			time.RFC3339Nano, time.RFC3339,
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05",
+		} {
+			if t, err := time.Parse(layout, s); err == nil {
+				return t.Unix()
+			}
+		}
+		return 0
+	case time.Time:
+		return x.Unix()
+	}
+	return 0
 }
 
 func (d *Database) GetTask(id uint64) (*types.TaskInfo, error) {
@@ -356,16 +463,20 @@ func (d *Database) GetTask(id uint64) (*types.TaskInfo, error) {
 
 	var task types.TaskInfo
 	var argsJSON string
-	var createdAt, sentAt, completedAt int64
+	var createdAt int64
+	var sentAtRaw, completedAtRaw interface{}
 
 	err := d.db.QueryRow(`
 		SELECT id, session_id, command, args, execute_type, status, created_at, sent_at, completed_at, output, error, exit_code, timeout
 		FROM tasks WHERE id = ?
-	`, id).Scan(&task.ID, &task.SessionID, &task.Command, &argsJSON, &task.ExecuteType, &task.Status, &createdAt, &sentAt, &completedAt, &task.Output, &task.Error, &task.ExitCode, &task.Timeout)
+	`, id).Scan(&task.ID, &task.SessionID, &task.Command, &argsJSON, &task.ExecuteType, &task.Status, &createdAt, &sentAtRaw, &completedAtRaw, &task.Output, &task.Error, &task.ExitCode, &task.Timeout)
 
 	if err != nil {
 		return nil, err
 	}
+
+	sentAt := taskTimeUnixOf(sentAtRaw)
+	completedAt := taskTimeUnixOf(completedAtRaw)
 
 	json.Unmarshal([]byte(argsJSON), &task.Args)
 	task.CreatedAt = time.Unix(createdAt, 0)
@@ -388,7 +499,7 @@ func (d *Database) UpdateTask(task *types.TaskInfo) error {
 	_, err := d.db.Exec(`
 		UPDATE tasks SET status=?, sent_at=?, completed_at=?, output=?, error=?, exit_code=?
 		WHERE id=?
-	`, task.Status, task.SentAt, task.CompletedAt, truncateTaskContent(task.Output, 500), truncateTaskContent(task.Error, 500), task.ExitCode, task.ID)
+	`, task.Status, taskTimeUnix(task.SentAt), taskTimeUnix(task.CompletedAt), truncateTaskContent(task.Output, TaskContentMaxBytes()), truncateTaskContent(task.Error, TaskContentMaxBytes()), task.ExitCode, task.ID)
 
 	return err
 }

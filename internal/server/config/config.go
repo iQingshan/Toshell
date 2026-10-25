@@ -29,8 +29,28 @@ type Config struct {
 	AI       AIConfig       `mapstructure:"ai" json:"ai"`
 	Web      WebConfig      `mapstructure:"web" json:"web"`
 	MCP      MCPConfig      `mapstructure:"mcp" json:"mcp"`
+	// Task 任务结果存储相关配置（task.output_max_bytes）。
+	Task TaskConfig `mapstructure:"task" json:"task"`
 	// AVOps 杀软对抗能力分级（v1.4.0 S6）：控制聚合入口 /api/v1/av-ops 允许做到哪一级。
 	AVOps AVOpsConfig `mapstructure:"avops" json:"avops"`
+}
+
+// DefaultTaskOutputMaxBytes 任务输出/错误**入库**的默认字节上限（256 KiB）。
+//
+// 背景：旧实现把上限写死成 500 字节（database.truncateTaskContent），一次
+// credentials dump（browser+wifi+rdp+lsa 的分段 JSON）动辄几十 KB，入库后只剩
+// 前 500 字节 —— 重启/回读时界面看上去"几乎没拿到凭据"。
+//
+// 256 KiB 的选择：远大于正常命令输出与凭据分段结果（植入端单段上限 64 KiB，
+// 全部六段加元数据通常 < 200 KiB），又不会把 sqlite 撑大；真正超过它的结果由
+// 服务端外置成句柄（mcp.result_dir）并用 result_read 回读，不落进 tasks 表。
+const DefaultTaskOutputMaxBytes = 256 << 10
+
+// TaskConfig 任务结果存储配置。
+type TaskConfig struct {
+	// OutputMaxBytes 任务输出/错误入库的字节上限（默认 256 KiB）。
+	// <=0 时回落 DefaultTaskOutputMaxBytes（不是"不限制"：不允许把任意大结果写进库）。
+	OutputMaxBytes int `mapstructure:"output_max_bytes" json:"output_max_bytes"`
 }
 
 // AVOpsConfig 杀软对抗能力分级（AV-Ops）配置。
@@ -908,6 +928,12 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("mcp.result_ttl", "24h")
 	viper.SetDefault("mcp.audit_path", "./logs/mcp-audit.jsonl")
 	viper.SetDefault("mcp.fail_closed", true)
+
+	// ── 任务结果存储 ───────────────────────────────────────────────────────
+	// 任务输出/错误入库上限（字节）。旧实现写死 500 字节，凭据等结构化结果会被
+	// 截成几乎不可读；默认放到 256 KiB，超限部分仍显式标注 truncated/原始字节数，
+	// 真正的大结果走外置句柄（result_read）而不是往库里塞。
+	viper.SetDefault("task.output_max_bytes", DefaultTaskOutputMaxBytes)
 
 	// ── 杀软对抗能力分级（v1.4.0 S6）────────────────────────────────────────
 	// **默认让 L2+ 全部不可用**（fail-closed）：这是"装上就自带杀软对抗能力"与

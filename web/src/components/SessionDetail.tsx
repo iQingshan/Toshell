@@ -20,13 +20,21 @@ import './SessionDetail.css'
 
 export type DetailTab = 'info' | 'files' | 'process' | 'injection' | 'shell' | 'bof' | 'persistence' | 'screenshot' | 'credentials' | 'av' | 'avops' | 'fileless' | 'screenstream' | 'relay'
 
+/**
+ * 渲染上下文：面板已挂载但可能被隐藏（切到别的 tab 时节点保留、只 display:none）。
+ * 需要"隐藏即断开"的面板（屏幕流）读 `visible` 自己停掉拉流。
+ */
+export interface TabRenderContext {
+  visible: boolean
+}
+
 /** 面板声明：key 只是**数据键**（服务端 tabs 里的键、state/URL 里用的键）。 */
 export interface TabSpec {
   key: DetailTab
   label: string
   icon: React.ReactNode
   /** 面板内容组件：也放进声明表，省掉 JSX 里再写一遍 `effectiveTab === 'xxx' && <X/>` 链 */
-  render: (session: Session) => React.ReactNode
+  render: (session: Session, ctx: TabRenderContext) => React.ReactNode
   /**
    * 可用性来源。**缺省 = 与服务端同名**：`GET /api/v1/sessions/{id}/capabilities` 的
    * `tabs[key] === true` 才渲染（服务端 internal/common/features 的 tabFeatures 白名单
@@ -80,7 +88,9 @@ const TAB_SPECS: TabSpec[] = [
     capability: { key: 'av', local: true, why: 'AV-Ops 是「杀软」面板的分级扩展，服务端 tabs 白名单里没有 avops 键，可用性跟随 av 能力' },
   },
   { key: 'fileless', label: '内存', icon: <Zap size={14} />, render: (s) => <FilelessExecPanel session={s} /> },
-  { key: 'screenstream', label: '屏幕流', icon: <MonitorPlay size={14} />, render: (s) => <ScreenStreamPanel session={s} /> },
+  // 屏幕流是唯一"隐藏就该主动停"的面板：切走后停流省带宽/服务端编码，
+  // 但节点保留 → 最近一帧与缩放/参数都还在，切回来立刻能看到画面。
+  { key: 'screenstream', label: '屏幕流', icon: <MonitorPlay size={14} />, render: (s, ctx) => <ScreenStreamPanel session={s} visible={ctx.visible} /> },
   { key: 'relay', label: '中继', icon: <Share2 size={14} />, render: (s) => <RelayPanel session={s} /> },
 ]
 
@@ -111,8 +121,34 @@ interface SessionDetailProps {
   onClose: () => void
 }
 
+/**
+ * "每个会话上次看的面板"存 sessionStorage（key 带 session.id，互不串）：
+ * 刷新页面后点回同一台机器，直接回到当时的 tab。只是便利，读写失败（隐私模式、
+ * 配额）一律静默忽略，不影响功能。
+ */
+const TAB_STORAGE_PREFIX = 'toshell-detail-tab:'
+
+function readStoredTab(sessionId: string): DetailTab | null {
+  try {
+    const raw = sessionStorage.getItem(TAB_STORAGE_PREFIX + sessionId)
+    // 只认声明表里的键：老版本存下的已删除面板 / 手工改过的值都不能进 state
+    return raw && TAB_SPECS.some((spec) => spec.key === raw) ? (raw as DetailTab) : null
+  } catch {
+    return null
+  }
+}
+
+function writeStoredTab(sessionId: string, tab: DetailTab) {
+  try {
+    sessionStorage.setItem(TAB_STORAGE_PREFIX + sessionId, tab)
+  } catch {
+    /* ignore */
+  }
+}
+
 export function SessionDetail({ session, onClose }: SessionDetailProps) {
-  const [activeTab, setActiveTab] = useState<DetailTab>('info')
+  // 首屏：优先恢复该会话上次看的面板（能力过滤在 effectiveTab 里兜底，见下）
+  const [activeTab, setActiveTab] = useState<DetailTab>(() => readStoredTab(session.id) ?? 'info')
   // 服务端能力清单（capabilities.tabs）：可用面板集合的**唯一来源**
   const [capStatus, setCapStatus] = useState<CapStatus>('loading')
   const [capTabs, setCapTabs] = useState<Record<string, boolean>>({})
@@ -162,7 +198,30 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
   const effectiveTab: DetailTab = availableTabs.some((t) => t.key === activeTab)
     ? activeTab
     : availableTabs[0]?.key ?? 'info'
-  const activeSpec = availableTabs.find((t) => t.key === effectiveTab) ?? null
+
+  /**
+   * 已挂载过的面板 = "挂载即保留，切换只隐藏"。
+   *
+   * 只记**访问过**的 tab，不一次性挂全 14 个：每个面板挂载都可能发请求（能力、
+   * 目录、进程、插件列表…），首屏全挂等于一次打 14 个请求。这里首屏只挂当前 tab，
+   * 之后每切到一个新 tab 才把它加进来，然后一直留在 DOM 里（只是 display:none），
+   * 内部 state（目录/展开节点/搜索词/表单）就不会随切 tab 丢失。
+   *
+   * 同时记 sessionId：会话切换时必须整组丢弃，否则 A 机器的文件目录/展开节点会
+   * 被 B 机器复用（渲染期用 sessionId 比对，effect 负责把状态写回）。
+   */
+  const [visited, setVisited] = useState<{ sessionId: string; tabs: DetailTab[] }>(() => ({
+    sessionId: session.id,
+    tabs: [],
+  }))
+  const visitedTabs = visited.sessionId === session.id ? visited.tabs : []
+  // 当前生效的面板本次渲染就必须挂上（首次进入 / 能力变化导致回退时 visited 里可能
+  // 还没有它）：在渲染期补齐，而不是等 effect 的下一帧，避免闪一下空白。
+  const mountedKeys = visitedTabs.includes(effectiveTab)
+    ? visitedTabs
+    : [...visitedTabs, effectiveTab]
+  // 按 tab 条顺序渲染；能力过滤后已不可见的旧面板不渲染（不留 aria-labelledby 悬空引用）
+  const mountedTabs = availableTabs.filter((spec) => mountedKeys.includes(spec.key))
 
   /** 切换面板；focus=true 时把焦点移到对应 tab（键盘导航用） */
   const selectTab = useCallback((key: DetailTab, focus = false) => {
@@ -172,6 +231,31 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
       requestAnimationFrame(() => tabRefs.current[key]?.focus())
     }
   }, [])
+
+  // 把当前生效的面板记进 visited（第一次显示它时才真正挂载，之后一直保留）。
+  // sessionId 不同 → 整组重置：新会话的 visited 从空集合开始，只挂它自己的当前面板。
+  useEffect(() => {
+    setVisited((prev) => {
+      if (prev.sessionId !== session.id) {
+        return { sessionId: session.id, tabs: [effectiveTab] }
+      }
+      return prev.tabs.includes(effectiveTab)
+        ? prev
+        : { sessionId: session.id, tabs: [...prev.tabs, effectiveTab] }
+    })
+  }, [session.id, effectiveTab])
+
+  // 记住该会话当前看的面板（刷新后回来同一个 tab；key 带 session.id 不串会话）
+  useEffect(() => {
+    writeStoredTab(session.id, effectiveTab)
+  }, [session.id, effectiveTab])
+
+  // 面板从 display:none 恢复显示时浏览器不会发 resize：补一次，让依赖容器尺寸的
+  // 面板自己重算（xterm 的 fit、tab 条横向渐隐都挂在这个事件上）。
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
+    return () => cancelAnimationFrame(raf)
+  }, [effectiveTab])
 
   /** 左右方向键在 tab 间移动（WAI-ARIA tablist 惯例），Home/End 跳首尾 */
   const onTabKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
@@ -295,6 +379,9 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
       >
         {availableTabs.map((spec, idx) => {
           const selected = effectiveTab === spec.key
+          // aria-controls 只在面板**真的在 DOM 里**（访问过）时才给：未访问的 tab
+          // 还没有对应 panel 节点，给了就是悬空引用（WAI-ARIA 反模式）。
+          const panelMounted = mountedKeys.includes(spec.key)
           return (
             <button
               key={spec.key}
@@ -306,7 +393,7 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
               id={`detail-tab-${spec.key}`}
               className={`tab-btn ${selected ? 'active' : ''}`}
               aria-selected={selected}
-              aria-controls={selected ? `detail-tabpanel-${spec.key}` : undefined}
+              aria-controls={panelMounted ? `detail-tabpanel-${spec.key}` : undefined}
               tabIndex={selected ? 0 : -1}
               title={spec.label}
               onClick={() => selectTab(spec.key)}
@@ -326,14 +413,29 @@ export function SessionDetail({ session, onClose }: SessionDetailProps) {
         </div>
       )}
 
-      <div
-        className="detail-content"
-        /* 有可用面板时才挂 tabpanel 语义：tabs 为空时没有可关联的 tab，不留下悬空引用 */
-        role={activeSpec ? 'tabpanel' : undefined}
-        id={activeSpec ? `detail-tabpanel-${effectiveTab}` : undefined}
-        aria-labelledby={activeSpec ? `detail-tab-${effectiveTab}` : undefined}
-      >
-        {activeSpec?.render(session)}
+      {/* 面板区：所有**访问过**的面板都留在 DOM 里（切换只 display:none），
+          所以 FileManager 的当前目录/展开节点、Shell 的滚动缓冲、进程搜索词、
+          填了一半的表单都不会因为切 tab 丢。tabpanel 语义挂在每个面板容器上：
+          活动面板 role=tabpanel + id + aria-labelledby 指向自己的 tab；
+          非活动面板同样保留 id/labelledby，但加 hidden（+display:none）——
+          这样 id 引用始终有效，AT 也不会读到隐藏面板。 */}
+      <div className="detail-content">
+        {mountedTabs.map((spec) => {
+          const isActive = spec.key === effectiveTab
+          return (
+            <div
+              key={spec.key}
+              className="detail-tabpanel"
+              role="tabpanel"
+              id={`detail-tabpanel-${spec.key}`}
+              aria-labelledby={`detail-tab-${spec.key}`}
+              hidden={!isActive}
+              style={isActive ? undefined : { display: 'none' }}
+            >
+              {spec.render(session, { visible: isActive })}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

