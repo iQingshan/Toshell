@@ -1,5 +1,9 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+// 版本号单一来源：web/package.json 的 version。
+// 以前「关于」页里是手写死的 `v1.4.2`，发版时只改服务端/README 就会漏（v1.4.3 实测漏了）。
+// 现在构建期注入 __APP_VERSION__，发版只要 bump package.json 一处。
+import pkg from './package.json'
 
 // 开发环境代理目标：通过环境变量 VITE_PROXY_TARGET 配置，
 // 例如 PowerShell:  $env:VITE_PROXY_TARGET="http://192.168.1.28:8081"; npm run dev
@@ -9,6 +13,9 @@ export default defineConfig(({ mode }) => {
   const proxyTarget = env.VITE_PROXY_TARGET || 'http://localhost:8081'
 
   return {
+    define: {
+      __APP_VERSION__: JSON.stringify(pkg.version),
+    },
     plugins: [react()],
     resolve: {
       alias: {

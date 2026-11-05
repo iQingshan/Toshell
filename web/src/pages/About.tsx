@@ -260,7 +260,8 @@ export function About() {
           <Shell size={56} />
           <h1>ToShell</h1>
           <div className="about-version-row">
-            <Badge tone="accent">v1.4.2</Badge>
+            {/* 版本号来自 web/package.json（构建期注入 __APP_VERSION__），不再手写死 */}
+            <Badge tone="accent">v{__APP_VERSION__}</Badge>
             <Badge tone="info">MIT License</Badge>
             <Badge>自托管部署</Badge>
           </div>
