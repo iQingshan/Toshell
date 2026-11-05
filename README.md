@@ -160,6 +160,7 @@ ToShell 是一个轻量 C2 框架，由 **服务端（Team Server）+ Web 控制
 **生成载荷 · PE 版本资源**：图标 / 版本信息 / 时间戳（可选，默认不注入），与代码签名、UPX 的先后顺序在页面上写明。
 
 <img src="docs/screenshots/builder.png" width="100%" alt="生成载荷 · PE 版本资源">
+
 **进程列表**：真实目标机的进程清单（本机实测 350+ 条），可按名称过滤、直接结束进程或对指定 PID 发起注入。
 
 <img src="docs/screenshots/process.png" width="100%" alt="进程列表">
