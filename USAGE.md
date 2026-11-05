@@ -1,6 +1,6 @@
 # ToShell Team Server 使用说明
 
-> **当前版本: v1.4.2(安全修复 + 可用性;2026-10-25 发布)** · 更新日志见 [CHANGELOG.md](CHANGELOG.md) 与文末「附」章节。
+> **当前版本: v1.4.3(issue 集中处理 + 离线判活放宽;2026-11-05 发布)** · 更新日志见 [CHANGELOG.md](CHANGELOG.md) 与文末「附」章节。
 
 > ToShell 是一个自托管的 C2(命令与控制)框架,用于授权红队演练、渗透测试与安全研究。请仅在获得授权的前提下使用。
 
@@ -544,6 +544,17 @@ python scripts/reset_release_db.py --db release/data/toshell.db
 ---
 
 ## 附、更新日志与新增功能
+
+### v1.4.3(issue 集中处理)
+
+- **会话列表 IP**:「内网IP」列改「IP(公网/内网)」两行——第一行是服务端看到的对端地址(NAT 后多为公网出口),第二行是植入端上报的本机网卡地址(多网卡悬停看全量);详情页同步拆成「公网/对端 IP」「内网 IP」,搜索框也能按内网 IP 命中。
+- **隧道归属会话**:`GET /api/v1/tunnels` 每条代理追加 `session_host / session_user / session_status / session_alive`(旧字段不变);隧道卡片显示「主机名 · 用户」,点名字跳会话详情,会话下线标「会话已下线」。
+- **文件上传多选 + 断点续传**:文件框支持多选、串行队列、每文件独立进度与失败原因;`upload_id` 由文件本身推导(名字+大小+mtime),新增 `GET /api/v1/sessions/{id}/files/upload/{upload_id}` 返回已收字节,断网/刷新后从断点续传,单分片失败自动重试 3 次。
+- **载荷托管(独立端口)**:`listener.payload_host_enabled`(默认开)+ `payload_host_port`(0 = 监听器端口+1)+ `payload_host_prefix`(默认 `s`)+ `payload_url_ttl`(默认 0 = 永久)。载荷改为 `http://<public_host>:<payload_host_port>/s/<token>/<文件名>` 下发,URL 里没有面板端口、没有 `/api/v1`;token 由构建 ID 派生,**永久稳定、可重复下载、重启一致**。一条命令上线与「重新生成命令」都用它。
+- **会话详情面板记忆**:上次看的面板由 `sessionStorage` 改 `localStorage`(仍按会话隔离),关掉浏览器再进来仍在原面板。
+- **离线判活放宽**:`MarginFactor` 3→4(60s 心跳下 180s→240s)+ 固定抖动容差 15s,减少「离线几秒又在线」的抖动。
+- **控制台版本号**:「关于」页版本改由构建期从 `web/package.json` 注入,不再手写死。
+- **边界**:通讯协议帧与载荷模板**未改动**,已上线主机不需要重新下发;托管端口需要目标机可达(防火墙/安全组放通)。
 
 ### v1.4.1(补丁版)
 

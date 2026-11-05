@@ -1,5 +1,5 @@
 ﻿# =====================================================================
-#  ToShell v1.4.2 本地打包（与 .github/workflows/release.yml 保持镜像）
+#  ToShell v1.4.3 本地打包（与 .github/workflows/release.yml 保持镜像）
 #  产物：release/release-zips/toshell-server-<os>-<arch>.zip（6 个目标）
 #        release/release-zips/checksums.txt
 #  用法： powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package_release.ps1
@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $base = Split-Path -Parent $PSScriptRoot
 Set-Location $base
 
-$version = '1.4.2'
+$version = '1.4.3'
 $commit = (git rev-parse --short HEAD)
 $buildTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ldflags = "-s -w -X main.version=$version -X main.commit=$commit -X main.buildTime=$buildTime"
