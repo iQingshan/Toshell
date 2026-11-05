@@ -22,24 +22,25 @@ func TestEffectiveTimeoutHasHeartbeatMargin(t *testing.T) {
 	withTimeoutConfig(t, 60*time.Second, 5*time.Second)
 
 	s := &Session{LastSeen: time.Now()}
-	// 未采样到实测间隔：3×默认间隔=15s 小于基准，额外放宽到 2 倍基准，
+	// 未采样到实测间隔：MarginFactor(4)×默认间隔=20s 小于 2 倍基准(120s)，
+	// 额外放宽到 2 倍基准，再加固定抖动容差 OfflineJitterGrace(15s) = 135s，
 	// 保证会话刚上线时首个心跳（可能刚好踩线）不会把它判死。
-	if got := s.EffectiveTimeout(); got != 120*time.Second {
-		t.Fatalf("无采样时阈值 = %v, want 120s（2 倍基准首周期保护）", got)
+	if got := s.EffectiveTimeout(); got != 135*time.Second {
+		t.Fatalf("无采样时阈值 = %v, want 135s（2 倍基准首周期保护 + 15s 抖动容差）", got)
 	}
 
-	// 默认间隔与基准相当时，3 倍间隔直接生效
+	// 默认间隔与基准相当时：4×60 + 15 = 255s
 	withTimeoutConfig(t, 60*time.Second, 60*time.Second)
 	s2 := &Session{LastSeen: time.Now()}
-	if got := s2.EffectiveTimeout(); got != 180*time.Second {
-		t.Fatalf("默认间隔 60s 时阈值 = %v, want 180s", got)
+	if got := s2.EffectiveTimeout(); got != 255*time.Second {
+		t.Fatalf("默认间隔 60s 时阈值 = %v, want 255s（4 倍间隔 + 15s）", got)
 	}
 
-	// 实测心跳间隔 62s（60s + jitter）→ 阈值至少 3×62 = 186s
+	// 实测心跳间隔 62s（60s + jitter）→ 4×62 + 15 = 263s
 	withTimeoutConfig(t, 60*time.Second, 5*time.Second)
 	s.observedInterval = 62 * time.Second
-	if got := s.EffectiveTimeout(); got != 186*time.Second {
-		t.Fatalf("阈值 = %v, want 186s（3 倍心跳间隔）", got)
+	if got := s.EffectiveTimeout(); got != 263*time.Second {
+		t.Fatalf("阈值 = %v, want 263s（4 倍心跳间隔 + 15s）", got)
 	}
 
 	// 心跳很快时保持基准值（不因自适应而收紧到不可用）
@@ -62,12 +63,12 @@ func TestHeartbeatJitterDoesNotKillSession(t *testing.T) {
 	}
 	s.LastSeen = now.Add(-170 * time.Second)
 	if !s.isAliveAt(now) {
-		t.Fatal("170s < 186s 阈值，不应判离线")
+		t.Fatal("170s < 263s 阈值，不应判离线")
 	}
-	// 真正失联（超过 3 倍间隔）才判死
-	s.LastSeen = now.Add(-200 * time.Second)
+	// 真正失联（超过 4 倍间隔 + 抖动容差 = 263s）才判死
+	s.LastSeen = now.Add(-300 * time.Second)
 	if s.isAliveAt(now) {
-		t.Fatal("超过 3 倍心跳间隔应判离线")
+		t.Fatal("超过 4 倍心跳间隔 + 抖动容差应判离线")
 	}
 }
 

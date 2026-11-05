@@ -7,6 +7,11 @@ on:
 permissions:
   contents: write
 
+# 同一个 tag 的发布串行化：重打 tag 或手动重跑时不要并发写同一个 Release。
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   # 前端构建 → 同步 webdist（供 server 嵌入）
   web:
@@ -171,14 +176,40 @@ jobs:
           path: ${{ matrix.zip }}
           if-no-files-found: error
 
-      - name: Upload to GitHub Release
+  # ── 唯一发布者：所有 zip 汇总后一次性发 Release ───────────────────────────
+  #
+  # 为什么收成单 job：v1.4.3 之前是"矩阵里每个 job 各自 softprops 上传"，
+  # 6 个 job 并发去**创建同一个 Release**，GitHub 侧会返回 500 / 反复重试，
+  # 结果 5 个 job 的 "Upload to GitHub Release" 失败、只成功一个（v1.4.3 实测）。
+  # 现在矩阵只负责构建 + 上传 artifact，发布由这里一个人做完：
+  # 生成 checksums.txt → 一次性上传 6 个 zip + 校验清单 + 三份许可声明。
+  publish:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      # 必须先 checkout：files 里的 LICENSE/DISCLAIMER/THIRD-PARTY-NOTICES 在仓库里，
+      # 不 checkout 会被 softprops 静默跳过（v1.3.4/1.3.5 实测如此）。
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums.txt
+        run: |
+          cd dist
+          # 只对发布 zip 求哈希，顺序固定便于比对
+          ls -1 *.zip | sort | xargs sha256sum > checksums.txt
+          cat checksums.txt
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.zip }}
-          # 版本号跟随 tag（v1.4.x）；标题也用 tag 名
+          # 版本号跟随 tag；标题也用 tag 名
           name: ${{ github.ref_name }}
-          # 固定正文：不要用 generate_release_notes —— 它会在每次重跑（多平台矩阵 / 重打 tag）
-          # 时重复追加一行 "Full Changelog: ..."，导致正文被刷屏。
+          # 固定正文：不要用 generate_release_notes —— 它会在每次重跑（重打 tag）时
+          # 重复追加 "Full Changelog: ..."，导致正文被刷屏。
           body: |
             Toshell ${{ github.ref_name }}
 
@@ -195,35 +226,10 @@ jobs:
             取舍与许可证边界见 [参考实现分析](https://github.com/${{ github.repository }}/blob/main/docs/VSHELL-ANALYSIS.md)。
 
             Bug或者建议请提交issue。
-
-  # 全部 zip 汇总后生成校验清单（sha256），随 Release 一起发布。
-  # 单独一个 job 是因为矩阵里每个 job 只知道自己那一个 zip。
-  checksums:
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      # 必须先 checkout：下面 files 里要补发的 LICENSE/DISCLAIMER/THIRD-PARTY-NOTICES
-      # 都在仓库里，不 checkout 就会被 softprops 静默跳过（v1.3.4/1.3.5 实测如此）。
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Generate checksums.txt
-        run: |
-          cd dist
-          # 只对发布 zip 求哈希，顺序固定便于比对
-          ls -1 *.zip | sort | xargs sha256sum > checksums.txt
-          cat checksums.txt
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          # 只补发 checksums.txt + 许可与声明（不传 name/body，避免覆盖已写好的 Release 标题与正文）。
-          # 这三个文件由单个 job 上传（矩阵里每个 job 都传会并发冲突）。
           files: |
+            dist/*.zip
             dist/checksums.txt
             LICENSE
             DISCLAIMER.md
             THIRD-PARTY-NOTICES.md
+          fail_on_unmatched_files: true
