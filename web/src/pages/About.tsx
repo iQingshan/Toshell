@@ -296,7 +296,7 @@ export function About() {
               k: '版本',
               v: (
                 <>
-                  v1.4.2 <Badge tone="accent" style={{ marginLeft: 4 }}>当前</Badge>
+                  v{__APP_VERSION__} <Badge tone="accent" style={{ marginLeft: 4 }}>当前</Badge>
                 </>
               ),
             },
