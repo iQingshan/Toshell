@@ -403,6 +403,10 @@ func (s *Server) startListenerByID(id string) error {
 		hl.SetOnTaskResult(taskResultCB)
 		hl.SetOnSessionDead(sessionDeadCB)
 		hl.SetOnSessionOnline(sessionOnlineCB)
+		// 载荷托管（v1.4.3 #15b-B）：多个 HTTP 监听器共用同一套托管路由。
+		hl.SetPayloadHost(s.HostedPayloadHandler)
+		// 有了 HTTP 监听器，托管下载地址才真正有人应答
+		s.SetPayloadHostReady(true)
 		rl = &runtimeListener{id: id, typ: "http", pusher: hl, stop: hl.Stop}
 	case "websocket":
 		// WebSocket 通道：复用 Listener 实现（TSHL 帧 + AES-GCM，传输层为 WS 升级）。

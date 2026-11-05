@@ -73,6 +73,31 @@ function dirnameOf(path: string, isWindows: boolean): string {
   return path.slice(0, i)
 }
 
+/** 上传队列里的一项（v1.4.3 #15a-B：多选 + 断点续传） */
+type UploadTaskState = 'queued' | 'uploading' | 'pushing' | 'done' | 'error'
+interface UploadTask {
+  key: string
+  name: string
+  size: number
+  sent: number
+  state: UploadTaskState
+  /** 附加说明（如「已从断点 12 MB 继续」） */
+  note?: string
+  error?: string
+}
+
+/**
+ * 稳定的 upload_id：同一份文件（名字 + 大小 + 修改时间）每次算出同一个字符串。
+ *
+ * 为什么不能用随机 id：断点续传靠它把"这次要传的文件"和"服务端暂存的那半截"
+ * 对上。随机 id 每次都变，断线后只能从头传（这也是 #15 里"断点续传"缺的那块）。
+ */
+function stableUploadId(file: File): string {
+  const name = file.name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40) || 'file'
+  const stamp = Math.floor((file.lastModified || 0) / 1000)
+  return `${name}-${file.size}-${stamp}`
+}
+
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -371,7 +396,8 @@ export function FileManager({ session }: { session: Session }) {
   const [uploading, setUploading] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerInit, setPickerInit] = useState('')
-  const [uploadProgress, setUploadProgress] = useState<{ sent: number; total: number; pushing: boolean } | null>(null)
+  // 上传队列（v1.4.3 #15a-B）：多选 + 断点续传，串行执行。
+  const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const loadedRef = useRef(false)
   const sidRef = useRef(session.id)
@@ -820,60 +846,127 @@ export function FileManager({ session }: { session: Session }) {
     setPickerOpen(true)
   }, [rootPath])
 
-  // 大文件直传：1MB 分片 POST 至服务端暂存，末尾分片返回 task_id 后轮询结果
-  // opts.targetPath 用于"预览编辑保存"时覆盖原文件路径
-  const handleUploadFile = useCallback(async (file: File, opts?: { targetPath?: string }) => {
-    if (!file) return
+  // 单文件上传（内部实现）：1MB 分片 + 断点续传 + 分片级重试。
+  // 不负责刷新目录/收尾，由调用方（队列 / 预览保存）决定。
+  const uploadOneFile = useCallback(async (file: File, taskKey: string, opts?: { targetPath?: string }) => {
     const targetDir = uploadDirRef.current || rootPath
     const targetPath = opts?.targetPath || joinPath(targetDir, file.name, isWindows)
-    setUploading(true)
-    setUploadProgress({ sent: 0, total: file.size, pushing: false })
-    try {
-      const uploadId = `${Date.now()}-${file.name}-${Math.random().toString(36).slice(2, 8)}`
-      const chunkSize = 1024 * 1024 // 1MB
-      const total = file.size
-      let lastTaskId: number | null = null
+    const patch = (p: Partial<UploadTask>) => {
+      setUploadTasks(prev => prev.map(t => (t.key === taskKey ? { ...t, ...p } : t)))
+    }
 
-      for (let offset = 0; offset < total; offset += chunkSize) {
+    // upload_id 由文件本身推导（名字+大小+mtime）：断线/刷新后再传同一个文件，
+    // 服务端能认出"这就是刚才没传完的那次"，从而实现续传。
+    const uploadId = stableUploadId(file)
+    const chunkSize = 1024 * 1024 // 1MB
+    const total = file.size
+
+    // ① 先问服务端已收到多少字节（老服务端没有该接口 → 从头传）
+    let start = 0
+    try {
+      const st = await sessionApi.getUploadStatus(session.id, uploadId)
+      const received = Number(st?.data?.received ?? 0)
+      if (received > 0 && received <= total) {
+        start = received
+        patch({ sent: start, note: start < total ? `已从断点 ${formatSize(start)} 继续` : undefined })
+      }
+    } catch {
+      /* 忽略：按从头传处理 */
+    }
+
+    // ② 单个分片最多重试 3 次（同 offset 重放是幂等的：服务端按 offset 定位写入）
+    const postChunk = async (offset: number, done: boolean, data: string) => {
+      let lastErr: unknown = null
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          return await sessionApi.uploadFile(session.id, {
+            upload_id: uploadId,
+            filename: file.name,
+            path: targetPath,
+            size: total,
+            offset,
+            data,
+            done,
+          })
+        } catch (e) {
+          lastErr = e
+          if (attempt < 3) {
+            patch({ note: `第 ${attempt} 次失败，重试中…` })
+            await new Promise(r => setTimeout(r, 600 * attempt))
+          }
+        }
+      }
+      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+    }
+
+    let lastTaskId: number | null = null
+    if (total === 0) {
+      const r = await postChunk(0, true, '')
+      lastTaskId = r?.data?.task_id ?? null
+      patch({ sent: 0 })
+    } else {
+      for (let offset = start; offset < total; offset += chunkSize) {
         const slice = file.slice(offset, Math.min(offset + chunkSize, total))
         const b64 = await blobToBase64(slice)
         const done = offset + slice.size >= total
-        const r = await sessionApi.uploadFile(session.id, {
-          upload_id: uploadId,
-          filename: file.name,
-          path: targetPath,
-          size: total,
-          offset,
-          data: b64,
-          done,
-        })
-        setUploadProgress({ sent: Math.min(offset + slice.size, total), total, pushing: false })
+        const r = await postChunk(offset, done, b64)
+        patch({ sent: Math.min(offset + slice.size, total), note: undefined })
         if (done) lastTaskId = r?.data?.task_id ?? null
       }
+    }
 
-      // 空文件：直接发送完成分片
-      if (total === 0) {
-        const r = await sessionApi.uploadFile(session.id, {
-          upload_id: uploadId,
-          filename: file.name,
-          path: targetPath,
-          size: 0,
-          offset: 0,
-          data: '',
-          done: true,
-        })
-        lastTaskId = r?.data?.task_id ?? null
-        setUploadProgress({ sent: 0, total: 0, pushing: false })
-      }
+    if (lastTaskId) {
+      // 服务端暂存完成，进入推送/写盘阶段
+      patch({ sent: total, state: 'pushing' })
+      const maxAttempts = Math.max(600, Math.ceil(total / (1024 * 1024)) * 4 + 120)
+      const p = await pollTask(lastTaskId, maxAttempts)
+      if (p?.error) throw new Error(String(p.error))
+    }
+    patch({ sent: total, state: 'done', note: undefined })
+  }, [session.id, rootPath, isWindows, pollTask])
 
-      if (lastTaskId) {
-        // 服务端暂存完成，进入推送/写盘阶段
-        setUploadProgress({ sent: total, total, pushing: true })
-        // 大文件按分块数估算轮询时长（1MB/块，含推送与写盘余量），默认 10 分钟
-        const maxAttempts = Math.max(600, Math.ceil(total / (1024 * 1024)) * 4 + 120)
-        const p = await pollTask(lastTaskId, maxAttempts)
-        if (p?.error) { alert('上传失败: ' + p.error); return }
+  // 多文件上传（v1.4.3 #15a-B）：串行队列，逐个传，失败不阻塞后面的文件。
+  const handleUploadFiles = useCallback(async (files: File[]) => {
+    const list = files.filter(Boolean)
+    if (list.length === 0) return
+    const stamp = Date.now()
+    const tasks: UploadTask[] = list.map((f, i) => ({
+      key: `${stamp}-${i}-${f.name}`,
+      name: f.name,
+      size: f.size,
+      sent: 0,
+      state: 'queued',
+    }))
+    // 清掉上一轮已完成的条目，只保留失败项供查看
+    setUploadTasks(prev => [...prev.filter(t => t.state === 'error'), ...tasks])
+    setUploading(true)
+    const targetDir = uploadDirRef.current || rootPath
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const t = tasks[i]
+        setUploadTasks(prev => prev.map(x => (x.key === t.key ? { ...x, state: 'uploading' } : x)))
+        try {
+          await uploadOneFile(list[i], t.key)
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          setUploadTasks(prev => prev.map(x => (x.key === t.key ? { ...x, state: 'error', error: msg, note: undefined } : x)))
+        }
       }
+      loadRoot(targetDir)
+    } finally {
+      setUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }, [uploadOneFile, loadRoot, rootPath])
+
+  // 单文件入口（预览编辑保存复用）：opt.targetPath 覆盖原文件
+  const handleUploadFile = useCallback(async (file: File, opts?: { targetPath?: string }) => {
+    if (!file) return
+    const key = `single-${Date.now()}`
+    setUploadTasks([{ key, name: file.name, size: file.size, sent: 0, state: 'uploading' }])
+    setUploading(true)
+    try {
+      await uploadOneFile(file, key, opts)
       if (opts?.targetPath) {
         // 编辑保存：只刷新原文件所在目录缓存，不重置整个文件树
         const refreshPath = dirnameOf(opts.targetPath, isWindows) || rootPath
@@ -882,17 +975,18 @@ export function FileManager({ session }: { session: Session }) {
         setRoots(prev => (refreshPath === rootPath ? itemsToNodes(items, refreshPath) : prev))
         updateSessionState(session.id, { currentPath: rootPath, files: items })
       } else {
-        loadRoot(targetDir)
+        loadRoot(uploadDirRef.current || rootPath)
       }
     } catch (e) {
       console.error(e)
-      alert('上传失败')
+      const msg = e instanceof Error ? e.message : String(e)
+      setUploadTasks(prev => prev.map(x => (x.key === key ? { ...x, state: 'error', error: msg } : x)))
+      alert('上传失败: ' + msg)
     } finally {
       setUploading(false)
-      setUploadProgress(null)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
-  }, [session.id, rootPath, isWindows, pollTask, loadRoot, itemsToNodes, loadPath])
+  }, [session.id, rootPath, isWindows, uploadOneFile, loadRoot, itemsToNodes, loadPath])
 
   // 预览编辑保存：用新内容覆盖原文件（复用分片上传链路）
   // 只读预览（未识别后缀强制预览）与截断预览禁止保存，避免把"前缀"写回原文件。
@@ -949,8 +1043,13 @@ export function FileManager({ session }: { session: Session }) {
         <input
           ref={fileInputRef}
           type="file"
+          multiple
           style={{ display: 'none' }}
-          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFile(f) }}
+          onChange={(e) => {
+            // v1.4.3 #15a-B：多选 → 串行队列；每个文件独立进度、失败不影响其余
+            const files = e.target.files ? Array.from(e.target.files) : []
+            if (files.length > 0) void handleUploadFiles(files)
+          }}
         />
       </div>
 
@@ -1061,20 +1160,43 @@ export function FileManager({ session }: { session: Session }) {
         </div>
       )}
 
-      {/* 上传进度条 */}
-      {uploadProgress && (
-        <div className="upload-progress">
-          <div className="upload-progress-bar">
-            <div
-              className="upload-progress-fill"
-              style={{ width: `${uploadProgress.total > 0 ? Math.min(100, (uploadProgress.sent / uploadProgress.total) * 100) : 100}%` }}
-            />
-          </div>
-          <span className="upload-progress-text">
-            {uploadProgress.pushing
-              ? '正在推送至目标主机并写入磁盘...'
-              : `上传中 ${formatSize(uploadProgress.sent)} / ${formatSize(uploadProgress.total)}（${uploadProgress.total > 0 ? Math.round((uploadProgress.sent / uploadProgress.total) * 100) : 100}%）`}
-          </span>
+      {/* 上传队列（v1.4.3 #15a-B）：每个文件一行，含断点续传提示与失败原因 */}
+      {uploadTasks.length > 0 && (
+        <div className="upload-queue">
+          {uploadTasks.map((t) => {
+            const pct = t.size > 0 ? Math.min(100, Math.round((t.sent / t.size) * 100)) : (t.state === 'done' ? 100 : 0)
+            return (
+              <div key={t.key} className={`upload-queue-item ${t.state}`}>
+                <div className="upload-queue-head">
+                  <span className="upload-queue-name" title={t.name}>{t.name}</span>
+                  <span className="upload-queue-size">{formatSize(t.sent)} / {formatSize(t.size)}</span>
+                  <span className="upload-queue-state">
+                    {t.state === 'queued' && '排队中'}
+                    {t.state === 'uploading' && `${pct}%`}
+                    {t.state === 'pushing' && '推送至目标主机…'}
+                    {t.state === 'done' && '完成'}
+                    {t.state === 'error' && '失败'}
+                  </span>
+                  {(t.state === 'done' || t.state === 'error') && (
+                    <button
+                      className="upload-queue-dismiss"
+                      title="从列表移除"
+                      onClick={() => setUploadTasks(prev => prev.filter(x => x.key !== t.key))}
+                    >×</button>
+                  )}
+                </div>
+                <div className="upload-progress-bar">
+                  <div
+                    className={`upload-progress-fill${t.state === 'error' ? ' error' : ''}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                {(t.note || t.error) && (
+                  <div className={`upload-queue-note${t.error ? ' error' : ''}`}>{t.error || t.note}</div>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 

@@ -122,15 +122,16 @@ interface SessionDetailProps {
 }
 
 /**
- * "每个会话上次看的面板"存 sessionStorage（key 带 session.id，互不串）：
- * 刷新页面后点回同一台机器，直接回到当时的 tab。只是便利，读写失败（隐私模式、
- * 配额）一律静默忽略，不影响功能。
+ * "每个会话上次看的面板"存 localStorage（key 带 session.id，互不串）：
+ * **v1.4.3 #15d 起从 sessionStorage 改为 localStorage** —— 关掉浏览器/标签页再进来，
+ * 每台机器仍然停在上次看的面板（原先只在当前标签页生命周期内有效）。
+ * 只是便利，读写失败（隐私模式、配额）一律静默忽略，不影响功能。
  */
 const TAB_STORAGE_PREFIX = 'toshell-detail-tab:'
 
 function readStoredTab(sessionId: string): DetailTab | null {
   try {
-    const raw = sessionStorage.getItem(TAB_STORAGE_PREFIX + sessionId)
+    const raw = localStorage.getItem(TAB_STORAGE_PREFIX + sessionId)
     // 只认声明表里的键：老版本存下的已删除面板 / 手工改过的值都不能进 state
     return raw && TAB_SPECS.some((spec) => spec.key === raw) ? (raw as DetailTab) : null
   } catch {
@@ -140,7 +141,7 @@ function readStoredTab(sessionId: string): DetailTab | null {
 
 function writeStoredTab(sessionId: string, tab: DetailTab) {
   try {
-    sessionStorage.setItem(TAB_STORAGE_PREFIX + sessionId, tab)
+    localStorage.setItem(TAB_STORAGE_PREFIX + sessionId, tab)
   } catch {
     /* ignore */
   }
@@ -496,8 +497,10 @@ function SessionInfoTab({ session }: { session: Session }) {
           <span className="info-value mono">{session.process_name || '-'}</span>
         </div>
         <div className="info-item">
-          <span className="info-label">远程地址</span>
-          <span className="info-value mono">{session.remote_addr || '-'}</span>
+          <span className="info-label">公网/对端 IP</span>
+          <span className="info-value mono" title="服务端看到的对端地址（NAT/反代后通常是公网出口）">
+            {session.remote_addr || '-'}
+          </span>
         </div>
         <div className="info-item">
           <span className="info-label">监听器</span>
@@ -515,8 +518,8 @@ function SessionInfoTab({ session }: { session: Session }) {
           </span>
         </div>
         <div className="info-item full">
-          <span className="info-label">IP地址</span>
-          <span className="info-value mono">
+          <span className="info-label">内网 IP</span>
+          <span className="info-value mono" title="植入端上报的本机网卡地址（多网卡时全部列出）">
             {session.ip_addresses?.join(', ') || '-'}
           </span>
         </div>

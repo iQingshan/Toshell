@@ -298,7 +298,7 @@ func TestOneLinerSetIncludesLoaderChains(t *testing.T) {
 	s := testServer("https://c2.example.com", "", 18081)
 	r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:18081/api/v1/builders", nil)
 
-	exe := s.oneLinerSet(r, "", "windows", "exe", "build-1", "")
+	exe := s.oneLinerSet(r, "", "windows", "exe", "build-1", "", "")
 	if exe == nil {
 		t.Fatal("exe 载荷不应返回 nil")
 	}
@@ -320,7 +320,7 @@ func TestOneLinerSetIncludesLoaderChains(t *testing.T) {
 	}
 
 	// dll 格式：不能直接执行，只给加载器链（全部带 Note）。
-	dll := s.oneLinerSet(r, "", "windows", "dll", "build-2", "")
+	dll := s.oneLinerSet(r, "", "windows", "dll", "build-2", "", "")
 	if dll == nil {
 		t.Fatal("windows dll 载荷应给出加载器链，不应返回 nil")
 	}
@@ -339,10 +339,10 @@ func TestOneLinerSetIncludesLoaderChains(t *testing.T) {
 	}
 
 	// 不能给出任何链路的格式仍然返回 nil（保持既有语义）。
-	if got := s.oneLinerSet(r, "", "linux", "so", "build-3", ""); got != nil {
+	if got := s.oneLinerSet(r, "", "linux", "so", "build-3", "", ""); got != nil {
 		t.Error("linux so 不应返回变体")
 	}
-	if got := s.oneLinerSet(r, "", "darwin", "exe", "build-4", ""); got != nil {
+	if got := s.oneLinerSet(r, "", "darwin", "exe", "build-4", "", ""); got != nil {
 		t.Error("darwin 不应返回变体")
 	}
 }

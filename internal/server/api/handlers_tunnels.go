@@ -87,6 +87,19 @@ func (s *Server) tunnelEntry(id string, row *tunnelstore.Tunnel, socks5 *tunnel.
 		authEnabled = socks5.AuthEnabled()
 	}
 
+	// v1.4.3 #16：隧道归属会话（issue 反馈"会话多了只看 session_id 分不清是哪台机器"）。
+	// 会话管理器里查不到（进程重启后从库里恢复的代理、或会话已被删除）时，
+	// session_alive=false 且 host/user 留空，前端据此显示「已下线」。
+	sessionHost, sessionUser, sessionStatus := "", "", ""
+	sessionAlive := false
+	if info, ierr := s.sessionMgr.GetSessionInfo(id); ierr == nil && info != nil {
+		sessionHost, sessionUser = info.Hostname, info.Username
+		if st, serr := s.sessionMgr.GetStatus(id); serr == nil {
+			sessionStatus = st
+			sessionAlive = st == "active"
+		}
+	}
+
 	return map[string]interface{}{
 		// ── v1.4.0 既有字段（原样保留，顺序/命名不变）──
 		"session_id":   id,
@@ -107,6 +120,12 @@ func (s *Server) tunnelEntry(id string, row *tunnelstore.Tunnel, socks5 *tunnel.
 		"last_error":  lastError,
 		"created_at":  createdAt,
 		"updated_at":  updatedAt,
+
+		// ── v1.4.3 #16 追加字段（只增不改）──
+		"session_host":   sessionHost,
+		"session_user":   sessionUser,
+		"session_status": sessionStatus,
+		"session_alive":  sessionAlive,
 	}
 }
 
@@ -124,6 +143,8 @@ func (s *Server) tunnelDetailResponse(id string, row *tunnelstore.Tunnel, socks5
 	for _, k := range []string{
 		"id", "session_id", "status", "listening", "restored", "persisted",
 		"protocol", "mode", "target_addr", "remark", "last_error", "created_at", "updated_at",
+		// v1.4.3 #16：详情也带上归属会话，前端不用两处逻辑
+		"session_host", "session_user", "session_status", "session_alive",
 	} {
 		out[k] = entry[k]
 	}

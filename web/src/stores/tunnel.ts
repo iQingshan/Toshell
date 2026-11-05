@@ -35,6 +35,11 @@ export interface SOCKS5Server {
   updated_at?: string
   protocol?: string
   mode?: string
+  // ── v1.4.3 #16 追加：隧道归属会话（会话多了直接看主机名，不用逐个点开对 id）──
+  session_host?: string
+  session_user?: string
+  session_status?: string
+  session_alive?: boolean
 }
 
 interface TunnelState {

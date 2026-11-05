@@ -191,6 +191,35 @@
   font-weight: 500;
 }
 
+/* v1.4.3 #14：IP 列两行（公网/对端 + 内网），避免把对端地址误标成「内网IP」 */
+.ip-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.25;
+  min-width: 108px;
+}
+
+.ip-cell .ip-public {
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.ip-cell .ip-internal {
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--color-text-muted, #8b95a5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
 .sessions-table td:nth-child(7) {
   text-align: left;
   min-width: 80px;
@@ -1394,6 +1423,91 @@
   font-size: 12px;
   color: var(--color-text-muted);
   white-space: nowrap;
+}
+
+/* 上传队列（v1.4.3 #15a-B）：多选时每个文件一行，含断点续传提示与失败原因 */
+.upload-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.upload-queue-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.upload-queue-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.upload-queue-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--color-text);
+}
+
+.upload-queue-size {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+}
+
+.upload-queue-state {
+  flex-shrink: 0;
+  min-width: 64px;
+  text-align: right;
+  color: var(--color-text-secondary);
+}
+
+.upload-queue-item.done .upload-queue-state {
+  color: var(--color-success, #16a34a);
+}
+
+.upload-queue-item.error .upload-queue-state {
+  color: var(--color-danger);
+}
+
+.upload-queue-dismiss {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.upload-queue-dismiss:hover {
+  color: var(--color-danger);
+}
+
+.upload-progress-fill.error {
+  background: var(--color-danger);
+}
+
+.upload-queue-note {
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  word-break: break-all;
+}
+
+.upload-queue-note.error {
+  color: var(--color-danger);
 }
 
 .copy-btn {

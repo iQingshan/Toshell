@@ -135,6 +135,25 @@ listener:
     #   front_domain：植入端把 Host 头设成前置域名，名单里只放该域名。
     #   注意：Host 头是明文可控的，它挡的是无目标批量扫描，不是定向攻击。
     ws_host_allowlist: []
+    # ── 载荷托管到监听器端口（v1.4.3 #15b-B）─────────────────────────────
+    # payload_host_enabled：true = 载荷改由**监听器端口**下发，地址形如
+    #   http://<public_host>:<listener.port>/s/<token>/build-xxx.exe
+    #   一条命令上线、载荷列表的「重新生成命令」都用这个地址，命令行/日志里
+    #   不再出现面板端口与 /api/v1/implant/payload/。
+    #   token = HMAC-SHA256(listener.encryption_key, "payload:"+构建 ID) 前 12 位，
+    #   由构建 ID 决定 → **永久稳定、可重复下载**，服务端重启后也一致，不落库。
+    #   false = 回到老的「面板端口 + /api/v1/...」地址（兼容旧用法）。
+    payload_host_enabled: true
+    # ⚠️ 托管依赖「HTTP(S) 轮询监听器」在这个端口上真的在跑：
+    #   监听器端口 TCP/HTTP 互斥（TCP 起得来就跳过 HTTP），TCP 类型时托管地址
+    #   没人应答，服务端会自动回退成面板地址（/api/v1/implant/payload/...）。
+    #   要用托管，就把 listener.protocol 设成 http（或 https，配 tls_enabled）。
+    # payload_host_prefix：第一段路径，起个伪静态目录名更自然（s / static / assets / dl）。
+    #   只允许 [A-Za-z0-9._-]，留空按 "s" 处理。
+    payload_host_prefix: s
+    # payload_url_ttl：托管链接有效期（秒）。**0 = 永久有效（默认）**；
+    #   非 0 时超过该时长返回 410，需要重新生成链接。
+    payload_url_ttl: 0
 
 logging:
     compress: true

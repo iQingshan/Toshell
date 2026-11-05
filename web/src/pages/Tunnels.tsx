@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import { Plus, Trash2, RefreshCw, ArrowRight, ArrowLeft, Network, Server, Activity, X, CheckCircle, Loader2 } from 'lucide-react'
 import { sessionApi } from '../api'
 import { useTunnelStore } from '../stores/tunnel'
@@ -30,6 +30,7 @@ export function Tunnels() {
   const toast = useToast()
 
   const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
 
   // 从会话列表跳转而来：读取 ?session= 参数，自动选中对应会话并展开创建面板
   useEffect(() => {
@@ -408,7 +409,33 @@ export function Tunnels() {
                 </div>
               </div>
               <div className="socks5-session">
-                会话: {server.session_id.slice(0, 16)}...
+                {/* v1.4.3 #16：直接显示归属会话的主机名/用户，会话多了不用再逐个点开对 session_id */}
+                {server.session_host ? (
+                  <>
+                    <button
+                      type="button"
+                      className="socks5-session-link"
+                      title="打开该会话详情"
+                      onClick={() => navigate(`/sessions/${server.session_id}`)}
+                    >
+                      {server.session_host}
+                      {server.session_user ? ` · ${server.session_user}` : ''}
+                    </button>
+                    <span className="socks5-session-id">会话: {server.session_id.slice(0, 16)}...</span>
+                    {server.session_alive === false && (
+                      <span className="socks5-session-dead" title="该会话已下线，代理已不可用">
+                        会话已下线
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    会话: {server.session_id.slice(0, 16)}...{' '}
+                    <span className="socks5-session-dead" title="会话管理器里查不到该会话（服务端重启后从库恢复的代理常见）">
+                      会话已下线
+                    </span>
+                  </>
+                )}
               </div>
               {server.remark && (
                 <div className="socks5-remark">备注: {server.remark}</div>
@@ -458,6 +485,14 @@ export function Tunnels() {
                     <span className="info-value">{selectedServer.remark}</span>
                   </div>
                 )}
+                <div className="info-item">
+                  <span className="info-label">归属会话:</span>
+                  <span className="info-value">
+                    {selectedServer.session_host
+                      ? `${selectedServer.session_host}${selectedServer.session_user ? ' · ' + selectedServer.session_user : ''}`
+                      : '已下线（查不到该会话）'}
+                  </span>
+                </div>
                 <div className="info-item">
                   <span className="info-label">会话ID:</span>
                   <span className="info-value">{selectedServer.session_id.slice(0, 20)}...</span>

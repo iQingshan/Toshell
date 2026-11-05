@@ -27,13 +27,22 @@ type Manager struct {
 var HeartbeatTimeout = 90 * time.Second
 
 // MarginFactor 判活余量倍数：实际超时 ≥ MarginFactor × 实测心跳间隔。
-// 心跳抖动、系统休眠唤醒、短暂网络排队都会让单次心跳迟到，2 倍仍偏紧，取 3 倍。
-const MarginFactor = 3
+//
+// v1.4.3：3 → 4。issue #15 反馈"同环境 vshell 在线、toshell 显示掉线"，除心跳
+// 抖动外，还有任务回传/大文件传输把植入端主循环占住的情况；3 倍（默认 60s 心跳
+// 即 180s）余量偏紧，掉一次心跳 + 一次调度抖动就会翻成离线。改 4 倍后是 240s，
+// 再多给一次机会，代价只是"真掉线"晚 1 分钟才显示。
+const MarginFactor = 4
 
 // DefaultHeartbeatInterval 服务端配置的植入端默认心跳间隔（implant.interval）。
 // 会话刚建立、还没采样到实测间隔时用它作为自适应起点（载荷可在构建时自定义
 // interval，因此这只是起点，真正生效的是实测值）。
 var DefaultHeartbeatInterval = 60 * time.Second
+
+// OfflineJitterGrace 判活固定抖动余量（v1.4.3）：在 MarginFactor×interval 之上
+// 再给一小段固定容差，吸收"心跳刚好卡在阈值边界"的那一次迟到，减少
+// "离线几秒又在线"的抖动。不宜过大（会让真掉线迟迟不变灰），15s 足够。
+const OfflineJitterGrace = 15 * time.Second
 
 // 会话忙期宽限：会话上有运行中的任务时，判定阈值自动放宽到
 // HeartbeatTimeout * BusyGrace，避免长任务期间因心跳间隔抖动被误判离线
@@ -586,6 +595,9 @@ func (s *Session) effectiveTimeout() time.Duration {
 			timeout = widened
 		}
 	}
+	// v1.4.3：在倍数余量之上再加一段固定抖动容差（OfflineJitterGrace），
+	// 专门吸收"心跳刚好卡在阈值边界"的那一次迟到。
+	timeout += OfflineJitterGrace
 	if timeout > base {
 		return timeout
 	}

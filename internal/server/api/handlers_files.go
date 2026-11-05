@@ -146,6 +146,39 @@ func (s *Server) deleteFileHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// uploadStatusHandler 返回某次暂存上传已收到的字节数（断点续传用，v1.4.3 #15a-B）。
+//
+//	GET /api/v1/sessions/{id}/files/upload/{upload_id}
+//
+// 前端在开始传之前先问一次：已收 N 字节就从 N 接着传，不用从头再来。
+// 分片是按 offset 定位写入的（见 uploadFileHandler 的 Seek），因此暂存文件的
+// 尺寸就等于"已连续收到的字节数"。
+func (s *Server) uploadStatusHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	vars := mux.Vars(r)
+	id := vars["id"]
+	uploadID := vars["upload_id"]
+
+	if uploadID == "" || strings.ContainsAny(uploadID, `/\:`) {
+		http.Error(w, `{"error":"invalid upload_id"}`, http.StatusBadRequest)
+		return
+	}
+	if !s.requireSessionFromPath(w, r) {
+		return
+	}
+
+	staged := filepath.Join("data", "uploads", id, uploadID)
+	received := int64(0)
+	if info, err := os.Stat(staged); err == nil && info.Mode().IsRegular() {
+		received = info.Size()
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"upload_id": uploadID,
+		"received":  received,
+		"exists":    received > 0,
+	})
+}
+
 // uploadFileHandler 支持大文件直传：前端按 1MB 分片 POST。
 // 非末尾分片写入服务端暂存目录 data/uploads/<sessionID>/<uploadID>；
 // 末尾分片（done=true）校验完整性后创建上传任务，并异步把分片推送给植入端。

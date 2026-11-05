@@ -423,6 +423,42 @@
   background: var(--color-bg-tertiary);
   border-radius: var(--radius-sm);
   font-family: monospace;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* v1.4.3 #16：隧道卡片上的「归属会话」链接（点开直接跳该会话详情） */
+.socks5-session-link {
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.socks5-session-link:hover {
+  color: var(--color-primary-hover, var(--color-primary));
+  text-decoration: underline;
+}
+
+.socks5-session-id {
+  color: var(--color-text-secondary);
+  opacity: 0.8;
+}
+
+.socks5-session-dead {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.3);
 }
 
 .tunnel-list {

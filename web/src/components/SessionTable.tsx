@@ -88,8 +88,15 @@ export function SessionTable({
         .filter((s) => {
           if (statusFilter && statusFilter !== 'all' && (s.status || '') !== statusFilter) return false
           if (!query) return true
-          return [s.hostname, s.username, s.remote_addr, s.process_name, s.id]
-            .some((v) => (v || '').toLowerCase().includes(query))
+          // 搜索索引里带上「内网 IP」：列表两行 IP 都要能搜到（v1.4.3 #14）
+          return [
+            s.hostname,
+            s.username,
+            s.remote_addr,
+            s.process_name,
+            s.id,
+            ...(Array.isArray(s.ip_addresses) ? s.ip_addresses : []),
+          ].some((v) => (v || '').toLowerCase().includes(query))
         })
         .sort(
           (a, b) => new Date(b.first_seen).getTime() - new Date(a.first_seen).getTime()
@@ -172,7 +179,7 @@ export function SessionTable({
                 '#'
               )}
             </th>
-            <th>备注</th><th>状态</th><th>主机名</th><th>用户</th><th>进程ID</th><th>内网IP</th><th>操作系统</th><th>心跳</th><th>操作</th>
+            <th>备注</th><th>状态</th><th>主机名</th><th>用户</th><th>进程ID</th><th>IP（公网/内网）</th><th>操作系统</th><th>心跳</th><th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -180,6 +187,11 @@ export function SessionTable({
             const st = sessionStatusBadge(session.status || '')
             const hb = heartbeatBadge(session.last_seen)
             const ip = session.remote_addr ? session.remote_addr.split(':')[0] : ''
+            // v1.4.3 #14：公网（服务端看到的对端地址）与内网（植入端上报的网卡地址）分两行显示。
+            // 内网 IP 可能有多张网卡，列表只显示全量文本并靠 title 展示。
+            const internalIpText = Array.isArray(session.ip_addresses)
+              ? session.ip_addresses.filter(Boolean).join(', ')
+              : ''
             return (
               <tr
                 key={session.id}
@@ -243,7 +255,15 @@ export function SessionTable({
                   </div>
                 </td>
                 <td><span className="mono" title={session.pid ? String(session.pid) : undefined}>{session.pid || '-'}</span></td>
-                <td><span className="mono" title={ip || undefined}>{ip || '-'}</span></td>
+                <td>
+                  <div
+                    className="ip-cell"
+                    title={`公网/对端 IP（服务端视角）：${ip || '-'}\n内网 IP（植入端上报）：${internalIpText || '-'}`}
+                  >
+                    <span className="ip-public mono">{ip || '-'}</span>
+                    <span className="ip-internal mono">{internalIpText || '-'}</span>
+                  </div>
+                </td>
                 <td><div className="os-cell" title={`${session.os || '-'} ${session.arch || ''}`.trim()}><span>{session.os || '-'}</span></div></td>
                 <td><Badge tone={hb.tone}>{hb.text}</Badge></td>
                 <td><div className="actions">
