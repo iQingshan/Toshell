@@ -117,3 +117,4 @@ docs/rust-probe/cargo-tls/target/
 # 对外只发布脱敏后的「修复说明 + 验证证据」（见 docs/SECURITY-FIXES-1.4.2.md）。
 Toshell_AUDIT_*.md
 .tmp-watch/
+/toserver
