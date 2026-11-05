@@ -20,7 +20,9 @@
 - 新增**载荷托管**：`listener.payload_host_enabled`（默认开）后，载荷由**监听器端口**下发，地址形如 `http://<public_host>:<listener.port>/s/<token>/build-xxx.exe` —— 命令行与目标机日志里不再出现面板端口和 `/api/v1/implant/payload/`。
 - `token = HMAC-SHA256(listener.encryption_key, "payload:"+构建ID)` 前 12 位：由构建 ID 决定，**永久稳定、可重复下载**，服务端重启后一致，不落库；密钥为空时自动退回面板地址。
 - 一条命令上线（含载荷列表「重新生成命令」）优先用托管地址；`listener.payload_host_prefix` 可改成 `static/assets/dl` 之类的伪静态目录；`listener.payload_url_ttl` 默认 0（永久），设成非 0 才按创建时间过期（410）。
+- 新增 `listener.payload_host_port`：托管起在**独立只读端口**（默认 0 = 自动取 `listener.port + 1`），因此**不依赖** HTTP 轮询监听器（C2 端口是 TCP/HTTP 互斥的，TCP 部署下也能用）。绑定失败只 WARN 并回退面板地址。
 - 面板原来的 `/api/v1/implants/stored/{id}` 保留可用；两者走同一套目录边界校验，不新增文件读面。
+- 一条命令上线响应里的 `one_liner_host / one_liner_base` 在启用托管时回填为托管主机:端口，避免"命令里是托管地址、提示里却是面板地址"的错位。
 - ⚠️ 托管依赖 HTTP(S) 轮询监听器在该端口上运行：监听器端口 TCP/HTTP 互斥，TCP 类型时托管地址没人应答，服务端**自动回退**为面板地址。
 
 **稳定性**

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -371,6 +372,16 @@ func (s *Server) createBuilderHandler(w http.ResponseWriter, r *http.Request) {
 		response.OneLiners = set.Variants
 		if len(set.Variants) > 0 {
 			response.OneLiner = set.Variants[0].Command
+		}
+		// 用了托管地址时，命令里的主机其实是**监听器/托管端口**，
+		// 上面解析出的 one_liner_host 会显示成面板地址，容易让人以为命令没生效。
+		// 这里按托管地址回填，UI 显示的"下载主机/基址"与命令里一致。
+		if hostedURL != "" {
+			if u, uerr := url.Parse(hostedURL); uerr == nil && u.Host != "" {
+				response.OneLinerHost = u.Host
+				response.OneLinerBase = u.Scheme + "://" + u.Host
+				response.OneLinerWarning = ""
+			}
 		}
 	}
 

@@ -39,11 +39,40 @@ import (
 // SetPayloadHostReady 标记「HTTP 监听器确实在跑」（v1.4.3 #15b-B）。
 //
 // 为什么需要：监听器端口是 TCP 与 HTTP **互斥**的（TCP 起得来就跳过 HTTP）。
-// 只有 HTTP 监听器真的在监听时，`/<prefix>/<token>/<name>` 才有人应答；
-// 否则签出的地址会指向一个说 TSHL 帧的端口，载荷下载必失败。由 main.go 在
-// HTTP 监听器启动成功后置 true。
+// 只有 HTTP 监听器真的在监听时，`/<prefix>/<token>/<name>` 才有人应答。
 func (s *Server) SetPayloadHostReady(ok bool) {
 	s.payloadHostReady.Store(ok)
+}
+
+// SetPayloadHostPort 记录独立托管端口的实际监听端口（v1.4.3）。
+// 只有它真的绑定成功才会被调用；0 表示走「HTTP 监听器端口」或不可用。
+func (s *Server) SetPayloadHostPort(port uint16) {
+	s.payloadHostPort.Store(uint32(port))
+}
+
+// PayloadHostRoute 返回托管路由所需的三件套，供 main.go 启动独立托管端口：
+// prefix（已归一化，空 = 未启用）、handler、是否可用。
+//
+// 可用条件是「开关打开 + 前缀合法 + 有稳定密钥」；端口绑定成功与否由调用方决定。
+func (s *Server) PayloadHostRoute() (string, func(http.ResponseWriter, *http.Request, string) bool, bool) {
+	if s.cfg == nil || !s.cfg.Listener.PayloadHostEnabled {
+		return "", nil, false
+	}
+	p := strings.Trim(strings.TrimSpace(s.cfg.Listener.PayloadHostPrefix), "/")
+	if p == "" {
+		p = "s"
+	}
+	for _, r := range p {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-'
+		if !ok {
+			return "", nil, false
+		}
+	}
+	if s.payloadHostSecret() == nil {
+		return "", nil, false
+	}
+	return p, s.HostedPayloadHandler, true
 }
 
 // payloadHostToken 计算某次构建的托管 token（12 字节 hex）。
@@ -84,9 +113,9 @@ func (s *Server) payloadHostPrefix() string {
 	if s.cfg == nil || !s.cfg.Listener.PayloadHostEnabled {
 		return ""
 	}
-	// HTTP 监听器没跑起来时签出的地址没人应答（端口被 TCP 监听器占着），
-	// 这种情况直接回退到面板地址。
-	if !s.payloadHostReady.Load() {
+	// 两种可用形态：独立托管端口（已绑定成功），或 HTTP 监听器在跑。
+	// 两者都没有时签出的地址没人应答（端口被 TCP 监听器占着），回退面板地址。
+	if s.payloadHostPort.Load() == 0 && !s.payloadHostReady.Load() {
 		return ""
 	}
 	p := strings.Trim(strings.TrimSpace(s.cfg.Listener.PayloadHostPrefix), "/")
@@ -148,12 +177,20 @@ func (s *Server) hostedPayloadURL(r *http.Request, imp *database.StoredImplant) 
 	} else {
 		host = defaultHostFromRequest(r)
 	}
-	if host == "" || s.cfg.Listener.Port == 0 {
+	if host == "" {
+		return ""
+	}
+	// 端口优先用「独立托管端口」，其次用「HTTP 监听器端口」。
+	port := uint16(s.payloadHostPort.Load())
+	if port == 0 {
+		port = s.cfg.Listener.Port
+	}
+	if port == 0 {
 		return ""
 	}
 	return (&url.URL{
 		Scheme: scheme,
-		Host:   net.JoinHostPort(host, itoaUint16(s.cfg.Listener.Port)),
+		Host:   net.JoinHostPort(host, itoaUint16(port)),
 		Path:   "/" + prefix + "/" + token + "/" + name,
 	}).String()
 }

@@ -378,6 +378,10 @@ type ListenerConfig struct {
 	// **同一个载荷的 URL 永久稳定、可重复下载**（服务端重启后也一致），且不落库。
 	// 密钥取 listener.encryption_key；未配置时退回 auth.jwt_key。
 	PayloadHostEnabled bool `mapstructure:"payload_host_enabled" json:"payload_host_enabled"`
+	// PayloadHostPort 托管端口的**独立监听端口**（v1.4.3）。
+	// 0 = 自动取 listener.port + 1（默认，开箱即可用，不依赖 HTTP 轮询监听器）；
+	// 显式写端口则用该端口。绑定失败时自动回退到面板地址（不影响 C2 主链路）。
+	PayloadHostPort uint16 `mapstructure:"payload_host_port" json:"payload_host_port"`
 	// PayloadHostPrefix 第一段路径，建议起个伪静态目录名（s / static / assets / dl）。
 	// 只允许 [A-Za-z0-9._-]，空 = 使用 "s"。
 	PayloadHostPrefix string `mapstructure:"payload_host_prefix" json:"payload_host_prefix"`
@@ -863,6 +867,7 @@ func Load(configPath string) (*Config, error) {
 	// 载荷托管（v1.4.3 #15b-B）：默认开启，路径取 /s/<token>/<文件名>，
 	// TTL=0 表示永久有效、可重复下载。想回到"从面板端口下载"就把它设成 false。
 	viper.SetDefault("listener.payload_host_enabled", true)
+	viper.SetDefault("listener.payload_host_port", 0)
 	viper.SetDefault("listener.payload_host_prefix", "s")
 	viper.SetDefault("listener.payload_url_ttl", 0)
 

@@ -27,6 +27,8 @@ import (
 	"toshell/internal/server/listener"
 	"toshell/internal/server/logging"
 	mcpsrv "toshell/internal/server/mcp"
+	"toshell/internal/server/mimicry"
+	"toshell/internal/server/payloadhost"
 	"toshell/internal/server/plugin"
 	"toshell/internal/server/session"
 	"toshell/internal/server/task"
@@ -322,6 +324,27 @@ func NewServer(cfgPath string) (*Server, error) {
 	// 直接使用会导致所有静态资源 404，故用 stripRootFS 适配。
 	if subFS, err := fs.Sub(webDistFS, "webdist"); err == nil {
 		apiServer.SetWebFS(&stripRootFS{fsys: http.FS(subFS)})
+	}
+
+	// ── 载荷托管独立端口（v1.4.3 #15b-B）──────────────────────────────────
+	// C2 监听器端口是 TCP/HTTP 互斥的（默认在跑 TCP，答不了 HTTP 下载），
+	// 所以托管单独开一个只读端口：/<prefix>/<token>/<文件名> 下载载荷，
+	// 其余请求回拟态诱饵页。端口 0 = 自动取 listener.port + 1。
+	// 绑定失败只 WARN，下载地址自动回退到面板端口，不影响 C2 主链路。
+	if prefix, phHandler, ok := apiServer.PayloadHostRoute(); ok {
+		phPort := cfg.Listener.PayloadHostPort
+		if phPort == 0 && cfg.Listener.Port < 65535 {
+			phPort = cfg.Listener.Port + 1
+		}
+		if phPort != 0 {
+			phSrv := payloadhost.New(prefix, phHandler, mimicry.ByName(cfg.Listener.MimicryProfile).DecoyHandler())
+			if err := phSrv.Start(cfg.Listener.Host, phPort); err != nil {
+				logging.Warn("server", "载荷托管端口不可用（下载地址回退到面板端口）：%v", err)
+			} else {
+				apiServer.SetPayloadHostPort(phPort)
+				logging.Info("server", "载荷托管已启动：http://<public_host>:%d/%s/<token>/<文件名>（永久有效、可重复下载）", phPort, prefix)
+			}
+		}
 	}
 
 	// Wire up task result callback to broadcast via WebSocket to frontend
