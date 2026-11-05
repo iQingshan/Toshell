@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     tags: [ 'v*' ]
+  # 手动补发：tag 已经存在但流水线没跑/跑挂了时，不用删 tag 重推，
+  # 直接在工作流里点 Run workflow（tag 名从输入取）。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已存在的 tag（如 v1.4.3）；留空 = 用当前分支'
+        required: false
 
 permissions:
   contents: write
@@ -18,6 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch 补发时按输入 tag 取代码；push(tag) 时输入为空，行为不变
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -48,6 +58,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch 补发时按输入 tag 取代码；push(tag) 时输入为空，行为不变
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           name: webdist
@@ -91,6 +104,9 @@ jobs:
           - { goos: darwin,  goarch: arm64, ext: '', zip: toshell-server-darwin-arm64.zip, deploy: release/deploy.sh }
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch 补发时按输入 tag 取代码；push(tag) 时输入为空，行为不变
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           name: webdist
@@ -190,6 +206,9 @@ jobs:
       # 必须先 checkout：files 里的 LICENSE/DISCLAIMER/THIRD-PARTY-NOTICES 在仓库里，
       # 不 checkout 会被 softprops 静默跳过（v1.3.4/1.3.5 实测如此）。
       - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch 补发时按输入 tag 取代码；push(tag) 时输入为空，行为不变
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/download-artifact@v4
         with:
