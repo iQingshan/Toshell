@@ -363,7 +363,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/e2e_smoke.ps1
 | 渠道 / Channel | 地址 / Link |
 | :--- | :--- |
 | 作者 / Author | 青山（iQingshan） |
-| 交流群 / Group | **ToShell 测试群**（QQ 群，扫码加入，见下图） |
+| 交流群 / Group | **ToShell 测试群**（二维码失效联系邮箱） |
 | GitHub | [@iQingshan](https://github.com/iQingshan) |
 | 邮箱 / Email | [qingshan@88.com](mailto:qingshan@88.com) |
 | Issue / 功能建议 | [提交 Issue](https://github.com/iQingshan/Toshell/issues) |
