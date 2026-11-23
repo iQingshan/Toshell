@@ -372,7 +372,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/e2e_smoke.ps1
 
 **交流群（ToShell 测试群）** —— 装不上、跑不通、想聊思路都可以进群；**能复现的 Bug 仍建议提 Issue**，这样别人也能搜到答案。
 
-<img src="docs/contact/toshell-group.png" width="300" alt="ToShell 测试群 二维码">
+<img src="docs/toshell-group.png" width="300" alt="ToShell 测试群 二维码">
 
 > 使用问题、配置排查、功能建议：优先提 Issue（附版本、系统环境、复现步骤与相关日志），这样别人也能搜到答案。
 > 商务合作 / 授权咨询 / 漏洞披露：邮件联系。
